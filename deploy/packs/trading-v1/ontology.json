@@ -1,0 +1,88 @@
+{
+  "name": "trading-floor-v1",
+  "version": "1.0.0",
+  "domains": {
+    "geopolitical": {
+      "description": "Wars, sanctions, elections, diplomatic shifts",
+      "instruments": ["energy_etf", "defense_etf", "forex", "commodities", "country_etf"],
+      "cascade_targets": ["macro", "corporate", "volatility"]
+    },
+    "macro": {
+      "description": "Central banks, inflation, employment, GDP",
+      "instruments": ["rates", "indices", "sector_etf", "forex", "vol_products"],
+      "cascade_targets": ["corporate", "flows", "volatility"]
+    },
+    "corporate": {
+      "description": "Earnings, filings, M&A, management changes",
+      "instruments": ["single_equity", "single_options"],
+      "cascade_targets": ["flows", "sector"]
+    },
+    "flows": {
+      "description": "Options flow, dark pools, sentiment, positioning",
+      "instruments": ["single_equity", "single_options", "etf"],
+      "cascade_targets": ["volatility"]
+    },
+    "tail": {
+      "description": "Black swans, systemic stress, rare events",
+      "instruments": ["far_otm_options", "vol_products", "safe_haven"],
+      "cascade_targets": ["*"]
+    },
+    "volatility": {
+      "description": "IV vs RV, term structure, skew, vol-of-vol",
+      "instruments": ["options", "vix_products", "variance_swaps"],
+      "cascade_targets": []
+    },
+    "sector": {
+      "description": "Deep single-sector knowledge",
+      "instruments": ["single_equity", "single_options", "sector_etf"],
+      "cascade_targets": ["corporate"]
+    },
+    "systematic": {
+      "description": "Quantitative rules-based strategies",
+      "instruments": ["equity", "futures", "options"],
+      "cascade_targets": []
+    }
+  },
+  "asset_classes": {
+    "equity": { "risk_base": 2, "markets": "US, Europe, Asia" },
+    "options": { "risk_base": 3, "markets": "US, Europe" },
+    "futures": { "risk_base": 3, "markets": "CME, ICE, Eurex, SGX" },
+    "forex": { "risk_base": 3, "markets": "Global" },
+    "bonds": { "risk_base": 2, "markets": "US Treasury, Corporate" },
+    "etf": { "risk_base": 1, "markets": "US, Europe" }
+  },
+  "regime_dimensions": [
+    {
+      "name": "volatility",
+      "levels": ["low", "medium", "high", "extreme"],
+      "indicator": "VIX",
+      "thresholds": [15, 25, 35]
+    },
+    {
+      "name": "trend",
+      "levels": ["trending_up", "neutral", "trending_down"],
+      "indicator": "ADX + direction",
+      "thresholds": [25]
+    },
+    {
+      "name": "risk",
+      "levels": ["risk_on", "neutral", "risk_off"],
+      "indicator": "credit_spreads + safe_haven_flows"
+    },
+    {
+      "name": "liquidity",
+      "levels": ["normal", "stressed", "crisis"],
+      "indicator": "bid_ask_spreads + market_depth"
+    }
+  ],
+  "cascade_paths": [
+    { "from": "geopolitical_event", "to": "commodity_price", "typical_lag": "2-8h" },
+    { "from": "commodity_price", "to": "sector_equity", "typical_lag": "4-24h" },
+    { "from": "central_bank_action", "to": "rates", "typical_lag": "0-1h" },
+    { "from": "rates", "to": "equity_sectors", "typical_lag": "1-48h" },
+    { "from": "earnings_surprise", "to": "sector_peers", "typical_lag": "1-24h" },
+    { "from": "military_action", "to": "defense_stocks", "typical_lag": "1-4h" },
+    { "from": "military_action", "to": "cyber_stocks", "typical_lag": "12-72h" },
+    { "from": "sanctions", "to": "commodity_supply", "typical_lag": "4-48h" }
+  ]
+}

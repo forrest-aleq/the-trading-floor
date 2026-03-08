@@ -1,0 +1,151 @@
+{
+  "version": "1.0.0",
+  "capabilities": {
+    "equity": {
+      "equity.long": {
+        "risk_tier": 2,
+        "description": "Buy shares, hold for thesis duration",
+        "required_beliefs": ["trust >= 0.50"],
+        "cascades_to": ["equity.pairs"]
+      },
+      "equity.short": {
+        "risk_tier": 3,
+        "description": "Short sell shares",
+        "required_beliefs": ["trust >= 0.65"],
+        "cascades_to": ["equity.pairs"],
+        "requires_locate": true
+      },
+      "equity.pairs": {
+        "risk_tier": 2,
+        "description": "Long/short pair trade",
+        "required_beliefs": ["trust >= 0.55"]
+      }
+    },
+    "options": {
+      "options.long_call": {
+        "risk_tier": 2,
+        "description": "Buy call options",
+        "required_beliefs": ["trust >= 0.50"],
+        "max_dte": 90,
+        "cascades_to": ["options.bull_call_spread"]
+      },
+      "options.long_put": {
+        "risk_tier": 2,
+        "description": "Buy put options",
+        "required_beliefs": ["trust >= 0.50"],
+        "max_dte": 90,
+        "cascades_to": ["options.bear_put_spread"]
+      },
+      "options.covered_call": {
+        "risk_tier": 1,
+        "description": "Sell calls against long shares",
+        "required_beliefs": ["trust >= 0.40"],
+        "cascades_to": ["options.cash_secured_put"]
+      },
+      "options.cash_secured_put": {
+        "risk_tier": 2,
+        "description": "Sell puts with cash collateral",
+        "required_beliefs": ["trust >= 0.50"],
+        "cascades_to": ["options.covered_call"]
+      },
+      "options.bull_call_spread": {
+        "risk_tier": 2,
+        "description": "Buy call, sell higher strike call",
+        "required_beliefs": ["trust >= 0.50"]
+      },
+      "options.bear_put_spread": {
+        "risk_tier": 2,
+        "description": "Buy put, sell lower strike put",
+        "required_beliefs": ["trust >= 0.50"]
+      },
+      "options.iron_condor": {
+        "risk_tier": 2,
+        "description": "Sell OTM put spread + OTM call spread",
+        "required_beliefs": ["trust >= 0.60"],
+        "multi_leg": true,
+        "legs": 4
+      },
+      "options.straddle": {
+        "risk_tier": 3,
+        "description": "Buy call + put at same strike",
+        "required_beliefs": ["trust >= 0.60"]
+      },
+      "options.strangle": {
+        "risk_tier": 3,
+        "description": "Buy OTM call + OTM put",
+        "required_beliefs": ["trust >= 0.60"]
+      },
+      "options.calendar_spread": {
+        "risk_tier": 2,
+        "description": "Sell near-term, buy far-term same strike",
+        "required_beliefs": ["trust >= 0.55"]
+      },
+      "options.ratio_spread": {
+        "risk_tier": 4,
+        "description": "Unequal quantities at different strikes",
+        "required_beliefs": ["trust >= 0.75"]
+      },
+      "options.naked_put": {
+        "risk_tier": 4,
+        "description": "Sell puts without collateral",
+        "required_beliefs": ["trust >= 0.80", "autonomy == autonomous"]
+      },
+      "options.naked_call": {
+        "risk_tier": 5,
+        "description": "Sell calls without shares — unlimited risk",
+        "required_beliefs": ["trust >= 0.85", "autonomy == autonomous"],
+        "ceo_approval": true
+      },
+      "options.butterfly": {
+        "risk_tier": 2,
+        "description": "Defined risk, defined reward",
+        "required_beliefs": ["trust >= 0.55"],
+        "multi_leg": true,
+        "legs": 3
+      }
+    },
+    "macro": {
+      "macro.futures_long": {
+        "risk_tier": 3,
+        "description": "Buy futures contracts",
+        "required_beliefs": ["trust >= 0.60"],
+        "margin_required": true
+      },
+      "macro.futures_short": {
+        "risk_tier": 3,
+        "description": "Sell futures contracts",
+        "required_beliefs": ["trust >= 0.60"],
+        "margin_required": true
+      },
+      "macro.futures_spread": {
+        "risk_tier": 2,
+        "description": "Calendar or inter-commodity spread",
+        "required_beliefs": ["trust >= 0.55"]
+      },
+      "macro.forex": {
+        "risk_tier": 3,
+        "description": "Currency pair trading",
+        "required_beliefs": ["trust >= 0.60"]
+      }
+    },
+    "tail": {
+      "tail.far_otm_puts": {
+        "risk_tier": 2,
+        "description": "Buy far OTM puts — small premium, defined risk",
+        "required_beliefs": ["trust >= 0.40"],
+        "max_premium_pct": 0.5
+      },
+      "tail.far_otm_calls": {
+        "risk_tier": 2,
+        "description": "Buy far OTM calls — small premium, defined risk",
+        "required_beliefs": ["trust >= 0.40"],
+        "max_premium_pct": 0.5
+      },
+      "tail.straddle_basket": {
+        "risk_tier": 3,
+        "description": "Basket of straddles across correlated instruments",
+        "required_beliefs": ["trust >= 0.55"]
+      }
+    }
+  }
+}

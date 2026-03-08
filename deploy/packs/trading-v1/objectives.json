@@ -1,0 +1,49 @@
+{
+  "version": "1.0.0",
+  "portfolio_targets": {
+    "daily_return_pct": 2.0,
+    "sharpe_ratio_30d": 2.0,
+    "max_drawdown_pct": 10.0,
+    "win_rate_pct": 52.0,
+    "profit_factor": 1.3,
+    "trades_per_day": { "min": 10, "max": 50 },
+    "uptime_pct": 99.0,
+    "ibkr_reconciliation_match_pct": 100.0
+  },
+  "desk_targets": {
+    "min_sharpe_30d": 0.5,
+    "max_daily_loss_pct": 3.0,
+    "min_trades_for_evaluation": 50,
+    "min_days_for_capital_realloc": 14
+  },
+  "belief_targets": {
+    "min_trials_for_trust_75": 50,
+    "min_trials_for_autonomous": 100,
+    "min_trades_new_regime": 20,
+    "quarterly_decay_pct": 12.0,
+    "backfill_haircut_pct": 30.0,
+    "engram_min_observations": 10
+  },
+  "ab_test": {
+    "group_a_desks": 20,
+    "group_b_desks": 20,
+    "capital_per_desk": 25000,
+    "evaluation_days": 30,
+    "significance_threshold": 0.05,
+    "primary_metric": "sharpe_ratio",
+    "secondary_metrics": ["win_rate", "profit_factor", "max_drawdown"]
+  },
+  "anti_portfolio": {
+    "evaluate_after_hours": 72,
+    "profitable_threshold_pct": 60,
+    "action_if_anti_profitable": "loosen_prosecution",
+    "action_if_anti_unprofitable": "maintain_prosecution"
+  },
+  "thesis_health": {
+    "initial": 0.85,
+    "full_position_above": 0.7,
+    "reduce_50pct_below": 0.5,
+    "close_75pct_below": 0.3,
+    "close_all_below": 0.2
+  }
+}

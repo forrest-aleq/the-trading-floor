@@ -1,0 +1,75 @@
+{
+  "version": "1.0.0",
+  "description": "All deterministic. No LLM. Pass or block.",
+  "per_desk": {
+    "max_daily_loss_pct": 3.0,
+    "max_single_position_pct": 20.0,
+    "max_correlated_positions": 3,
+    "max_open_positions": 10,
+    "halt_on_daily_loss": true,
+    "capital_per_desk": 25000
+  },
+  "per_trade": {
+    "max_position_size_pct": 10.0,
+    "min_conviction_score": 0.65,
+    "min_prosecution_survival": true,
+    "required_kill_conditions": true,
+    "require_capability_token": true,
+    "token_max_ttl_minutes": 60
+  },
+  "portfolio_level": {
+    "total_capital": 1000000,
+    "max_single_factor_exposure_pct": 25.0,
+    "max_total_drawdown_pct": 10.0,
+    "regime_shift_forces_reasoning_mode": true,
+    "kill_switch_drawdown_pct": 15.0,
+    "max_gross_exposure_pct": 200.0,
+    "max_net_exposure_pct": 100.0,
+    "max_cash_deploy_pct": 80.0,
+    "reconciliation_interval_seconds": 60
+  },
+  "risk_tiers": {
+    "1": {
+      "description": "Lowest risk — covered calls, defined risk spreads",
+      "min_trust": 0.40,
+      "min_autonomy": "restricted",
+      "council_required": false
+    },
+    "2": {
+      "description": "Standard risk — directional equity, spreads, defined risk options",
+      "min_trust": 0.50,
+      "min_autonomy": "restricted",
+      "council_required": false
+    },
+    "3": {
+      "description": "Elevated risk — straddles, futures, forex",
+      "min_trust": 0.60,
+      "min_autonomy": "supervised",
+      "council_required_above_pct": 2.0
+    },
+    "4": {
+      "description": "High risk — ratio spreads, naked puts",
+      "min_trust": 0.75,
+      "min_autonomy": "supervised",
+      "council_required": true
+    },
+    "5": {
+      "description": "Maximum risk — naked calls, unlimited downside",
+      "min_trust": 0.85,
+      "min_autonomy": "autonomous",
+      "council_required": true,
+      "ceo_approval": true
+    }
+  },
+  "kill_switch": {
+    "portfolio_drawdown_pct": 15.0,
+    "action": "halt_all_close_all",
+    "cooldown_hours": 24,
+    "manual_override": true,
+    "system_anomaly_triggers": [
+      "correlated_desk_failures_gt_3",
+      "data_feed_corruption",
+      "broker_api_instability_gt_5min"
+    ]
+  }
+}

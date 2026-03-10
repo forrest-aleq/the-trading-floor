@@ -14,8 +14,8 @@ import (
 
 // Desk orchestrates thesis formation through the trio conversation
 type Desk struct {
-	log    *slog.Logger
-	llm    *llm.Router
+	log           *slog.Logger
+	llm           *llm.Router
 	minConviction float64
 }
 
@@ -88,7 +88,16 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 	// Build thesis
 	evidence := make([]model.Evidence, len(result.Evidence))
 	for i, e := range result.Evidence {
-		evidence[i] = model.Evidence{Content: e, Weight: 1.0}
+		signalID := ""
+		if i < len(opp.SignalIDs) {
+			signalID = opp.SignalIDs[i]
+		}
+		evidence[i] = model.Evidence{
+			Source:   "signal",
+			Content:  e,
+			Weight:   1.0,
+			SignalID: signalID,
+		}
 	}
 
 	killRules := make([]model.KillRule, len(result.KillRules))
@@ -106,13 +115,13 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 		DeskID:        deskID,
 		Strategy:      result.Strategy,
 		Instrument: model.Instrument{
-			Symbol:     result.Instrument.Symbol,
-			SecType:    result.Instrument.SecType,
-			Currency:   result.Instrument.Currency,
-			Exchange:   result.Instrument.Exchange,
-			Expiry:     result.Instrument.Expiry,
-			Strike:     result.Instrument.Strike,
-			Right:      result.Instrument.Right,
+			Symbol:   result.Instrument.Symbol,
+			SecType:  result.Instrument.SecType,
+			Currency: result.Instrument.Currency,
+			Exchange: result.Instrument.Exchange,
+			Expiry:   result.Instrument.Expiry,
+			Strike:   result.Instrument.Strike,
+			Right:    result.Instrument.Right,
 		},
 		Direction:    model.TradeDirection(result.Direction),
 		Conviction:   result.Conviction,

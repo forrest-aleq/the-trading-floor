@@ -9,13 +9,22 @@ import (
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
+type Broker interface {
+	IsConnected() bool
+	IsPaper() bool
+	PlaceOrder(context.Context, model.Order) (*model.Fill, error)
+	CancelOrder(context.Context, int64) error
+	GetPositions(context.Context) ([]ibkr.IBKRPosition, error)
+	GetAccountSummary(context.Context) (*ibkr.AccountSummary, error)
+}
+
 // Manager handles order lifecycle
 type Manager struct {
-	ibkr *ibkr.Client
+	ibkr Broker
 	log  *slog.Logger
 }
 
-func NewManager(ibkrClient *ibkr.Client) *Manager {
+func NewManager(ibkrClient Broker) *Manager {
 	return &Manager{
 		ibkr: ibkrClient,
 		log:  slog.Default().With("component", "execution"),

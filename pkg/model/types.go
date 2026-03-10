@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strconv"
 	"time"
 )
 
@@ -14,28 +15,47 @@ const (
 
 // Instrument represents any tradeable instrument across all asset classes
 type Instrument struct {
-	Symbol      string `json:"symbol"`
-	Exchange    string `json:"exchange,omitempty"`
-	SecType     string `json:"sec_type"` // STK, OPT, FUT, CASH, BOND
-	Currency    string `json:"currency"`
-	Expiry      string `json:"expiry,omitempty"`       // Options/futures
-	Strike      float64 `json:"strike,omitempty"`      // Options
-	Right       string `json:"right,omitempty"`        // C or P for options
-	Multiplier  string `json:"multiplier,omitempty"`   // Contract multiplier
-	ConID       int64  `json:"con_id,omitempty"`       // IBKR contract ID
+	Symbol     string  `json:"symbol"`
+	Exchange   string  `json:"exchange,omitempty"`
+	SecType    string  `json:"sec_type"` // STK, OPT, FUT, CASH, BOND
+	Currency   string  `json:"currency"`
+	Expiry     string  `json:"expiry,omitempty"`     // Options/futures
+	Strike     float64 `json:"strike,omitempty"`     // Options
+	Right      string  `json:"right,omitempty"`      // C or P for options
+	Multiplier string  `json:"multiplier,omitempty"` // Contract multiplier
+	ConID      int64   `json:"con_id,omitempty"`     // IBKR contract ID
+}
+
+func (i Instrument) MultiplierValue() float64 {
+	if i.Multiplier != "" {
+		if parsed, err := strconv.ParseFloat(i.Multiplier, 64); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+
+	switch i.SecType {
+	case "OPT":
+		return 100
+	default:
+		return 1
+	}
+}
+
+func (i Instrument) Notional(price, quantity float64) float64 {
+	return price * quantity * i.MultiplierValue()
 }
 
 // Opportunity is scanner output — a tradeable setup detected from signals
 type Opportunity struct {
-	ID          string       `json:"id"`
-	SignalIDs   []string     `json:"signal_ids"`
-	Instruments []Instrument `json:"instruments"`
+	ID          string         `json:"id"`
+	SignalIDs   []string       `json:"signal_ids"`
+	Instruments []Instrument   `json:"instruments"`
 	Direction   TradeDirection `json:"direction"`
-	Urgency     float64      `json:"urgency"`
-	Score       float64      `json:"score"`
-	Category    string       `json:"category"`
-	CascadeInfo *CascadeInfo `json:"cascade_info,omitempty"`
-	CreatedAt   time.Time    `json:"created_at"`
+	Urgency     float64        `json:"urgency"`
+	Score       float64        `json:"score"`
+	Category    string         `json:"category"`
+	CascadeInfo *CascadeInfo   `json:"cascade_info,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
 }
 
 type CascadeInfo struct {
@@ -49,11 +69,11 @@ type CascadeInfo struct {
 type ThesisStatus string
 
 const (
-	ThesisEmbryo      ThesisStatus = "embryo"
-	ThesisNursery     ThesisStatus = "nursery"
-	ThesisProsecuted  ThesisStatus = "prosecuted"
-	ThesisActive      ThesisStatus = "active"
-	ThesisResolved    ThesisStatus = "resolved"
+	ThesisEmbryo     ThesisStatus = "embryo"
+	ThesisNursery    ThesisStatus = "nursery"
+	ThesisProsecuted ThesisStatus = "prosecuted"
+	ThesisActive     ThesisStatus = "active"
+	ThesisResolved   ThesisStatus = "resolved"
 )
 
 // Thesis is the core research output
@@ -65,33 +85,33 @@ type Thesis struct {
 	Instrument    Instrument     `json:"instrument"`
 	Direction     TradeDirection `json:"direction"`
 
-	Conviction    float64        `json:"conviction"`
-	Health        float64        `json:"health"`
-	Evidence      []Evidence     `json:"evidence"`
-	CounterArgs   []string       `json:"counter_args"`
+	Conviction  float64    `json:"conviction"`
+	Health      float64    `json:"health"`
+	Evidence    []Evidence `json:"evidence"`
+	CounterArgs []string   `json:"counter_args"`
 
-	EntryPrice    float64        `json:"entry_price"`
-	TargetPrice   float64        `json:"target_price"`
-	StopLoss      float64        `json:"stop_loss"`
-	PositionSize  float64        `json:"position_size"`
-	TimeHorizon   time.Duration  `json:"time_horizon"`
+	EntryPrice   float64       `json:"entry_price"`
+	TargetPrice  float64       `json:"target_price"`
+	StopLoss     float64       `json:"stop_loss"`
+	PositionSize float64       `json:"position_size"`
+	TimeHorizon  time.Duration `json:"time_horizon"`
 
-	KillRules     []KillRule     `json:"kill_rules"`
-	Status        ThesisStatus   `json:"status"`
+	KillRules []KillRule   `json:"kill_rules"`
+	Status    ThesisStatus `json:"status"`
 
-	Prosecution   *Prosecution   `json:"prosecution,omitempty"`
+	Prosecution    *Prosecution    `json:"prosecution,omitempty"`
 	CouncilVerdict *CouncilVerdict `json:"council_verdict,omitempty"`
-	Outcome       *ThesisOutcome `json:"outcome,omitempty"`
+	Outcome        *ThesisOutcome  `json:"outcome,omitempty"`
 
-	CreatedAt     time.Time      `json:"created_at"`
-	ResolvedAt    *time.Time     `json:"resolved_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 }
 
 type Evidence struct {
-	Source     string  `json:"source"`
-	Content   string  `json:"content"`
-	Weight    float64 `json:"weight"`
-	SignalID  string  `json:"signal_id,omitempty"`
+	Source   string  `json:"source"`
+	Content  string  `json:"content"`
+	Weight   float64 `json:"weight"`
+	SignalID string  `json:"signal_id,omitempty"`
 }
 
 type KillRule struct {
@@ -108,10 +128,10 @@ type Prosecution struct {
 }
 
 type CouncilVerdict struct {
-	Approved     bool                `json:"approved"`
-	Perspectives map[string]string   `json:"perspectives"` // archetype → view
-	AdjustedSize float64             `json:"adjusted_size,omitempty"`
-	AdjustedConviction float64       `json:"adjusted_conviction,omitempty"`
+	Approved           bool              `json:"approved"`
+	Perspectives       map[string]string `json:"perspectives"` // archetype → view
+	AdjustedSize       float64           `json:"adjusted_size,omitempty"`
+	AdjustedConviction float64           `json:"adjusted_conviction,omitempty"`
 }
 
 type ThesisOutcome struct {
@@ -153,33 +173,33 @@ const (
 
 // Fill is what comes back from IBKR after execution
 type Fill struct {
-	OrderID     string     `json:"order_id"`
-	IBKROrderID int64      `json:"ibkr_order_id"`
-	Instrument  Instrument `json:"instrument"`
+	OrderID     string         `json:"order_id"`
+	IBKROrderID int64          `json:"ibkr_order_id"`
+	Instrument  Instrument     `json:"instrument"`
 	Direction   TradeDirection `json:"direction"`
-	Quantity    float64    `json:"quantity"`
-	AvgPrice    float64    `json:"avg_price"`
-	Commission  float64    `json:"commission"`
-	FilledAt    time.Time  `json:"filled_at"`
+	Quantity    float64        `json:"quantity"`
+	AvgPrice    float64        `json:"avg_price"`
+	Commission  float64        `json:"commission"`
+	FilledAt    time.Time      `json:"filled_at"`
 }
 
 // Position is a live position in the book
 type Position struct {
-	ID            string         `json:"id"`
-	ThesisID      string         `json:"thesis_id"`
-	DeskID        string         `json:"desk_id"`
-	Instrument    Instrument     `json:"instrument"`
-	Direction     TradeDirection `json:"direction"`
-	Quantity      float64        `json:"quantity"`
-	EntryPrice    float64        `json:"entry_price"`
-	CurrentPrice  float64        `json:"current_price"`
-	UnrealizedPnL float64        `json:"unrealized_pnl"`
-	RealizedPnL   float64        `json:"realized_pnl"`
-	IBKROrderID   int64          `json:"ibkr_order_id,omitempty"`
-	IBKRContractID int64         `json:"ibkr_contract_id,omitempty"`
-	Status        string         `json:"status"` // open, closing, closed
-	OpenedAt      time.Time      `json:"opened_at"`
-	ClosedAt      *time.Time     `json:"closed_at,omitempty"`
+	ID             string         `json:"id"`
+	ThesisID       string         `json:"thesis_id"`
+	DeskID         string         `json:"desk_id"`
+	Instrument     Instrument     `json:"instrument"`
+	Direction      TradeDirection `json:"direction"`
+	Quantity       float64        `json:"quantity"`
+	EntryPrice     float64        `json:"entry_price"`
+	CurrentPrice   float64        `json:"current_price"`
+	UnrealizedPnL  float64        `json:"unrealized_pnl"`
+	RealizedPnL    float64        `json:"realized_pnl"`
+	IBKROrderID    int64          `json:"ibkr_order_id,omitempty"`
+	IBKRContractID int64          `json:"ibkr_contract_id,omitempty"`
+	Status         string         `json:"status"` // open, closing, closed
+	OpenedAt       time.Time      `json:"opened_at"`
+	ClosedAt       *time.Time     `json:"closed_at,omitempty"`
 }
 
 // RiskDecision is the output of the risk gate
@@ -197,12 +217,12 @@ type Violation struct {
 }
 
 type CapToken struct {
-	Capability  string            `json:"capability"`
+	Capability  string                 `json:"capability"`
 	Constraints map[string]interface{} `json:"constraints"`
-	DeskID      string            `json:"desk_id"`
-	Expiry      time.Time         `json:"expiry"`
-	Nonce       string            `json:"nonce"`
-	Signature   string            `json:"signature"`
+	DeskID      string                 `json:"desk_id"`
+	Expiry      time.Time              `json:"expiry"`
+	Nonce       string                 `json:"nonce"`
+	Signature   string                 `json:"signature"`
 }
 
 // AutonomyMode from MARS

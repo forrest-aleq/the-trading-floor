@@ -7,15 +7,16 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/scmhub/ibsync"
 )
 
-// Config for IBKR Gateway connection
+// Config for IBKR Gateway connection.
 type Config struct {
-	Host     string // Gateway host (default: 127.0.0.1)
-	Port     int    // 4002 for paper, 4001 for live
-	ClientID int    // Unique client ID for this connection
+	Host     string
+	Port     int
+	ClientID int
 }
 
 func DefaultConfig() Config {
@@ -23,31 +24,30 @@ func DefaultConfig() Config {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	port := 4002 // Paper trading default
+
+	port := 4002
 	if p := os.Getenv("IBKR_PORT"); p != "" {
 		if parsed, err := strconv.Atoi(p); err == nil {
 			port = parsed
 		}
 	}
+
 	clientID := 1
 	if c := os.Getenv("IBKR_CLIENT_ID"); c != "" {
 		if parsed, err := strconv.Atoi(c); err == nil {
 			clientID = parsed
 		}
 	}
+
 	return Config{Host: host, Port: port, ClientID: clientID}
 }
 
-// Connection manages the IBKR Gateway connection lifecycle
 type Connection struct {
-	cfg       Config
-	log       *slog.Logger
-	connected atomic.Bool
-	mu        sync.RWMutex
+	cfg Config
+	log *slog.Logger
 
-	// Callbacks
-	onConnected    func()
-	onDisconnected func()
+	mu sync.RWMutex
+	ib *ibsync.IB
 }
 
 func NewConnection(cfg Config) *Connection {
@@ -58,60 +58,92 @@ func NewConnection(cfg Config) *Connection {
 }
 
 func (c *Connection) Connect(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.ib != nil && c.ib.IsConnected() {
+		return nil
+	}
+
 	c.log.Info("connecting to IBKR Gateway",
 		"host", c.cfg.Host,
 		"port", c.cfg.Port,
 		"client_id", c.cfg.ClientID,
 	)
 
-	// TODO: Use scmhub/ibapi to establish socket connection
-	// ic := ibapi.NewIBClient(wrapper)
-	// err := ic.Connect(c.cfg.Host, c.cfg.Port, c.cfg.ClientID)
-
-	c.connected.Store(true)
-	c.log.Info("connected to IBKR Gateway")
-
-	if c.onConnected != nil {
-		c.onConnected()
+	ib := ibsync.NewIB()
+	cfg := &ibsync.Config{
+		Host:     c.cfg.Host,
+		Port:     c.cfg.Port,
+		ClientID: int64(c.cfg.ClientID),
+		InSync:   true,
+		Timeout:  15 * time.Second,
 	}
 
+	if err := ib.Connect(cfg); err != nil {
+		return fmt.Errorf("connect gateway: %w", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		_ = ib.Disconnect()
+		return ctx.Err()
+	default:
+	}
+
+	c.ib = ib
+	c.log.Info("connected to IBKR Gateway")
 	return nil
 }
 
 func (c *Connection) Disconnect() {
-	c.log.Info("disconnecting from IBKR Gateway")
-	c.connected.Store(false)
-	if c.onDisconnected != nil {
-		c.onDisconnected()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.ib == nil {
+		return
 	}
+
+	if err := c.ib.Disconnect(); err != nil {
+		c.log.Warn("disconnect failed", "error", err)
+	} else {
+		c.log.Info("disconnected from IBKR Gateway")
+	}
+	c.ib = nil
+}
+
+func (c *Connection) IB() *ibsync.IB {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ib
 }
 
 func (c *Connection) IsConnected() bool {
-	return c.connected.Load()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ib != nil && c.ib.IsConnected()
 }
 
 func (c *Connection) IsPaper() bool {
-	return c.cfg.Port == 4002
+	return c.cfg.Port == 4002 || c.cfg.Port == 7497
 }
 
-// Reconnect loop — runs in background, reconnects on disconnect
 func (c *Connection) RunReconnectLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
-		}
-
-		if !c.IsConnected() {
-			c.log.Warn("IBKR disconnected, attempting reconnect...")
-			if err := c.Connect(ctx); err != nil {
-				c.log.Error("reconnect failed", "error", err)
-				time.Sleep(5 * time.Second)
+		case <-ticker.C:
+			if c.IsConnected() {
 				continue
 			}
+			if err := c.Connect(ctx); err != nil {
+				c.log.Warn("reconnect failed", "error", err)
+			}
 		}
-		time.Sleep(1 * time.Second)
 	}
 }
 

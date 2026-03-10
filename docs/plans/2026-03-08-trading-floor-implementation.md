@@ -6,13 +6,39 @@
 
 **Architecture:** Event-driven pipeline. Wire ingests signals → Scanner evaluates via LLM → Research forms thesis via LLM → Prosecutor challenges via LLM → Risk gate validates deterministically → IBKR executes → Book tracks positions → Memory updates beliefs. All orchestrated per-desk with goroutines. PostgreSQL for persistence, Redis for hot state.
 
-**Tech Stack:** Go 1.23, scmhub/ibapi (IBKR TWS API), scmhub/ibsync (synchronous wrapper), PostgreSQL + pgvector, Redis, OpenRouter API (LLM), structured logging via slog.
+**Tech Stack:** Go 1.26+ (see toolchain note below), scmhub/ibapi (IBKR TWS API), scmhub/ibsync (synchronous wrapper), PostgreSQL + pgvector, Redis, OpenRouter API (LLM), structured logging via slog.
 
 **Codebase location:** `/Users/forrest/Documents/hnic/trading/initiative one/apps/research_execute/trading-floor/`
 
-**IBKR connection:** IB Gateway running locally, paper trading port 4002.
+**IBKR connection:** IB Gateway running locally, paper trading port 4002. **CRITICAL:** "Enable ActiveX and Socket Clients" must be enabled, "Read-Only API" must be unchecked in IB Gateway config. The floor must validate these on startup.
 
 **LLM:** OpenRouter API. Models: `qwen/qwen3.5-7b` (speed), `qwen/qwen3.5-72b` (analysis), `anthropic/claude-sonnet-4-20250514` (critical).
+
+### External Review Corrections (2026-03-09)
+
+The following corrections come from an external architecture review. They are not optional — they address operational and statistical rigor gaps that will cause failures under real market conditions.
+
+**1. Go toolchain: upgrade to 1.26+.** ibsync requires Go 1.26+. go.mod currently says 1.23. Either upgrade or pin/fork ibsync. Upgrading is the clean path.
+
+**2. IB Gateway startup validation.** The floor must refuse to start if "Read-Only API" is enabled or socket clients are disabled. Attempt a harmless test (reqAccountSummary) and verify write capability before entering the trading loop.
+
+**3. Centralized IBKR pacing budget.** IBKR limits data request traffic. Without a centralized budget, 10 desks each behaving "correctly" will collectively trigger pacing violations. Enforce global budgets for: max concurrent market data subs, max concurrent historical data requests, max order submissions per minute.
+
+**4. Bounded concurrency per pipeline stage.** No stage may spawn unbounded work. A news shock during market open will create: more signals → more LLM calls → more market data calls → pacing violations → cascading timeouts. Worker pools per stage with hard caps.
+
+**5. Contract Catalog service.** LLM hallucinations must never directly construct tradeable contract specs. Resolve Instrument → authoritative IB contract via `reqContractDetails()`, cache by (Symbol, SecType, Expiry, Strike, Right, Exchange, Currency), store conId + multiplier + tradingClass. Validate before any order submission.
+
+**6. Structured JSON output validation.** Scanner/Research/Prosecutor must return validated JSON against strict schemas, not freeform prose. Add deterministic validators that reject unsafe or malformed outputs.
+
+**7. Scanner must default to "do nothing."** The scanner is the funnel mouth. If too permissive, the pipeline becomes a cost and pacing disaster. High confidence threshold, configurable pass-through rate limit per desk per hour.
+
+**8. Centralized market data subscriptions.** Instead of each desk independently polling, maintain long-lived streaming subscriptions for a bounded watchlist. One AAPL subscription feeds all desks that need it. Dedup at the subscription level.
+
+**9. Trace context across decision chains.** Every signal and decision belongs to a single trace context. Stamp LLM calls with session_id (desk_id:day) and trace_id (thesis_id). Enables reconstruction of complete decision chains across interleaved goroutines.
+
+**10. A/B test logging from day one.** Cheap to log, expensive to recreate. Every thesis outcome records group membership, whether beliefs were consulted, counterfactual, and anti-portfolio entries. Logging only — analysis engine is future work.
+
+**11. DB schema hardening.** Unique constraints, JSONB schemas, append-only event log table, content_hash indexes for dedup, desk_id+timestamp indexes for queries.
 
 ---
 
@@ -59,6 +85,17 @@ bars := ib.ReqHistoricalData(...)  // blocking, returns []Bar
 4. **research/desk.go:92** — Evidence.SignalID never populated.
 5. **book/portfolio.go** — Desk capital never initialized from desk config.
 6. **cmd/floor/main.go:73** — `_ = learnWorker` suppresses unused warning but learnWorker is never passed to desks or wired into outcome flow.
+7. **go.mod** — Verify `github.com/hnic/trading-floor` module path matches all import paths in every .go file.
+
+### Design Feedback (incorporated into tasks below)
+
+1. **Market data interval must be per-desk configurable.** 30s is fine for macro desk, too slow for scalpers. ibsync supports streaming tickers — use subscribe+stream for fast desks, poll for Wire.
+2. **Position monitor stop logic must be thesis-driven, not hard 5%.** Tail desk buying far-OTM puts expects -80%. Scalper stops at 0.5%. Pull from thesis `KillRules` and `StopLoss` fields. Keep 5% as emergency backstop only.
+3. **`time.Sleep(2s)` in ReqMarketData is a code smell.** Replace with retry loop checking `Last > 0`. During pre-market 2s isn't enough; for SPY in market hours it's 1.99s too long.
+4. **PlaceOrder 100ms poll burns CPU.** Check if ibsync `trade.Done()` returns a channel to select on.
+5. **IBKR connection pool needed at 40-desk scale.** ~50 market data subs per connection limit. Plan for 4-5 connections with unique client IDs.
+6. **Reconciliation loop is critical (Phase 2.5).** Every 60s compare Book vs IBKR positions. IBKR is truth. Without this, Book drifts and P&L becomes fiction.
+7. **Migration must run before store inserts.** `store/migrations/001_init.sql` exists — migration runner must execute it on startup before any Insert methods.
 
 ---
 
@@ -834,6 +871,121 @@ Expected: PASS if IB Gateway is running on port 4002
 ```bash
 git add internal/execution/ibkr/client_test.go
 git commit -m "test: IBKR integration tests (connect, positions, market data, paper order)"
+```
+
+---
+
+## Phase 2.5: Reconciliation Loop (30 min)
+
+Every 60 seconds, compare Book's positions against IBKR's actual positions. IBKR is truth. Log discrepancies. This catches partial fills you missed, manual interventions, and bugs in position tracking. Without reconciliation, Book drifts from reality over days and P&L becomes fiction.
+
+### Task 2.5.1: Add Reconcile method to Book
+
+**Files:**
+- Modify: `internal/book/portfolio.go`
+
+**Step 1: Add Reconcile method**
+
+```go
+type Discrepancy struct {
+	Symbol      string
+	BookQty     float64
+	IBKRQty     float64
+	BookAvgCost float64
+	IBKRAvgCost float64
+}
+
+func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	var discrepancies []Discrepancy
+	seen := make(map[string]bool)
+
+	for _, ip := range ibkrPositions {
+		seen[ip.Symbol] = true
+		bp, exists := b.positions[ip.Symbol]
+		if !exists {
+			// IBKR has position we don't know about
+			discrepancies = append(discrepancies, Discrepancy{
+				Symbol:  ip.Symbol,
+				BookQty: 0, IBKRQty: ip.Quantity,
+				IBKRAvgCost: ip.AvgCost,
+			})
+			continue
+		}
+		if bp.Quantity != ip.Quantity {
+			discrepancies = append(discrepancies, Discrepancy{
+				Symbol:      ip.Symbol,
+				BookQty:     bp.Quantity,
+				IBKRQty:     ip.Quantity,
+				BookAvgCost: bp.AvgCost,
+				IBKRAvgCost: ip.AvgCost,
+			})
+		}
+	}
+	// Check for Book positions not in IBKR
+	for sym, bp := range b.positions {
+		if !seen[sym] {
+			discrepancies = append(discrepancies, Discrepancy{
+				Symbol:      sym,
+				BookQty:     bp.Quantity,
+				IBKRQty:     0,
+				BookAvgCost: bp.AvgCost,
+			})
+		}
+	}
+	return discrepancies
+}
+```
+
+**Step 2: Verify compilation**
+
+Run: `go build ./...`
+
+### Task 2.5.2: Wire reconciliation goroutine in main.go
+
+**Files:**
+- Modify: `cmd/floor/main.go`
+
+**Step 1: Add reconciliation loop after Book init**
+
+```go
+go func() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ibkrPositions, err := ibkrClient.GetPositions(ctx)
+			if err != nil {
+				slog.Warn("reconciliation failed", "error", err)
+				continue
+			}
+			discrepancies := bk.Reconcile(ibkrPositions)
+			if len(discrepancies) > 0 {
+				slog.Warn("position discrepancies detected",
+					"count", len(discrepancies))
+				for _, d := range discrepancies {
+					audit.Record("reconciliation_discrepancy",
+						d.Symbol, "", d)
+				}
+			}
+		}
+	}
+}()
+```
+
+**Step 2: Verify compilation**
+
+Run: `go build ./...`
+
+**Step 3: Commit**
+```bash
+git add internal/book/portfolio.go cmd/floor/main.go
+git commit -m "feat: add broker reconciliation loop — IBKR is truth"
 ```
 
 ---

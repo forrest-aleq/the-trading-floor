@@ -8,7 +8,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Signals
 -----------------------------------------------------------
 CREATE TABLE signals (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id              TEXT PRIMARY KEY,
     source          TEXT NOT NULL,
     type            TEXT NOT NULL,
     category        TEXT,
@@ -33,8 +33,8 @@ CREATE INDEX idx_signals_source ON signals (source);
 -- Opportunities (scanner output)
 -----------------------------------------------------------
 CREATE TABLE opportunities (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    signal_ids      UUID[] NOT NULL,
+    id              TEXT PRIMARY KEY,
+    signal_ids      TEXT[] NOT NULL,
     instruments     JSONB NOT NULL,
     direction       TEXT,
     urgency         FLOAT,
@@ -48,8 +48,8 @@ CREATE TABLE opportunities (
 -- Theses (research output)
 -----------------------------------------------------------
 CREATE TABLE theses (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    opportunity_id  UUID REFERENCES opportunities(id),
+    id              TEXT PRIMARY KEY,
+    opportunity_id  TEXT REFERENCES opportunities(id),
     desk_id         TEXT NOT NULL,
     strategy        TEXT NOT NULL,
     instrument      JSONB NOT NULL,
@@ -80,8 +80,8 @@ CREATE INDEX idx_theses_strategy ON theses (strategy);
 -- Positions (live book)
 -----------------------------------------------------------
 CREATE TABLE positions (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    thesis_id       UUID REFERENCES theses(id),
+    id              TEXT PRIMARY KEY,
+    thesis_id       TEXT REFERENCES theses(id),
     desk_id         TEXT NOT NULL,
     instrument      JSONB NOT NULL,
     direction       TEXT NOT NULL,
@@ -127,7 +127,7 @@ CREATE INDEX idx_competence_capability ON competence_states (capability);
 -- Engrams (cached winning plays)
 -----------------------------------------------------------
 CREATE TABLE engrams (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     intent_key      TEXT NOT NULL,
     context_pattern TEXT NOT NULL,
     capability      TEXT NOT NULL,
@@ -151,7 +151,7 @@ CREATE INDEX idx_engrams_capability ON engrams (capability);
 -- Anti-Portfolio (rejected theses + counterfactual)
 -----------------------------------------------------------
 CREATE TABLE anti_portfolio (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     thesis_snapshot  JSONB NOT NULL,
     rejection_reason TEXT NOT NULL,
     desk_id          TEXT NOT NULL,
@@ -173,8 +173,8 @@ CREATE INDEX idx_anti_portfolio_reason ON anti_portfolio (rejection_reason);
 -- Episodes (full trade lifecycle for episodic memory)
 -----------------------------------------------------------
 CREATE TABLE episodes (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    thesis_id       UUID REFERENCES theses(id),
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    thesis_id       TEXT REFERENCES theses(id),
     desk_id         TEXT NOT NULL,
     strategy        TEXT NOT NULL,
     instrument      JSONB NOT NULL,
@@ -205,8 +205,8 @@ CREATE TABLE audit_log (
     desk_id         TEXT,
     event_type      TEXT NOT NULL,
     event_data      JSONB NOT NULL,
-    thesis_id       UUID,
-    position_id     UUID,
+    thesis_id       TEXT,
+    position_id     TEXT,
     order_id        INT
 );
 

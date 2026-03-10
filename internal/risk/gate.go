@@ -22,15 +22,15 @@ type Gate struct {
 // Limits are the hard-coded risk parameters from policies.json
 type Limits struct {
 	// Per-desk
-	MaxDailyLossPct       float64
-	MaxSinglePositionPct  float64
+	MaxDailyLossPct        float64
+	MaxSinglePositionPct   float64
 	MaxCorrelatedPositions int
-	MaxOpenPositions      int
-	CapitalPerDesk        float64
+	MaxOpenPositions       int
+	CapitalPerDesk         float64
 
 	// Per-trade
-	MaxPositionSizePct    float64
-	MinConvictionScore    float64
+	MaxPositionSizePct float64
+	MinConvictionScore float64
 
 	// Portfolio-level
 	TotalCapital          float64
@@ -44,20 +44,20 @@ type Limits struct {
 
 func DefaultLimits() Limits {
 	return Limits{
-		MaxDailyLossPct:       3.0,
-		MaxSinglePositionPct:  20.0,
+		MaxDailyLossPct:        3.0,
+		MaxSinglePositionPct:   20.0,
 		MaxCorrelatedPositions: 3,
-		MaxOpenPositions:      10,
-		CapitalPerDesk:        25000,
-		MaxPositionSizePct:    10.0,
-		MinConvictionScore:    0.65,
-		TotalCapital:          1000000,
-		MaxFactorExposurePct:  25.0,
-		MaxDrawdownPct:        10.0,
-		KillSwitchDrawdownPct: 15.0,
-		MaxGrossExposurePct:   200.0,
-		MaxNetExposurePct:     100.0,
-		MaxCashDeployPct:      80.0,
+		MaxOpenPositions:       10,
+		CapitalPerDesk:         25000,
+		MaxPositionSizePct:     10.0,
+		MinConvictionScore:     0.65,
+		TotalCapital:           1000000,
+		MaxFactorExposurePct:   25.0,
+		MaxDrawdownPct:         10.0,
+		KillSwitchDrawdownPct:  15.0,
+		MaxGrossExposurePct:    200.0,
+		MaxNetExposurePct:      100.0,
+		MaxCashDeployPct:       80.0,
 	}
 }
 
@@ -71,17 +71,17 @@ func NewGate(limits Limits) *Gate {
 
 // PortfolioState is the current state needed for risk checks
 type PortfolioState struct {
-	NAV              float64
-	Cash             float64
-	GrossExposure    float64
-	NetExposure      float64
-	DailyPnL         float64
-	WeeklyPnL        float64
-	MonthlyPnL       float64
-	OpenPositions    int
-	DeskPositions    map[string]int     // desk_id → open position count
-	DeskDailyPnL     map[string]float64 // desk_id → daily P&L
-	DeskCapital      map[string]float64 // desk_id → allocated capital
+	NAV           float64
+	Cash          float64
+	GrossExposure float64
+	NetExposure   float64
+	DailyPnL      float64
+	WeeklyPnL     float64
+	MonthlyPnL    float64
+	OpenPositions int
+	DeskPositions map[string]int     // desk_id → open position count
+	DeskDailyPnL  map[string]float64 // desk_id → daily P&L
+	DeskCapital   map[string]float64 // desk_id → allocated capital
 }
 
 // Check validates an order against all risk limits
@@ -185,9 +185,11 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 		"notional", order.Notional,
 	)
 
+	adjustedOrder := order
+
 	return model.RiskDecision{
 		Allowed:       true,
-		AdjustedOrder: &order,
+		AdjustedOrder: &adjustedOrder,
 		Token:         token,
 	}
 }
@@ -204,8 +206,8 @@ func (g *Gate) mintToken(order model.Order) *model.CapToken {
 	return &model.CapToken{
 		Capability: string(order.OrderType),
 		Constraints: map[string]interface{}{
-			"symbol":   order.Instrument.Symbol,
-			"max_qty":  order.Quantity,
+			"symbol":       order.Instrument.Symbol,
+			"max_qty":      order.Quantity,
 			"max_notional": order.Notional,
 		},
 		DeskID:    order.DeskID,

@@ -47,13 +47,12 @@ func (f *Floor) Run(ctx context.Context) error {
 		"desks", len(f.desks),
 	)
 
-	// Start the wire
+	signals := f.wire.Subscribe()
+
+	// Start the wire after subscribers are ready so initial feed bursts are not lost.
 	if err := f.wire.Start(ctx); err != nil {
 		return err
 	}
-
-	// Subscribe to all signals
-	signals := f.wire.Subscribe()
 
 	f.log.Info("trading floor running — processing signals")
 
@@ -99,6 +98,12 @@ func (f *Floor) Stats() FloorStats {
 		TradesExecuted:   f.tradesExecuted,
 		WireStats:        wireStats,
 	}
+}
+
+func (f *Floor) RecordTrade() {
+	f.mu.Lock()
+	f.tradesExecuted++
+	f.mu.Unlock()
 }
 
 type FloorStats struct {

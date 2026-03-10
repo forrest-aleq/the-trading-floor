@@ -63,6 +63,8 @@ func (g *Graph) Get(key string) *model.CompetenceState {
 // MARS formula: trust += (1-trust) * 0.025, confidence += 0.03
 // Trading adaptation: magnitude-weighted
 func (g *Graph) ApplySuccess(key string, magnitude float64) {
+	g.Get(key)
+
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -102,6 +104,8 @@ func (g *Graph) ApplySuccess(key string, magnitude float64) {
 // MARS formula: trust -= trust * 0.075, confidence -= 0.04
 // Trading adaptation: magnitude-weighted + moral asymmetry for boundary violations
 func (g *Graph) ApplyFailure(key string, magnitude float64, boundaryViolation bool) {
+	g.Get(key)
+
 	g.mu.Lock()
 	defer g.mu.Unlock()
 

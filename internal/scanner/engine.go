@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
@@ -14,8 +16,8 @@ import (
 
 // Engine evaluates signals for tradeable opportunities using the speed-tier LLM
 type Engine struct {
-	log    *slog.Logger
-	llm    *llm.Router
+	log      *slog.Logger
+	llm      *llm.Router
 	minScore float64 // Minimum score to pass (0-100)
 }
 
@@ -95,12 +97,14 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 	}
 
 	opp := &model.Opportunity{
+		ID:          uuid.New().String(),
 		SignalIDs:   []string{sig.ID},
 		Instruments: instruments,
 		Direction:   direction,
 		Urgency:     result.Urgency,
 		Score:       result.Score,
 		Category:    result.Category,
+		CreatedAt:   time.Now(),
 	}
 
 	e.log.Info("opportunity detected",
@@ -115,11 +119,11 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 }
 
 type scanResult struct {
-	Tradeable   bool   `json:"tradeable"`
+	Tradeable   bool    `json:"tradeable"`
 	Score       float64 `json:"score"`
 	Instruments []struct {
-		Symbol  string `json:"symbol"`
-		SecType string `json:"sec_type"`
+		Symbol   string `json:"symbol"`
+		SecType  string `json:"sec_type"`
 		Currency string `json:"currency"`
 	} `json:"instruments"`
 	Direction string  `json:"direction"`

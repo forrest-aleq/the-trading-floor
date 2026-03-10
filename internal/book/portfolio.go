@@ -2,6 +2,7 @@ package book
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -10,51 +11,65 @@ import (
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
-// Book is the source of truth for portfolio state
+type PositionSource interface {
+	GetPositions(context.Context) ([]ibkr.IBKRPosition, error)
+}
+
+// Book is the source of truth for portfolio state.
 type Book struct {
-	mu sync.RWMutex
+	mu  sync.RWMutex
 	log *slog.Logger
 
-	positions map[string]*model.Position // position_id → position
-	ibkr      *ibkr.Client
-
-	// Aggregates (recalculated on mark)
-	nav           float64
-	cash          float64
-	grossExposure float64
-	netExposure   float64
-	dailyPnL      float64
-	weeklyPnL     float64
-	monthlyPnL    float64
-	totalPnL      float64
-	maxDrawdown   float64
-	peakNAV       float64
-
-	// Per-desk tracking
-	deskPnL       map[string]float64
-	deskPositions map[string]int
-
-	// Config
-	initialCapital float64
+	positions         map[string]*model.Position // position_id -> position
+	positionSource    PositionSource
+	nav               float64
+	cash              float64
+	grossExposure     float64
+	netExposure       float64
+	dailyPnL          float64
+	weeklyPnL         float64
+	monthlyPnL        float64
+	totalPnL          float64
+	maxDrawdown       float64
+	peakNAV           float64
+	deskPnL           map[string]float64
+	deskPositions     map[string]int
+	deskCapital       map[string]float64
+	totalTrades       int64
+	initialCapital    float64
 	reconcileInterval time.Duration
 }
 
-func NewBook(ibkrClient *ibkr.Client, initialCapital float64) *Book {
+type Discrepancy struct {
+	Symbol      string
+	BookQty     float64
+	IBKRQty     float64
+	BookAvgCost float64
+	IBKRAvgCost float64
+}
+
+func NewBook(positionSource PositionSource, initialCapital float64) *Book {
 	return &Book{
 		log:               slog.Default().With("component", "book"),
 		positions:         make(map[string]*model.Position),
-		ibkr:              ibkrClient,
+		positionSource:    positionSource,
 		nav:               initialCapital,
 		cash:              initialCapital,
 		peakNAV:           initialCapital,
 		initialCapital:    initialCapital,
 		deskPnL:           make(map[string]float64),
 		deskPositions:     make(map[string]int),
+		deskCapital:       make(map[string]float64),
 		reconcileInterval: 60 * time.Second,
 	}
 }
 
-// OpenPosition records a new position from a fill
+func (b *Book) SetDeskCapital(deskID string, capital float64) {
+	b.mu.Lock()
+	b.deskCapital[deskID] = capital
+	b.mu.Unlock()
+}
+
 func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Position {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -65,17 +80,29 @@ func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Posit
 		DeskID:         thesis.DeskID,
 		Instrument:     fill.Instrument,
 		Direction:      fill.Direction,
-		Quantity:        fill.Quantity,
+		Quantity:       fill.Quantity,
 		EntryPrice:     fill.AvgPrice,
 		CurrentPrice:   fill.AvgPrice,
 		IBKROrderID:    fill.IBKROrderID,
+		IBKRContractID: fill.Instrument.ConID,
 		Status:         "open",
-		OpenedAt:       time.Now(),
+		OpenedAt:       fill.FilledAt,
+	}
+	if pos.OpenedAt.IsZero() {
+		pos.OpenedAt = time.Now()
 	}
 
 	b.positions[pos.ID] = pos
 	b.deskPositions[pos.DeskID]++
-	b.cash -= fill.AvgPrice * fill.Quantity // Simplified; options have premiums
+	b.totalTrades++
+
+	notional := fill.Instrument.Notional(fill.AvgPrice, fill.Quantity)
+	if fill.Direction == model.Long {
+		b.cash -= notional
+	} else {
+		b.cash += notional
+	}
+	b.recalculateLocked()
 
 	b.log.Info("position opened",
 		"id", pos.ID,
@@ -84,12 +111,12 @@ func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Posit
 		"direction", pos.Direction,
 		"qty", pos.Quantity,
 		"price", pos.EntryPrice,
+		"notional", notional,
 	)
 
 	return pos
 }
 
-// ClosePosition records a position close
 func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason string) (*model.ThesisOutcome, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -98,13 +125,23 @@ func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason st
 	if !ok {
 		return nil, nil
 	}
+	if pos.Status != "open" {
+		return nil, nil
+	}
 
-	// Calculate P&L
-	var pnl float64
+	notional := pos.Instrument.Notional(exitPrice, pos.Quantity)
 	if pos.Direction == model.Long {
-		pnl = (exitPrice - pos.EntryPrice) * pos.Quantity
+		b.cash += notional
 	} else {
-		pnl = (pos.EntryPrice - exitPrice) * pos.Quantity
+		b.cash -= notional
+	}
+
+	var pnl float64
+	multiplier := pos.Instrument.MultiplierValue()
+	if pos.Direction == model.Long {
+		pnl = (exitPrice - pos.EntryPrice) * pos.Quantity * multiplier
+	} else {
+		pnl = (pos.EntryPrice - exitPrice) * pos.Quantity * multiplier
 	}
 
 	pos.RealizedPnL = pnl
@@ -113,14 +150,19 @@ func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason st
 	now := time.Now()
 	pos.ClosedAt = &now
 
-	// Update desk P&L
 	b.deskPnL[pos.DeskID] += pnl
-	b.deskPositions[pos.DeskID]--
-	b.cash += exitPrice * pos.Quantity
+	if b.deskPositions[pos.DeskID] > 0 {
+		b.deskPositions[pos.DeskID]--
+	}
 	b.dailyPnL += pnl
-	b.totalPnL += pnl
+	b.recalculateLocked()
 
 	holdingHours := now.Sub(pos.OpenedAt).Hours()
+	entryNotional := pos.Instrument.Notional(pos.EntryPrice, pos.Quantity)
+	returnPct := 0.0
+	if entryNotional > 0 {
+		returnPct = (pnl / entryNotional) * 100
+	}
 
 	b.log.Info("position closed",
 		"id", pos.ID,
@@ -134,58 +176,29 @@ func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason st
 	return &model.ThesisOutcome{
 		Profitable:   pnl > 0,
 		RealizedPnL:  pnl,
-		ReturnPct:    (pnl / (pos.EntryPrice * pos.Quantity)) * 100,
+		ReturnPct:    returnPct,
 		HoldingHours: holdingHours,
 		ExitReason:   exitReason,
 	}, nil
 }
 
-// Mark updates all position prices and recalculates aggregates
 func (b *Book) Mark(prices map[string]float64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	b.grossExposure = 0
-	b.netExposure = 0
-	totalUnrealized := 0.0
 
 	for _, pos := range b.positions {
 		if pos.Status != "open" {
 			continue
 		}
 
-		price, ok := prices[pos.Instrument.Symbol]
-		if !ok {
-			continue
+		if price, ok := prices[pos.Instrument.Symbol]; ok && price > 0 {
+			pos.CurrentPrice = price
 		}
-
-		pos.CurrentPrice = price
-
-		var unrealized float64
-		notional := price * pos.Quantity
-		if pos.Direction == model.Long {
-			unrealized = (price - pos.EntryPrice) * pos.Quantity
-			b.netExposure += notional
-		} else {
-			unrealized = (pos.EntryPrice - price) * pos.Quantity
-			b.netExposure -= notional
-		}
-		pos.UnrealizedPnL = unrealized
-		totalUnrealized += unrealized
-		b.grossExposure += notional
 	}
 
-	b.nav = b.cash + totalUnrealized
-	if b.nav > b.peakNAV {
-		b.peakNAV = b.nav
-	}
-	drawdown := (b.peakNAV - b.nav) / b.peakNAV
-	if drawdown > b.maxDrawdown {
-		b.maxDrawdown = drawdown
-	}
+	b.recalculateLocked()
 }
 
-// Snapshot returns current portfolio state for risk checks
 func (b *Book) Snapshot() PortfolioSnapshot {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -197,15 +210,19 @@ func (b *Book) Snapshot() PortfolioSnapshot {
 		}
 	}
 
-	// Copy desk maps
-	deskPnL := make(map[string]float64)
-	deskPos := make(map[string]int)
-	deskCap := make(map[string]float64)
+	deskPnL := make(map[string]float64, len(b.deskPnL))
 	for k, v := range b.deskPnL {
 		deskPnL[k] = v
 	}
+
+	deskPos := make(map[string]int, len(b.deskPositions))
 	for k, v := range b.deskPositions {
 		deskPos[k] = v
+	}
+
+	deskCap := make(map[string]float64, len(b.deskCapital))
+	for k, v := range b.deskCapital {
+		deskCap[k] = v
 	}
 
 	return PortfolioSnapshot{
@@ -222,6 +239,7 @@ func (b *Book) Snapshot() PortfolioSnapshot {
 		DeskPnL:       deskPnL,
 		DeskPositions: deskPos,
 		DeskCapital:   deskCap,
+		TotalTrades:   b.totalTrades,
 	}
 }
 
@@ -239,9 +257,9 @@ type PortfolioSnapshot struct {
 	DeskPnL       map[string]float64
 	DeskPositions map[string]int
 	DeskCapital   map[string]float64
+	TotalTrades   int64
 }
 
-// StartReconcile runs periodic reconciliation against IBKR
 func (b *Book) StartReconcile(ctx context.Context) {
 	ticker := time.NewTicker(b.reconcileInterval)
 	defer ticker.Stop()
@@ -256,55 +274,64 @@ func (b *Book) StartReconcile(ctx context.Context) {
 	}
 }
 
-func (b *Book) reconcile(ctx context.Context) {
-	ibkrPositions, err := b.ibkr.GetPositions(ctx)
-	if err != nil {
-		b.log.Error("reconciliation failed", "error", err)
-		return
-	}
+func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	// Build map of IBKR positions by contract ID
-	ibkrMap := make(map[int64]ibkr.IBKRPosition)
-	for _, p := range ibkrPositions {
-		ibkrMap[p.ConID] = p
-	}
-
-	// Check our positions against IBKR
-	discrepancies := 0
+	bookByKey := make(map[string]*model.Position)
 	for _, pos := range b.positions {
 		if pos.Status != "open" {
 			continue
 		}
-		ibkrPos, exists := ibkrMap[pos.IBKRContractID]
+		bookByKey[reconcileKey(pos.IBKRContractID, pos.Instrument.Symbol)] = pos
+	}
+
+	seen := make(map[string]bool)
+	var discrepancies []Discrepancy
+
+	for _, ip := range ibkrPositions {
+		key := reconcileKey(ip.ConID, ip.Symbol)
+		seen[key] = true
+
+		pos, exists := bookByKey[key]
 		if !exists {
-			b.log.Warn("position exists locally but not in IBKR",
-				"symbol", pos.Instrument.Symbol,
-				"qty", pos.Quantity,
-			)
-			discrepancies++
+			discrepancies = append(discrepancies, Discrepancy{
+				Symbol:      ip.Symbol,
+				BookQty:     0,
+				IBKRQty:     ip.Quantity,
+				BookAvgCost: 0,
+				IBKRAvgCost: ip.AvgCost,
+			})
 			continue
 		}
-		if ibkrPos.Quantity != pos.Quantity {
-			b.log.Warn("quantity mismatch",
-				"symbol", pos.Instrument.Symbol,
-				"local", pos.Quantity,
-				"ibkr", ibkrPos.Quantity,
-			)
-			// IBKR is source of truth
-			pos.Quantity = ibkrPos.Quantity
-			discrepancies++
+
+		if pos.Quantity != ip.Quantity || pos.EntryPrice != ip.AvgCost {
+			discrepancies = append(discrepancies, Discrepancy{
+				Symbol:      ip.Symbol,
+				BookQty:     pos.Quantity,
+				IBKRQty:     ip.Quantity,
+				BookAvgCost: pos.EntryPrice,
+				IBKRAvgCost: ip.AvgCost,
+			})
 		}
 	}
 
-	if discrepancies > 0 {
-		b.log.Warn("reconciliation complete", "discrepancies", discrepancies)
+	for key, pos := range bookByKey {
+		if seen[key] {
+			continue
+		}
+		discrepancies = append(discrepancies, Discrepancy{
+			Symbol:      pos.Instrument.Symbol,
+			BookQty:     pos.Quantity,
+			IBKRQty:     0,
+			BookAvgCost: pos.EntryPrice,
+			IBKRAvgCost: 0,
+		})
 	}
+
+	return discrepancies
 }
 
-// GetOpenPositions returns all open positions
 func (b *Book) GetOpenPositions() []*model.Position {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -318,12 +345,89 @@ func (b *Book) GetOpenPositions() []*model.Position {
 	return open
 }
 
-// ResetDaily resets daily P&L counters (call at market open)
 func (b *Book) ResetDaily() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.dailyPnL = 0
 	for k := range b.deskPnL {
 		b.deskPnL[k] = 0
 	}
+}
+
+func (b *Book) recalculateLocked() {
+	totalEquityAdjustment := 0.0
+	totalUnrealized := 0.0
+	b.grossExposure = 0
+	b.netExposure = 0
+
+	for _, pos := range b.positions {
+		if pos.Status != "open" {
+			continue
+		}
+
+		marketValue := pos.Instrument.Notional(pos.CurrentPrice, pos.Quantity)
+		if pos.Direction == model.Long {
+			totalEquityAdjustment += marketValue
+			b.netExposure += marketValue
+			pos.UnrealizedPnL = (pos.CurrentPrice - pos.EntryPrice) * pos.Quantity * pos.Instrument.MultiplierValue()
+		} else {
+			totalEquityAdjustment -= marketValue
+			b.netExposure -= marketValue
+			pos.UnrealizedPnL = (pos.EntryPrice - pos.CurrentPrice) * pos.Quantity * pos.Instrument.MultiplierValue()
+		}
+		b.grossExposure += marketValue
+		totalUnrealized += pos.UnrealizedPnL
+	}
+
+	b.nav = b.cash + totalEquityAdjustment
+	b.totalPnL = b.nav - b.initialCapital
+	b.weeklyPnL = b.totalPnL
+	b.monthlyPnL = b.totalPnL
+
+	if b.nav > b.peakNAV {
+		b.peakNAV = b.nav
+	}
+	if b.peakNAV > 0 {
+		drawdown := (b.peakNAV - b.nav) / b.peakNAV
+		if drawdown > b.maxDrawdown {
+			b.maxDrawdown = drawdown
+		}
+	}
+
+	_ = totalUnrealized
+}
+
+func (b *Book) reconcile(ctx context.Context) {
+	if b.positionSource == nil {
+		return
+	}
+
+	ibkrPositions, err := b.positionSource.GetPositions(ctx)
+	if err != nil {
+		b.log.Error("reconciliation failed", "error", err)
+		return
+	}
+
+	discrepancies := b.Reconcile(ibkrPositions)
+	if len(discrepancies) == 0 {
+		return
+	}
+
+	for _, d := range discrepancies {
+		b.log.Warn("reconciliation discrepancy",
+			"symbol", d.Symbol,
+			"book_qty", d.BookQty,
+			"ibkr_qty", d.IBKRQty,
+			"book_avg_cost", d.BookAvgCost,
+			"ibkr_avg_cost", d.IBKRAvgCost,
+		)
+	}
+}
+
+func reconcileKey(conID int64, symbol string) string {
+	if conID > 0 {
+		return fmt.Sprintf("conid:%d", conID)
+	}
+	return "symbol:" + symbol
 }

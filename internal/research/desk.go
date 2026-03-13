@@ -80,8 +80,17 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 		return nil, fmt.Errorf("research LLM error: %w", err)
 	}
 
+	cleaned, err := llm.ExtractJSON(resp)
+	if err != nil {
+		return nil, fmt.Errorf("research JSON extraction: %w", err)
+	}
+
+	if err := llm.ValidateJSONFields(cleaned, []string{"instrument", "direction", "entry_price", "conviction", "strategy"}); err != nil {
+		return nil, fmt.Errorf("research response validation: %w", err)
+	}
+
 	var result researchResult
-	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
 		return nil, fmt.Errorf("research parse error: %w", err)
 	}
 

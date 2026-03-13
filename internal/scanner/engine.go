@@ -23,7 +23,7 @@ type Engine struct {
 
 func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
 	if minScore == 0 {
-		minScore = 40 // Default: let through anything moderately interesting
+		minScore = 70 // Default: aggressive filter — most signals should be rejected
 	}
 	return &Engine{
 		log:      slog.Default().With("component", "scanner"),
@@ -32,14 +32,16 @@ func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
 	}
 }
 
-const scannerPrompt = `You are a trading signal scanner. Evaluate whether this signal represents a tradeable opportunity.
+const scannerPrompt = `You are a trading signal scanner. Your DEFAULT response should be tradeable: false. Most signals are noise.
 
-Consider:
-1. Is there a clear trade thesis here? (earnings, macro event, geopolitical shift, anomaly, etc.)
-2. What instruments could be traded? (specific tickers, ETFs, options strategies, futures)
-3. What direction? (bullish, bearish, or neutral/vol play)
-4. How urgent is this? (time-sensitive catalyst vs slow-developing theme)
-5. How strong is the signal? (hard data vs rumor vs noise)
+Only mark tradeable: true if ALL of these are met:
+1. There is a SPECIFIC, actionable trade thesis (not vague commentary)
+2. You can name EXACT instruments to trade (tickers, not sectors)
+3. There is a clear catalyst with a defined time window
+4. The signal contains hard data or a confirmed event (not rumor or speculation)
+5. The expected move is large enough to overcome transaction costs
+
+If in doubt, set tradeable: false. We lose nothing by passing. We lose real money by acting on noise.
 
 Respond in JSON:
 {
@@ -64,9 +66,15 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 		return nil, false
 	}
 
+	cleaned, err := llm.ExtractJSON(resp)
+	if err != nil {
+		e.log.Warn("scanner JSON extraction failed", "error", err, "signal_id", sig.ID)
+		return nil, false
+	}
+
 	var result scanResult
-	if err := json.Unmarshal([]byte(resp), &result); err != nil {
-		e.log.Warn("scanner parse error", "error", err, "response", resp)
+	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
+		e.log.Warn("scanner parse error", "error", err, "response", cleaned)
 		return nil, false
 	}
 

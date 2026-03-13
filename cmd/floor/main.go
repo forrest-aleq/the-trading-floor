@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 
 	"github.com/hnic/trading-floor/internal/book"
@@ -16,6 +16,7 @@ import (
 	"github.com/hnic/trading-floor/internal/execution/ibkr"
 	"github.com/hnic/trading-floor/internal/firm"
 	"github.com/hnic/trading-floor/internal/llm"
+	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
 	"github.com/hnic/trading-floor/internal/observe"
@@ -31,6 +32,8 @@ import (
 func main() {
 	_ = godotenv.Load()
 
+	sessionID := uuid.New().String()[:8]
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -38,7 +41,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	slog.Info("=== THE TRADING FLOOR ===")
+	slog.Info("=== THE TRADING FLOOR ===", "session_id", sessionID)
 	slog.Info("initializing autonomous trading system")
 
 	llmRouter := llm.DefaultRouter()
@@ -56,6 +59,10 @@ func main() {
 		slog.Info("PostgreSQL connected")
 	}
 
+	// IBKR pacing budget — enforces 50 msg/sec and 15 market data line limits
+	pacing := ibkr.NewPacingBudget()
+	go pacing.Run(ctx)
+
 	ibkrCfg := ibkr.DefaultConfig()
 	ibkrClient := ibkr.NewClient(ibkrCfg)
 	if err := ibkrClient.Connect(ctx); err != nil {
@@ -69,10 +76,25 @@ func main() {
 	bk := book.NewBook(ibkrClient, 1_000_000)
 	go bk.StartReconcile(ctx)
 
+	// Centralized market data manager — replaces per-component polling
+	mdMgr := marketdata.NewManager(ibkrClient, pacing, 0)
+	mdMgr.AddInstruments(feeds.DefaultWatchlist())
+	mdMgr.Subscribe(func(prices map[string]float64) {
+		bk.Mark(prices)
+		if db != nil {
+			for _, pos := range bk.GetOpenPositions() {
+				if err := db.UpsertPosition(ctx, pos); err != nil {
+					slog.Warn("persist mark-to-market failed", "position_id", pos.ID, "error", err)
+				}
+			}
+		}
+	})
+	go mdMgr.Run(ctx)
+
 	riskGate := risk.NewGate(risk.DefaultLimits())
 	beliefGraph := belief.NewGraph()
 	learnWorker := memory.NewLearnWorker(beliefGraph)
-	scan := scanner.NewEngine(llmRouter, 40)
+	scan := scanner.NewEngine(llmRouter, 70)
 	researchDesk := research.NewDesk(llmRouter, 0.65)
 	prosecutor := research.NewProsecutor(llmRouter)
 
@@ -83,6 +105,7 @@ func main() {
 	}
 	defer audit.Close()
 	audit.Record("system_start", "", "", map[string]any{
+		"session_id":     sessionID,
 		"paper":          ibkrClient.IsPaper(),
 		"capital":        1_000_000,
 		"db_persistence": db != nil,
@@ -92,7 +115,7 @@ func main() {
 	wireMgr.RegisterFeed(feeds.NewNewsFeed(nil))
 	wireMgr.RegisterFeed(feeds.NewMarketFeed(ibkrClient, feeds.DefaultWatchlist()))
 
-	floor := firm.NewFloor(wireMgr)
+	floor := firm.NewFloor(wireMgr, sessionID)
 	desksByID := map[string]*firm.Desk{}
 
 	thesisLookup := func(thesisID string) (*model.Thesis, bool) {
@@ -145,8 +168,6 @@ func main() {
 	})
 	go monitor.Run(ctx)
 
-	go markToMarketLoop(ctx, bk, ibkrClient, db)
-
 	domains := []struct {
 		id     string
 		domain string
@@ -186,6 +207,7 @@ func main() {
 	}
 
 	slog.Info("firm initialized",
+		"session_id", sessionID,
 		"desks", len(domains),
 		"group_a", 5,
 		"group_b", 5,
@@ -209,56 +231,4 @@ func main() {
 	)
 
 	fmt.Println("trading-floor: shutdown complete")
-}
-
-func markToMarketLoop(ctx context.Context, bk *book.Book, client interface {
-	ReqMarketData(context.Context, model.Instrument) (*ibkr.MarketData, error)
-}, db *store.DB) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			positions := bk.GetOpenPositions()
-			if len(positions) == 0 {
-				continue
-			}
-
-			prices := make(map[string]float64)
-			for _, pos := range positions {
-				md, err := client.ReqMarketData(ctx, pos.Instrument)
-				if err != nil {
-					slog.Warn("mark-to-market fetch failed", "symbol", pos.Instrument.Symbol, "error", err)
-					continue
-				}
-				switch {
-				case md.Last > 0:
-					prices[pos.Instrument.Symbol] = md.Last
-				case md.Bid > 0 && md.Ask > 0:
-					prices[pos.Instrument.Symbol] = (md.Bid + md.Ask) / 2
-				case md.Bid > 0:
-					prices[pos.Instrument.Symbol] = md.Bid
-				case md.Ask > 0:
-					prices[pos.Instrument.Symbol] = md.Ask
-				}
-			}
-
-			if len(prices) == 0 {
-				continue
-			}
-
-			bk.Mark(prices)
-
-			if db != nil {
-				for _, pos := range bk.GetOpenPositions() {
-					if err := db.UpsertPosition(ctx, pos); err != nil {
-						slog.Warn("persist mark-to-market failed", "position_id", pos.ID, "error", err)
-					}
-				}
-			}
-		}
-	}
 }

@@ -5,26 +5,31 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/hnic/trading-floor/internal/trace"
 	"github.com/hnic/trading-floor/internal/wire"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
 // Floor is the main orchestrator — runs 24/7, fans signals to desks
 type Floor struct {
-	log   *slog.Logger
-	wire  *wire.Manager
-	desks []*Desk
-	mu    sync.RWMutex
+	log       *slog.Logger
+	wire      *wire.Manager
+	desks     []*Desk
+	sessionID string
+	sem       chan struct{} // bounded concurrency for pipeline goroutines
+	mu        sync.RWMutex
 
 	// Metrics
 	signalsProcessed int64
 	tradesExecuted   int64
 }
 
-func NewFloor(wireMgr *wire.Manager) *Floor {
+func NewFloor(wireMgr *wire.Manager, sessionID string) *Floor {
 	return &Floor{
-		log:  slog.Default().With("component", "floor"),
-		wire: wireMgr,
+		log:       slog.Default().With("component", "floor", "session_id", sessionID),
+		wire:      wireMgr,
+		sessionID: sessionID,
+		sem:       make(chan struct{}, 20), // max 20 concurrent pipeline goroutines
 	}
 }
 
@@ -75,16 +80,24 @@ func (f *Floor) Run(ctx context.Context) error {
 	}
 }
 
-// fanOut sends a signal to every desk for parallel processing
+// fanOut sends a signal to every desk with bounded concurrency
 func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 	f.mu.RLock()
 	desks := f.desks
 	f.mu.RUnlock()
 
 	for _, desk := range desks {
-		d := desk // Capture for goroutine
+		d := desk
+		select {
+		case f.sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 		go func() {
-			d.Process(ctx, sig)
+			defer func() { <-f.sem }()
+			span := trace.New(f.sessionID, d.ID, sig.ID)
+			deskCtx := trace.IntoContext(ctx, span)
+			d.Process(deskCtx, sig)
 		}()
 	}
 }

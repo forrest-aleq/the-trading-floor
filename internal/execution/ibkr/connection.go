@@ -93,6 +93,36 @@ func (c *Connection) Connect(ctx context.Context) error {
 
 	c.ib = ib
 	c.log.Info("connected to IBKR Gateway")
+
+	if err := c.validateGateway(); err != nil {
+		_ = ib.Disconnect()
+		c.ib = nil
+		return fmt.Errorf("gateway validation: %w", err)
+	}
+
+	return nil
+}
+
+// validateGateway checks that the connected gateway is in a usable state.
+func (c *Connection) validateGateway() error {
+	ib := c.ib
+	if ib == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	// Check managed accounts exist (proves the gateway is logged in)
+	accounts := ib.ManagedAccounts()
+	if len(accounts) == 0 {
+		return fmt.Errorf("no managed accounts — gateway may not be logged in")
+	}
+	c.log.Info("gateway validated", "accounts", len(accounts))
+
+	// Verify we can read account summary (detects read-only API mode)
+	summary := ib.AccountSummary()
+	if len(summary) == 0 {
+		c.log.Warn("empty account summary — API may be in read-only mode")
+	}
+
 	return nil
 }
 

@@ -124,7 +124,7 @@ func TestSmokeFullPipeline(t *testing.T) {
 		Raw:       []byte(`"Apple beats earnings expectations and raises guidance"`),
 	}})
 
-	floor := firm.NewFloor(wireMgr)
+	floor := firm.NewFloor(wireMgr, "test-session")
 	desk := firm.NewDesk(firm.DeskConfig{
 		ID:          "test-desk",
 		Domain:      "corporate",

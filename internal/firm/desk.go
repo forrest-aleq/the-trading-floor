@@ -15,6 +15,7 @@ import (
 	"github.com/hnic/trading-floor/internal/risk"
 	"github.com/hnic/trading-floor/internal/scanner"
 	"github.com/hnic/trading-floor/internal/store"
+	"github.com/hnic/trading-floor/internal/trace"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
@@ -108,6 +109,9 @@ func NewDesk(cfg DeskConfig) *Desk {
 
 // Process handles a single signal through the full pipeline.
 func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
+	span := trace.FromContext(ctx).WithStage("scanner")
+	ctx = trace.IntoContext(ctx, span)
+
 	d.persistSignal(ctx, sig)
 
 	opp, ok := d.scanner.Evaluate(ctx, sig, d.Domain)
@@ -118,14 +122,15 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	d.persistOpportunity(ctx, opp)
 
 	d.log.Info("opportunity detected",
-		"score", opp.Score,
-		"urgency", opp.Urgency,
-		"category", opp.Category,
+		append(span.Fields(), "score", opp.Score, "urgency", opp.Urgency, "category", opp.Category)...,
 	)
+
+	span = span.WithStage("research")
+	ctx = trace.IntoContext(ctx, span)
 
 	thesis, err := d.research.Investigate(ctx, opp, d.ID)
 	if err != nil {
-		d.log.Warn("research failed", "error", err)
+		d.log.Warn("research failed", append(span.Fields(), "error", err)...)
 		return
 	}
 	d.normalizePositionSize(thesis)
@@ -140,6 +145,9 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		return
 	}
 
+	span = span.WithStage("prosecutor")
+	ctx = trace.IntoContext(ctx, span)
+
 	prosecution := d.prosecutor.Challenge(ctx, thesis)
 	thesis.Prosecution = prosecution
 	thesis.Status = model.ThesisProsecuted
@@ -147,8 +155,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	if prosecution.Verdict == "killed" {
 		d.log.Info("thesis killed by prosecutor",
-			"thesis_id", thesis.ID,
-			"bear_args", len(prosecution.BearArgs),
+			append(span.Fields(), "thesis_id", thesis.ID, "bear_args", len(prosecution.BearArgs))...,
 		)
 		d.recordAntiPortfolio(ctx, thesis, "killed_by_prosecutor")
 		return
@@ -165,6 +172,9 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		d.recordAntiPortfolio(ctx, thesis, "prosecutor_weakened_below_threshold")
 		return
 	}
+
+	span = span.WithStage("risk")
+	ctx = trace.IntoContext(ctx, span)
 
 	order := model.Order{
 		ID:          thesis.ID,
@@ -204,11 +214,17 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		return
 	}
 
+	span = span.WithStage("execution")
+	ctx = trace.IntoContext(ctx, span)
+
 	fill, err := d.execution.Submit(ctx, decision.Token, *decision.AdjustedOrder)
 	if err != nil {
 		d.log.Error("execution failed", "thesis_id", thesis.ID, "error", err)
 		return
 	}
+
+	span = span.WithStage("book")
+	ctx = trace.IntoContext(ctx, span)
 
 	pos := d.book.OpenPosition(fill, thesis)
 	thesis.Status = model.ThesisActive

@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -14,5 +14,8 @@ COPY --from=builder /floor /floor
 COPY --from=builder /ctl /ctl
 COPY --from=builder /backfill /backfill
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /app/store/migrations /migrations
+
+ENV TRADING_FLOOR_MIGRATION_PATH=/migrations/001_init.sql
 
 ENTRYPOINT ["/floor"]

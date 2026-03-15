@@ -46,10 +46,11 @@ func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model
 	m.log.Info("submitting order",
 		"thesis_id", order.ThesisID,
 		"desk_id", order.DeskID,
-		"symbol", order.Instrument.Symbol,
+		"symbol", order.DisplaySymbol(),
 		"direction", order.Direction,
 		"quantity", order.Quantity,
 		"type", order.OrderType,
+		"structure", order.Structure,
 		"paper", m.ibkr.IsPaper(),
 	)
 
@@ -65,7 +66,44 @@ func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model
 
 	m.log.Info("order filled",
 		"thesis_id", order.ThesisID,
-		"symbol", fill.Instrument.Symbol,
+		"symbol", fill.DisplaySymbol(),
+		"price", fill.AvgPrice,
+		"quantity", fill.Quantity,
+	)
+
+	return fill, nil
+}
+
+// SubmitExit closes an existing position. Exits intentionally bypass capability tokens:
+// risk should never block flattening exposure.
+func (m *Manager) SubmitExit(ctx context.Context, order model.Order) (*model.Fill, error) {
+	if !m.ibkr.IsConnected() {
+		return nil, fmt.Errorf("IBKR not connected")
+	}
+
+	m.log.Info("submitting exit order",
+		"thesis_id", order.ThesisID,
+		"desk_id", order.DeskID,
+		"symbol", order.DisplaySymbol(),
+		"direction", order.Direction,
+		"quantity", order.Quantity,
+		"type", order.OrderType,
+		"structure", order.Structure,
+		"paper", m.ibkr.IsPaper(),
+	)
+
+	fill, err := m.ibkr.PlaceOrder(ctx, order)
+	if err != nil {
+		m.log.Error("exit order failed",
+			"thesis_id", order.ThesisID,
+			"error", err,
+		)
+		return nil, fmt.Errorf("place exit order: %w", err)
+	}
+
+	m.log.Info("exit order filled",
+		"thesis_id", order.ThesisID,
+		"symbol", fill.DisplaySymbol(),
 		"price", fill.AvgPrice,
 		"quantity", fill.Quantity,
 	)

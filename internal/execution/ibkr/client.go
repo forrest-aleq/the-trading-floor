@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strconv"
 	"time"
 
@@ -109,7 +110,14 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 		return nil, fmt.Errorf("not connected to IBKR")
 	}
 
-	contract, err := c.qualifyContract(order.Instrument)
+	contract := (*ibsync.Contract)(nil)
+	resolvedLegs := append([]model.TradeLeg(nil), order.Legs...)
+	var err error
+	if order.IsMultiLeg() {
+		contract, resolvedLegs, err = c.buildComboContract(order)
+	} else {
+		contract, err = c.qualifyContract(order.Instrument)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -120,10 +128,11 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 	}
 
 	c.log.Info("placing order",
-		"symbol", order.Instrument.Symbol,
+		"symbol", order.DisplaySymbol(),
 		"direction", order.Direction,
 		"quantity", order.Quantity,
 		"type", order.OrderType,
+		"structure", order.Structure,
 		"paper", c.IsPaper(),
 	)
 
@@ -154,27 +163,87 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 	totalCost := 0.0
 	totalCommission := 0.0
 	filledAt := time.Now()
+	legFills := make([]model.TradeLeg, 0, len(resolvedLegs))
+	legTotals := make(map[string]*model.TradeLeg)
 
 	for _, fill := range fills {
 		if fill == nil || fill.Execution == nil {
 			continue
 		}
 		qty := fill.Execution.Shares.Float()
-		totalQty += qty
-		totalCost += qty * fill.Execution.Price
+		if order.IsMultiLeg() {
+			if fill.Contract != nil && fill.Contract.SecType == "BAG" {
+				totalQty += qty
+				totalCost += qty * fill.Execution.Price
+			}
+		} else {
+			totalQty += qty
+			totalCost += qty * fill.Execution.Price
+		}
 		totalCommission += fill.CommissionAndFeesReport.CommissionAndFees
 		if !fill.Time.IsZero() {
 			filledAt = fill.Time
 		}
+
+		if !order.IsMultiLeg() || fill.Contract == nil || fill.Execution == nil || fill.Contract.SecType == "BAG" {
+			continue
+		}
+		key := contractKey(fill.Contract)
+		leg, ok := legTotals[key]
+		if !ok {
+			leg = &model.TradeLeg{
+				Instrument: instrumentFromContract(fill.Contract),
+				Direction:  directionFromExecution(fill.Execution.Side),
+			}
+			legTotals[key] = leg
+		}
+		leg.Quantity += qty
+		leg.EntryPrice = weightedAveragePrice(leg.EntryPrice, fill.Execution.Price, leg.Quantity-qty, qty)
 	}
 
-	if totalQty <= 0 {
+	if order.IsMultiLeg() {
+		if totalQty <= 0 {
+			totalQty = order.Quantity
+		}
+		if totalCost <= 0 && trade.OrderStatus.AvgFillPrice > 0 {
+			totalCost = trade.OrderStatus.AvgFillPrice * totalQty
+		}
+		for _, leg := range resolvedLegs {
+			key := leg.Instrument.Key()
+			if resolved, ok := legTotals[key]; ok {
+				leg.Quantity = resolved.Quantity
+				leg.EntryPrice = resolved.EntryPrice
+				if leg.Direction == "" {
+					leg.Direction = resolved.Direction
+				}
+			} else {
+				leg.Quantity = leg.EffectiveQuantity(order.Quantity)
+			}
+			legFills = append(legFills, leg)
+		}
+		sort.Slice(legFills, func(i, j int) bool {
+			return legFills[i].Instrument.Key() < legFills[j].Instrument.Key()
+		})
+	} else if totalQty <= 0 {
 		return nil, fmt.Errorf("order filled with non-positive quantity")
 	}
 
-	avgPrice := totalCost / totalQty
+	avgPrice := order.LimitPrice
+	if totalQty > 0 && totalCost > 0 {
+		avgPrice = totalCost / totalQty
+	}
 	instrument := order.Instrument
-	instrument.ConID = contract.ConID
+	if order.IsMultiLeg() {
+		instrument = order.PrimaryInstrument()
+		if len(legFills) > 0 && instrument.Multiplier == "" {
+			instrument.Multiplier = legFills[0].Instrument.Multiplier
+		}
+	} else {
+		instrument.ConID = contract.ConID
+		if contract.Multiplier != "" {
+			instrument.Multiplier = contract.Multiplier
+		}
+	}
 	if contract.Multiplier != "" {
 		instrument.Multiplier = contract.Multiplier
 	}
@@ -182,7 +251,9 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 	return &model.Fill{
 		OrderID:     order.ID,
 		IBKROrderID: trade.Order.OrderID,
+		Structure:   order.Structure,
 		Instrument:  instrument,
+		Legs:        legFills,
 		Direction:   order.Direction,
 		Quantity:    totalQty,
 		AvgPrice:    avgPrice,
@@ -321,13 +392,62 @@ func (c *Client) qualifyContract(inst model.Instrument) (*ibsync.Contract, error
 	return contract, nil
 }
 
-func buildOrder(order model.Order) (*ibapi.Order, error) {
-	action := "BUY"
-	if order.Direction == model.Short {
-		action = "SELL"
+func (c *Client) buildComboContract(order model.Order) (*ibsync.Contract, []model.TradeLeg, error) {
+	if len(order.Legs) < 2 {
+		return nil, nil, fmt.Errorf("multi-leg order requires at least two legs")
 	}
 
-	qty := normalizeQuantity(order.Quantity, order.Instrument.SecType)
+	combo := ibsync.NewBag()
+	primary := order.PrimaryInstrument()
+	combo.Symbol = primary.Symbol
+	combo.Exchange = primary.Exchange
+	combo.Currency = primary.Currency
+	if combo.Exchange == "" {
+		combo.Exchange = "SMART"
+	}
+	if combo.Currency == "" {
+		combo.Currency = "USD"
+	}
+	combo.ComboLegsDescrip = order.DisplaySymbol()
+
+	resolved := make([]model.TradeLeg, 0, len(order.Legs))
+	combo.ComboLegs = make([]ibapi.ComboLeg, 0, len(order.Legs))
+	for _, leg := range order.Legs {
+		qualified, err := c.qualifyContract(leg.Instrument)
+		if err != nil {
+			return nil, nil, fmt.Errorf("qualify combo leg %s: %w", leg.Instrument.Label(), err)
+		}
+
+		resolvedLeg := leg
+		resolvedLeg.Instrument = instrumentFromContract(qualified)
+		if resolvedLeg.Direction == "" {
+			resolvedLeg.Direction = model.Long
+		}
+		resolved = append(resolved, resolvedLeg)
+
+		comboLeg := ibapi.NewComboLeg()
+		comboLeg.ConID = qualified.ConID
+		comboLeg.Ratio = int64(math.Max(1, math.Round(leg.EffectiveRatio())))
+		comboLeg.Action = actionFromDirection(resolvedLeg.Direction)
+		comboLeg.Exchange = qualified.Exchange
+		if comboLeg.Exchange == "" {
+			comboLeg.Exchange = combo.Exchange
+		}
+		comboLeg.OpenClose = int64(ibapi.OPEN_POS)
+		combo.ComboLegs = append(combo.ComboLegs, comboLeg)
+	}
+
+	return combo, resolved, nil
+}
+
+func buildOrder(order model.Order) (*ibapi.Order, error) {
+	action := actionFromDirection(order.Direction)
+
+	secType := order.Instrument.SecType
+	if order.IsMultiLeg() {
+		secType = "BAG"
+	}
+	qty := normalizeQuantity(order.Quantity, secType)
 	if qty <= 0 {
 		return nil, fmt.Errorf("invalid quantity %.4f", order.Quantity)
 	}
@@ -362,6 +482,49 @@ func buildOrder(order model.Order) (*ibapi.Order, error) {
 	}
 
 	return ibOrder, nil
+}
+
+func actionFromDirection(direction model.TradeDirection) string {
+	if direction == model.Short {
+		return "SELL"
+	}
+	return "BUY"
+}
+
+func directionFromExecution(side string) model.TradeDirection {
+	if side == "SLD" || side == "SELL" || side == "SSHORT" {
+		return model.Short
+	}
+	return model.Long
+}
+
+func instrumentFromContract(contract *ibsync.Contract) model.Instrument {
+	if contract == nil {
+		return model.Instrument{}
+	}
+	return model.Instrument{
+		ConID:      contract.ConID,
+		Symbol:     contract.Symbol,
+		SecType:    contract.SecType,
+		Exchange:   contract.Exchange,
+		Currency:   contract.Currency,
+		Expiry:     contract.LastTradeDateOrContractMonth,
+		Strike:     contract.Strike,
+		Right:      contract.Right,
+		Multiplier: contract.Multiplier,
+	}
+}
+
+func contractKey(contract *ibsync.Contract) string {
+	return instrumentFromContract(contract).Key()
+}
+
+func weightedAveragePrice(currentAvg, newPrice, currentQty, newQty float64) float64 {
+	totalQty := currentQty + newQty
+	if totalQty <= 0 {
+		return 0
+	}
+	return ((currentAvg * currentQty) + (newPrice * newQty)) / totalQty
 }
 
 func normalizeQuantity(quantity float64, secType string) float64 {

@@ -203,6 +203,7 @@ func main() {
 			Engrams:     engramStore,
 			Store:       db,
 			OnTrade:     floor.RecordTrade,
+			Watchlist:   mdMgr.AddInstruments,
 		})
 		desksByID[d.id] = desk
 		floor.AddDesk(desk)
@@ -228,7 +229,33 @@ func main() {
 
 	// --- Position Monitor ---
 	monitor := book.NewMonitor(bk, thesisLookup, func(pos *model.Position, exitPrice float64, reason string) {
-		outcome, err := bk.ClosePosition(pos.ID, exitPrice, reason)
+		closePrice := exitPrice
+		if !pos.Shadow {
+			exitOrder := model.Order{
+				ID:          pos.ID + "-close",
+				ThesisID:    pos.ThesisID,
+				DeskID:      pos.DeskID,
+				Structure:   pos.Structure,
+				Instrument:  pos.PrimaryInstrument(),
+				Legs:        append([]model.TradeLeg(nil), pos.Legs...),
+				Direction:   oppositeDirection(pos.Direction),
+				Quantity:    pos.Quantity,
+				OrderType:   model.OrderMarket,
+				TimeInForce: "DAY",
+			}
+			executionCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			fill, err := execMgr.SubmitExit(executionCtx, exitOrder)
+			cancel()
+			if err != nil {
+				slog.Error("failed to submit closing order", "position_id", pos.ID, "error", err)
+				return
+			}
+			if fill != nil && fill.AvgPrice > 0 {
+				closePrice = fill.AvgPrice
+			}
+		}
+
+		outcome, err := bk.ClosePosition(pos.ID, closePrice, reason)
 		if err != nil {
 			slog.Error("failed to close position", "position_id", pos.ID, "error", err)
 			return
@@ -255,7 +282,7 @@ func main() {
 		audit.Record("position_closed", pos.DeskID, pos.ThesisID, map[string]any{
 			"pnl":    outcome.RealizedPnL,
 			"reason": reason,
-			"price":  exitPrice,
+			"price":  closePrice,
 		})
 	})
 	observe.SafeGo(slog.Default().With("component", "runtime"), "position monitor panic", func() {
@@ -346,6 +373,13 @@ func heartbeatInterval() time.Duration {
 		return 30 * time.Second
 	}
 	return d
+}
+
+func oppositeDirection(direction model.TradeDirection) model.TradeDirection {
+	if direction == model.Short {
+		return model.Long
+	}
+	return model.Short
 }
 
 func startBeliefDecay(ctx context.Context, graph *belief.Graph) {

@@ -24,8 +24,8 @@ type Manager struct {
 	interval time.Duration
 
 	mu            sync.RWMutex
-	watchlist     map[string]model.Instrument // symbol -> instrument
-	prices        map[string]float64          // symbol -> last price
+	watchlist     map[string]model.Instrument // instrument key -> instrument
+	prices        map[string]float64          // instrument key -> last price
 	suppressUntil map[string]time.Time
 	subscribers   []Subscriber
 }
@@ -56,7 +56,10 @@ func (m *Manager) AddInstruments(instruments []model.Instrument) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, inst := range instruments {
-		m.watchlist[inst.Symbol] = inst
+		if inst.Symbol == "" {
+			continue
+		}
+		m.watchlist[inst.Key()] = inst
 	}
 }
 
@@ -110,7 +113,8 @@ func (m *Manager) poll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if m.shouldSuppress(inst.Symbol, time.Now()) {
+		key := inst.Key()
+		if m.shouldSuppress(key, time.Now()) {
 			continue
 		}
 
@@ -124,15 +128,15 @@ func (m *Manager) poll(ctx context.Context) {
 		md, err := m.client.ReqMarketData(ctx, inst)
 		if err != nil {
 			backoff := marketDataBackoff(err, m.interval)
-			m.suppress(inst.Symbol, time.Now().Add(backoff))
-			m.log.Warn("market data fetch failed", "symbol", inst.Symbol, "error", err, "retry_after", backoff)
+			m.suppress(key, time.Now().Add(backoff))
+			m.log.Warn("market data fetch failed", "symbol", inst.Label(), "error", err, "retry_after", backoff)
 			continue
 		}
-		m.clearSuppression(inst.Symbol)
+		m.clearSuppression(key)
 
 		price := bestPrice(md)
 		if price > 0 {
-			prices[inst.Symbol] = price
+			prices[key] = price
 		}
 	}
 
@@ -168,23 +172,23 @@ func bestPrice(md *ibkr.MarketData) float64 {
 	}
 }
 
-func (m *Manager) shouldSuppress(symbol string, now time.Time) bool {
+func (m *Manager) shouldSuppress(key string, now time.Time) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	until, ok := m.suppressUntil[symbol]
+	until, ok := m.suppressUntil[key]
 	return ok && now.Before(until)
 }
 
-func (m *Manager) suppress(symbol string, until time.Time) {
+func (m *Manager) suppress(key string, until time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.suppressUntil[symbol] = until
+	m.suppressUntil[key] = until
 }
 
-func (m *Manager) clearSuppression(symbol string) {
+func (m *Manager) clearSuppression(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.suppressUntil, symbol)
+	delete(m.suppressUntil, key)
 }
 
 func marketDataBackoff(err error, interval time.Duration) time.Duration {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -103,7 +104,21 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 	}
 
 	// 2. Position size vs desk capital
-	positionPct := (order.Notional / deskCapital) * 100
+	orderNotional := order.GrossNotional()
+	riskExposure := orderNotional
+	if order.IsMultiLeg() {
+		maxLoss, err := definedRiskExposure(order)
+		if err != nil {
+			violations = append(violations, model.Violation{
+				Rule:    "unsupported_multi_leg_structure",
+				Limit:   "defined_risk_vertical_only",
+				Current: err.Error(),
+			})
+		} else {
+			riskExposure = maxLoss
+		}
+	}
+	positionPct := (riskExposure / deskCapital) * 100
 	if positionPct > g.limits.MaxSinglePositionPct {
 		violations = append(violations, model.Violation{
 			Rule:    "max_single_position_pct",
@@ -134,7 +149,7 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 	}
 
 	// 5. Portfolio gross exposure
-	newGross := portfolio.GrossExposure + order.Notional
+	newGross := portfolio.GrossExposure + riskExposure
 	grossPct := (newGross / portfolio.NAV) * 100
 	if grossPct > g.limits.MaxGrossExposurePct {
 		violations = append(violations, model.Violation{
@@ -155,7 +170,7 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 	}
 
 	// 7. Cash deployment limit
-	cashDeployPct := ((portfolio.NAV - portfolio.Cash + order.Notional) / portfolio.NAV) * 100
+	cashDeployPct := ((portfolio.NAV - portfolio.Cash + riskExposure) / portfolio.NAV) * 100
 	if cashDeployPct > g.limits.MaxCashDeployPct {
 		violations = append(violations, model.Violation{
 			Rule:    "max_cash_deploy",
@@ -167,7 +182,7 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 	if len(violations) > 0 {
 		g.log.Warn("order rejected by risk gate",
 			"desk_id", order.DeskID,
-			"symbol", order.Instrument.Symbol,
+			"symbol", order.DisplaySymbol(),
 			"violations", len(violations),
 		)
 		return model.RiskDecision{
@@ -181,8 +196,9 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 
 	g.log.Info("order approved by risk gate",
 		"desk_id", order.DeskID,
-		"symbol", order.Instrument.Symbol,
-		"notional", order.Notional,
+		"symbol", order.DisplaySymbol(),
+		"notional", orderNotional,
+		"risk_exposure", riskExposure,
 	)
 
 	adjustedOrder := order
@@ -194,21 +210,113 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 	}
 }
 
+func definedRiskExposure(order model.Order) (float64, error) {
+	structure := strings.ToLower(strings.TrimSpace(order.Structure))
+	switch structure {
+	case "bull_call_spread":
+		return verticalSpreadMaxLoss(order, "C", model.Long, model.Short, true)
+	case "bear_put_spread":
+		return verticalSpreadMaxLoss(order, "P", model.Long, model.Short, false)
+	default:
+		return 0, fmt.Errorf("structure %q not enabled", structure)
+	}
+}
+
+func verticalSpreadMaxLoss(order model.Order, right string, lowerStrikeDirection, higherStrikeDirection model.TradeDirection, lowerStrikeFirst bool) (float64, error) {
+	if len(order.Legs) != 2 {
+		return 0, fmt.Errorf("expected 2 legs, got %d", len(order.Legs))
+	}
+	if order.Direction != model.Long {
+		return 0, fmt.Errorf("debit verticals must use long combo direction")
+	}
+
+	legs := append([]model.TradeLeg(nil), order.Legs...)
+	if legs[0].Instrument.Strike > legs[1].Instrument.Strike {
+		legs[0], legs[1] = legs[1], legs[0]
+	}
+	lower := legs[0]
+	higher := legs[1]
+
+	if err := validateVerticalLegPair(lower, higher, right); err != nil {
+		return 0, err
+	}
+	if lowerStrikeFirst {
+		if lower.Direction != lowerStrikeDirection || higher.Direction != higherStrikeDirection {
+			return 0, fmt.Errorf("leg directions do not match %s structure", strings.ToLower(right))
+		}
+	} else {
+		if higher.Direction != lowerStrikeDirection || lower.Direction != higherStrikeDirection {
+			return 0, fmt.Errorf("leg directions do not match %s structure", strings.ToLower(right))
+		}
+	}
+
+	width := higher.Instrument.Strike - lower.Instrument.Strike
+	if width <= 0 {
+		return 0, fmt.Errorf("spread width must be positive")
+	}
+
+	entry := order.LimitPrice
+	if entry <= 0 {
+		return 0, fmt.Errorf("debit vertical requires positive entry price")
+	}
+	if entry >= width {
+		return 0, fmt.Errorf("entry price %.2f must be below spread width %.2f", entry, width)
+	}
+	units := order.Quantity
+	if units <= 0 {
+		units = 1
+	}
+	multiplier := lower.Instrument.MultiplierValue()
+	return entry * units * multiplier, nil
+}
+
+func validateVerticalLegPair(lower, higher model.TradeLeg, right string) error {
+	lowerInst := lower.Instrument
+	higherInst := higher.Instrument
+	if lowerInst.Symbol == "" || higherInst.Symbol == "" {
+		return fmt.Errorf("legs require symbols")
+	}
+	if lowerInst.Symbol != higherInst.Symbol {
+		return fmt.Errorf("vertical spread must share underlying")
+	}
+	if lowerInst.SecType != higherInst.SecType {
+		return fmt.Errorf("vertical spread legs must share sec_type")
+	}
+	if lowerInst.SecType != "OPT" && lowerInst.SecType != "FOP" {
+		return fmt.Errorf("vertical spread requires option legs")
+	}
+	if lowerInst.Expiry == "" || lowerInst.Expiry != higherInst.Expiry {
+		return fmt.Errorf("vertical spread requires same expiry")
+	}
+	if !strings.EqualFold(lowerInst.Right, right) || !strings.EqualFold(higherInst.Right, right) {
+		return fmt.Errorf("vertical spread requires %s legs", right)
+	}
+	if lower.EffectiveRatio() != higher.EffectiveRatio() {
+		return fmt.Errorf("vertical spread requires 1:1 ratio")
+	}
+	if lowerInst.Strike <= 0 || higherInst.Strike <= 0 {
+		return fmt.Errorf("vertical spread requires strikes")
+	}
+	return nil
+}
+
 func (g *Gate) mintToken(order model.Order) *model.CapToken {
+	orderNotional := order.GrossNotional()
 	nonce := uuid.New().String()
 	data := fmt.Sprintf("%s:%s:%s:%.2f:%s",
-		order.DeskID, order.Instrument.Symbol, order.Direction, order.Quantity, nonce)
+		order.DeskID, order.DisplaySymbol(), order.Direction, order.Quantity, nonce)
 
 	mac := hmac.New(sha256.New, g.secret)
 	mac.Write([]byte(data))
 	sig := hex.EncodeToString(mac.Sum(nil))
 
 	return &model.CapToken{
-		Capability: string(order.OrderType),
+		Capability: order.ExecutionCapability(),
 		Constraints: map[string]interface{}{
-			"symbol":       order.Instrument.Symbol,
+			"symbol":       order.DisplaySymbol(),
 			"max_qty":      order.Quantity,
-			"max_notional": order.Notional,
+			"max_notional": orderNotional,
+			"structure":    order.Structure,
 		},
 		DeskID:    order.DeskID,
 		Expiry:    time.Now().Add(60 * time.Minute),

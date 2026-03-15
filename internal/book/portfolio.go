@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -79,7 +80,7 @@ func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Posit
 	b.deskPositions[pos.DeskID]++
 	b.totalTrades++
 
-	notional := fill.Instrument.Notional(fill.AvgPrice, fill.Quantity)
+	notional := positionCashNotional(pos, fill.AvgPrice)
 	if fill.Direction == model.Long {
 		b.cash -= notional
 	} else {
@@ -90,7 +91,7 @@ func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Posit
 	b.log.Info("position opened",
 		"id", pos.ID,
 		"desk", pos.DeskID,
-		"symbol", pos.Instrument.Symbol,
+		"symbol", pos.DisplaySymbol(),
 		"direction", pos.Direction,
 		"qty", pos.Quantity,
 		"price", pos.EntryPrice,
@@ -120,7 +121,7 @@ func (b *Book) OpenShadowPosition(thesis *model.Thesis) *model.Position {
 	b.log.Info("shadow position opened",
 		"id", pos.ID,
 		"desk", pos.DeskID,
-		"symbol", pos.Instrument.Symbol,
+		"symbol", pos.DisplaySymbol(),
 		"direction", pos.Direction,
 		"qty", pos.Quantity,
 		"price", pos.EntryPrice,
@@ -130,17 +131,35 @@ func (b *Book) OpenShadowPosition(thesis *model.Thesis) *model.Position {
 }
 
 func (b *Book) newPosition(fill *model.Fill, thesis *model.Thesis) *model.Position {
+	legs := make([]model.TradeLeg, 0)
+	switch {
+	case fill != nil && len(fill.Legs) > 0:
+		legs = append(legs, fill.Legs...)
+	case thesis != nil && len(thesis.Legs) > 0:
+		legs = append(legs, thesis.Legs...)
+	}
+	for i := range legs {
+		if legs[i].EntryPrice <= 0 {
+			legs[i].EntryPrice = fill.AvgPrice
+		}
+		if legs[i].Quantity <= 0 {
+			legs[i].Quantity = legs[i].EffectiveQuantity(fill.Quantity)
+		}
+	}
+
 	pos := &model.Position{
 		ID:             fill.OrderID,
 		ThesisID:       thesis.ID,
 		DeskID:         thesis.DeskID,
-		Instrument:     fill.Instrument,
+		Structure:      thesis.Structure,
+		Instrument:     fill.PrimaryInstrument(),
+		Legs:           legs,
 		Direction:      fill.Direction,
 		Quantity:       fill.Quantity,
 		EntryPrice:     fill.AvgPrice,
 		CurrentPrice:   fill.AvgPrice,
 		IBKROrderID:    fill.IBKROrderID,
-		IBKRContractID: fill.Instrument.ConID,
+		IBKRContractID: fill.PrimaryInstrument().ConID,
 		Status:         "open",
 		OpenedAt:       fill.FilledAt,
 	}
@@ -162,7 +181,7 @@ func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason st
 		return nil, nil
 	}
 
-	notional := pos.Instrument.Notional(exitPrice, pos.Quantity)
+	notional := positionCashNotional(pos, exitPrice)
 	if !pos.Shadow {
 		if pos.Direction == model.Long {
 			b.cash += notional
@@ -172,7 +191,7 @@ func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason st
 	}
 
 	var pnl float64
-	multiplier := pos.Instrument.MultiplierValue()
+	multiplier := pos.PrimaryInstrument().MultiplierValue()
 	if pos.Direction == model.Long {
 		pnl = (exitPrice - pos.EntryPrice) * pos.Quantity * multiplier
 	} else {
@@ -195,7 +214,7 @@ func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason st
 	b.recalculateLocked()
 
 	holdingHours := now.Sub(pos.OpenedAt).Hours()
-	entryNotional := pos.Instrument.Notional(pos.EntryPrice, pos.Quantity)
+	entryNotional := positionCashNotional(pos, pos.EntryPrice)
 	returnPct := 0.0
 	if entryNotional > 0 {
 		returnPct = (pnl / entryNotional) * 100
@@ -204,7 +223,7 @@ func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason st
 	b.log.Info("position closed",
 		"id", pos.ID,
 		"desk", pos.DeskID,
-		"symbol", pos.Instrument.Symbol,
+		"symbol", pos.DisplaySymbol(),
 		"pnl", pnl,
 		"reason", exitReason,
 		"held_hours", holdingHours,
@@ -228,7 +247,25 @@ func (b *Book) Mark(prices map[string]float64) {
 			continue
 		}
 
-		if price, ok := prices[pos.Instrument.Symbol]; ok && price > 0 {
+		if pos.IsMultiLeg() {
+			updated := false
+			current := 0.0
+			for i := range pos.Legs {
+				price, ok := lookupInstrumentPrice(prices, pos.Legs[i].Instrument)
+				if !ok || price <= 0 {
+					continue
+				}
+				pos.Legs[i].CurrentPrice = price
+				current += pos.Legs[i].SignedPrice(price) * pos.Legs[i].EffectiveRatio()
+				updated = true
+			}
+			if updated {
+				pos.CurrentPrice = math.Abs(current)
+			}
+			continue
+		}
+
+		if price, ok := lookupInstrumentPrice(prices, pos.Instrument); ok && price > 0 {
 			pos.CurrentPrice = price
 		}
 	}
@@ -358,7 +395,7 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 			continue
 		}
 		discrepancies = append(discrepancies, Discrepancy{
-			Symbol:      pos.Instrument.Symbol,
+			Symbol:      pos.DisplaySymbol(),
 			BookQty:     pos.Quantity,
 			IBKRQty:     0,
 			BookAvgCost: pos.EntryPrice,
@@ -403,17 +440,18 @@ func (b *Book) recalculateLocked() {
 			continue
 		}
 
-		marketValue := pos.Instrument.Notional(pos.CurrentPrice, pos.Quantity)
+		marketValue := positionNetMarketValue(pos)
+		grossValue := positionGrossExposure(pos)
 		if pos.Direction == model.Long {
 			totalEquityAdjustment += marketValue
 			b.netExposure += marketValue
-			pos.UnrealizedPnL = (pos.CurrentPrice - pos.EntryPrice) * pos.Quantity * pos.Instrument.MultiplierValue()
+			pos.UnrealizedPnL = (pos.CurrentPrice - pos.EntryPrice) * pos.Quantity * pos.PrimaryInstrument().MultiplierValue()
 		} else {
 			totalEquityAdjustment -= marketValue
 			b.netExposure -= marketValue
-			pos.UnrealizedPnL = (pos.EntryPrice - pos.CurrentPrice) * pos.Quantity * pos.Instrument.MultiplierValue()
+			pos.UnrealizedPnL = (pos.EntryPrice - pos.CurrentPrice) * pos.Quantity * pos.PrimaryInstrument().MultiplierValue()
 		}
-		b.grossExposure += marketValue
+		b.grossExposure += grossValue
 		totalUnrealized += pos.UnrealizedPnL
 	}
 
@@ -460,6 +498,51 @@ func (b *Book) reconcile(ctx context.Context) {
 			"ibkr_avg_cost", d.IBKRAvgCost,
 		)
 	}
+}
+
+func lookupInstrumentPrice(prices map[string]float64, inst model.Instrument) (float64, bool) {
+	if price, ok := prices[inst.Key()]; ok && price > 0 {
+		return price, true
+	}
+	if price, ok := prices[inst.Symbol]; ok && price > 0 {
+		return price, true
+	}
+	return 0, false
+}
+
+func positionCashNotional(pos *model.Position, price float64) float64 {
+	if pos == nil {
+		return 0
+	}
+	if pos.IsMultiLeg() {
+		return math.Abs(price * pos.Quantity * pos.PrimaryInstrument().MultiplierValue())
+	}
+	return pos.Instrument.Notional(price, pos.Quantity)
+}
+
+func positionNetMarketValue(pos *model.Position) float64 {
+	if pos == nil {
+		return 0
+	}
+	if pos.IsMultiLeg() {
+		return math.Abs(pos.CurrentPrice * pos.Quantity * pos.PrimaryInstrument().MultiplierValue())
+	}
+	return pos.Instrument.Notional(pos.CurrentPrice, pos.Quantity)
+}
+
+func positionGrossExposure(pos *model.Position) float64 {
+	if pos == nil {
+		return 0
+	}
+	if !pos.IsMultiLeg() {
+		return pos.Instrument.Notional(pos.CurrentPrice, pos.Quantity)
+	}
+
+	total := 0.0
+	for _, leg := range pos.Legs {
+		total += math.Abs(leg.Instrument.Notional(leg.CurrentOr(pos.CurrentPrice), leg.EffectiveQuantity(pos.Quantity)))
+	}
+	return total
 }
 
 func reconcileKey(conID int64, symbol string) string {

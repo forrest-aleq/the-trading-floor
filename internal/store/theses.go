@@ -13,6 +13,10 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 	if err != nil {
 		return err
 	}
+	legs, err := json.Marshal(thesis.Legs)
+	if err != nil {
+		return err
+	}
 	evidence, err := json.Marshal(thesis.Evidence)
 	if err != nil {
 		return err
@@ -57,22 +61,24 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 
 	_, err = db.Pool.Exec(ctx,
 		`INSERT INTO theses (
-			id, opportunity_id, desk_id, strategy, instrument, direction, conviction, health,
+			id, opportunity_id, desk_id, strategy, structure, instrument, legs, direction, conviction, health,
 			evidence, counter_args, entry_price, target_price, stop_loss, position_size,
 			time_horizon, kill_rules, status, autonomy_mode, scan_territory, execution_territory,
 			competence_key, competence_trust, competence_confidence, prosecution, council_verdict, outcome,
 			created_at, resolved_at, domain
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8,
-			$9, $10, $11, $12, $13, $14,
-			NULLIF($15, '')::interval, $16, $17, $18, $19, $20,
-			$21, $22, $23, $24, $25, $26,
-			$27, $28, $29
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+			$11, $12, $13, $14, $15, $16,
+			NULLIF($17, '')::interval, $18, $19, $20, $21, $22,
+			$23, $24, $25, $26, $27, $28,
+			$29, $30, $31
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			opportunity_id = EXCLUDED.opportunity_id,
 			strategy = EXCLUDED.strategy,
+			structure = EXCLUDED.structure,
 			instrument = EXCLUDED.instrument,
+			legs = EXCLUDED.legs,
 			direction = EXCLUDED.direction,
 			conviction = EXCLUDED.conviction,
 			health = EXCLUDED.health,
@@ -100,7 +106,9 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 		thesis.OpportunityID,
 		thesis.DeskID,
 		thesis.Strategy,
+		thesis.Structure,
 		instrument,
+		legs,
 		string(thesis.Direction),
 		thesis.Conviction,
 		thesis.Health,
@@ -132,6 +140,7 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	row := db.Pool.QueryRow(ctx,
 		`SELECT instrument, direction, strategy, conviction, health, evidence, counter_args,
+		        structure, legs,
 		        entry_price, target_price, stop_loss, position_size, prosecution, status,
 		        autonomy_mode, scan_territory, execution_territory, competence_key,
 		        competence_trust, competence_confidence, domain
@@ -142,6 +151,7 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 
 	var thesis model.Thesis
 	var instrument []byte
+	var legs []byte
 	var evidence []byte
 	var counterArgs []byte
 	var prosecution []byte
@@ -157,6 +167,8 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 		&thesis.Health,
 		&evidence,
 		&counterArgs,
+		&thesis.Structure,
+		&legs,
 		&thesis.EntryPrice,
 		&thesis.TargetPrice,
 		&thesis.StopLoss,
@@ -185,6 +197,11 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 
 	if len(instrument) > 0 {
 		if err := json.Unmarshal(instrument, &thesis.Instrument); err != nil {
+			return nil, err
+		}
+	}
+	if len(legs) > 0 {
+		if err := json.Unmarshal(legs, &thesis.Legs); err != nil {
 			return nil, err
 		}
 	}

@@ -63,6 +63,10 @@ func (m *Monitor) RunOnce() {
 				m.requestClose(pos, pos.CurrentPrice, "stop_loss")
 				continue
 			}
+			if shouldCloseOnTarget(pos, thesis) {
+				m.requestClose(pos, pos.CurrentPrice, "target_hit")
+				continue
+			}
 			if thesis.TimeHorizon > 0 && time.Since(pos.OpenedAt) >= thesis.TimeHorizon {
 				m.requestClose(pos, pos.CurrentPrice, "time_horizon")
 				continue
@@ -84,7 +88,7 @@ func (m *Monitor) lookup(thesisID string) (*model.Thesis, bool) {
 
 func (m *Monitor) requestClose(pos *model.Position, exitPrice float64, reason string) {
 	m.log.Warn("position exit triggered",
-		"symbol", pos.Instrument.Symbol,
+		"symbol", pos.DisplaySymbol(),
 		"desk", pos.DeskID,
 		"reason", reason,
 		"exit_price", exitPrice,
@@ -104,6 +108,17 @@ func shouldCloseOnStop(pos *model.Position, thesis *model.Thesis) bool {
 		return pos.CurrentPrice <= thesis.StopLoss
 	}
 	return pos.CurrentPrice >= thesis.StopLoss
+}
+
+func shouldCloseOnTarget(pos *model.Position, thesis *model.Thesis) bool {
+	if thesis == nil || thesis.TargetPrice <= 0 {
+		return false
+	}
+
+	if pos.Direction == model.Long {
+		return pos.CurrentPrice >= thesis.TargetPrice
+	}
+	return pos.CurrentPrice <= thesis.TargetPrice
 }
 
 func emergencyLossHit(pos *model.Position) bool {

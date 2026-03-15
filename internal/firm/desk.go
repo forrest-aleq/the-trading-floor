@@ -41,6 +41,7 @@ type Desk struct {
 	engrams     *memory.EngramStore
 	store       *store.DB
 	onTrade     func()
+	watchlist   func([]model.Instrument)
 
 	minConviction    float64
 	councilThreshold float64
@@ -69,6 +70,7 @@ type DeskConfig struct {
 	Engrams     *memory.EngramStore
 	Store       *store.DB
 	OnTrade     func()
+	Watchlist   func([]model.Instrument)
 
 	MinConviction    float64
 	CouncilThreshold float64
@@ -114,6 +116,7 @@ func NewDesk(cfg DeskConfig) *Desk {
 		engrams:          cfg.Engrams,
 		store:            cfg.Store,
 		onTrade:          cfg.OnTrade,
+		watchlist:        cfg.Watchlist,
 		minConviction:    cfg.MinConviction,
 		councilThreshold: cfg.CouncilThreshold,
 		regime: model.Regime{
@@ -172,7 +175,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	// Engram lookup: boost conviction if we have a cached winning play for this pattern
 	if d.ABGroup == "A" && d.engrams != nil {
-		intentKey := thesis.Strategy + "_" + thesis.Instrument.SecType
+		intentKey := thesis.Strategy + "_" + thesis.ExecutionCapability()
 		engrams := d.engrams.Lookup(intentKey, d.ID)
 		for _, eg := range engrams {
 			if eg.TotalObservations() >= 5 && eg.WinRate() > 0.6 {
@@ -207,6 +210,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	d.applyAutonomy(thesis, autonomy)
 	d.log.Info("autonomy resolved",
 		"thesis_id", thesis.ID,
+		"symbol", thesis.DisplaySymbol(),
 		"mode", autonomy.Mode,
 		"reason", autonomy.Reason,
 		"scan_territory", autonomy.ScanTerritory.Status,
@@ -295,14 +299,16 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		ID:          thesis.ID,
 		ThesisID:    thesis.ID,
 		DeskID:      d.ID,
-		Instrument:  thesis.Instrument,
+		Structure:   thesis.Structure,
+		Instrument:  thesis.PrimaryInstrument(),
+		Legs:        append([]model.TradeLeg(nil), thesis.Legs...),
 		Direction:   thesis.Direction,
 		Quantity:    thesis.PositionSize,
 		OrderType:   model.OrderLimit,
 		LimitPrice:  thesis.EntryPrice,
 		StopPrice:   thesis.StopLoss,
 		TimeInForce: "DAY",
-		Notional:    thesis.Instrument.Notional(thesis.EntryPrice, thesis.PositionSize),
+		Notional:    thesis.GrossEntryNotional(thesis.PositionSize),
 	}
 
 	snapshot := d.book.Snapshot()
@@ -328,6 +334,9 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		d.recordAntiPortfolio(ctx, thesis, "blocked_by_risk_gate")
 		return
 	}
+	if d.watchlist != nil {
+		d.watchlist(thesis.ExecutionInstruments())
+	}
 
 	span = span.WithStage("book")
 	ctx = trace.IntoContext(ctx, span)
@@ -338,7 +347,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		thesis.Status = model.ThesisNursery
 		d.log.Info("thesis routed to shadow book",
 			"thesis_id", thesis.ID,
-			"symbol", thesis.Instrument.Symbol,
+			"symbol", thesis.DisplaySymbol(),
 			"scan_territory", thesis.ScanTerritory,
 			"execution_territory", thesis.ExecutionTerritory,
 			"autonomy_mode", thesis.AutonomyMode,
@@ -353,7 +362,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		executionCancel()
 		d.logStage("execution", stageStart,
 			"thesis_id", thesis.ID,
-			"symbol", thesis.Instrument.Symbol,
+			"symbol", thesis.DisplaySymbol(),
 		)
 		if err != nil {
 			d.log.Error("execution failed", "thesis_id", thesis.ID, "error", err)
@@ -375,7 +384,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	d.log.Info("trade executed",
 		"thesis_id", thesis.ID,
-		"symbol", pos.Instrument.Symbol,
+		"symbol", pos.DisplaySymbol(),
 		"direction", pos.Direction,
 		"price", pos.EntryPrice,
 		"quantity", pos.Quantity,
@@ -505,14 +514,14 @@ func (d *Desk) normalizePositionSize(thesis *model.Thesis) {
 	}
 
 	targetNotional := d.Capital * thesis.PositionSize
-	unitNotional := thesis.Instrument.Notional(thesis.EntryPrice, 1)
+	unitNotional := thesis.GrossEntryNotional(1)
 	if targetNotional <= 0 || unitNotional <= 0 {
 		return
 	}
 
 	quantity := targetNotional / unitNotional
-	switch thesis.Instrument.SecType {
-	case "OPT", "FUT":
+	switch thesis.PrimaryInstrument().SecType {
+	case "OPT", "FUT", "FOP":
 		quantity = math.Max(1, math.Floor(quantity))
 	}
 	thesis.PositionSize = quantity
@@ -538,7 +547,8 @@ func (d *Desk) resolveAutonomy(scanTerritory belief.TerritoryAssessment, thesis 
 		return autonomyDecision{Mode: model.Autonomous}
 	}
 
-	key := belief.CompetenceKey(d.ID, thesis.Strategy, thesis.Instrument.SecType, d.regime.Key())
+	capability := thesis.ExecutionCapability()
+	key := belief.CompetenceKey(d.ID, thesis.Strategy, capability, d.regime.Key())
 	if d.ABGroup != "A" || d.beliefs == nil {
 		return autonomyDecision{
 			Mode:          model.Autonomous,
@@ -549,7 +559,7 @@ func (d *Desk) resolveAutonomy(scanTerritory belief.TerritoryAssessment, thesis 
 		}
 	}
 
-	execTerritory := d.beliefs.AssessTerritory(d.ID, thesis.Strategy, thesis.Instrument.SecType, d.regime.Key(), 20)
+	execTerritory := d.beliefs.AssessTerritory(d.ID, thesis.Strategy, capability, d.regime.Key(), 20)
 	decision := autonomyDecision{
 		Mode:          model.Restricted,
 		ScanTerritory: scanTerritory,

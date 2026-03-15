@@ -26,7 +26,8 @@ func NewLearnWorker(graph *belief.Graph, engrams *EngramStore) *LearnWorker {
 
 // ProcessOutcome handles a completed trade
 func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.ThesisOutcome, regime model.Regime) {
-	key := belief.CompetenceKey(thesis.DeskID, thesis.Strategy, thesis.Instrument.SecType, regime.Key())
+	capability := thesis.ExecutionCapability()
+	key := belief.CompetenceKey(thesis.DeskID, thesis.Strategy, capability, regime.Key())
 	scanKey := ""
 	if thesis.Domain != "" {
 		scanKey = belief.CompetenceKey(thesis.DeskID, "scan", thesis.Domain, regime.Key())
@@ -81,9 +82,9 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 
 	// Record engram for pattern caching
 	if l.engrams != nil {
-		intentKey := thesis.Strategy + "_" + thesis.Instrument.SecType
+		intentKey := thesis.Strategy + "_" + capability
 		globalContextPattern := thesis.Strategy + "_" + regime.Key()
-		deskContextPattern := thesis.Instrument.Symbol + "_" + regime.Key()
+		deskContextPattern := thesis.DisplaySymbol() + "_" + regime.Key()
 		returnPct := 0.0
 		if thesis.EntryPrice > 0 {
 			returnPct = outcome.RealizedPnL / (thesis.EntryPrice * thesis.PositionSize) * 100

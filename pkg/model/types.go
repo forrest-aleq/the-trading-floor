@@ -1,7 +1,9 @@
 package model
 
 import (
+	"math"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,6 +28,44 @@ type Instrument struct {
 	ConID      int64   `json:"con_id,omitempty"`     // IBKR contract ID
 }
 
+func (i Instrument) Key() string {
+	parts := []string{
+		normalizeKeyPart(i.SecType),
+		normalizeKeyPart(i.Symbol),
+		normalizeKeyPart(i.Exchange),
+		normalizeKeyPart(i.Currency),
+		normalizeKeyPart(i.Expiry),
+		strconv.FormatFloat(i.Strike, 'f', -1, 64),
+		normalizeKeyPart(i.Right),
+		normalizeKeyPart(i.Multiplier),
+		strconv.FormatInt(i.ConID, 10),
+	}
+	return strings.Join(parts, "|")
+}
+
+func (i Instrument) Label() string {
+	if i.Symbol == "" {
+		return "UNKNOWN"
+	}
+
+	label := i.Symbol
+	if i.SecType == "OPT" || i.SecType == "FOP" {
+		if i.Expiry != "" {
+			label += " " + i.Expiry
+		}
+		if i.Strike > 0 {
+			label += " " + strconv.FormatFloat(i.Strike, 'f', -1, 64)
+		}
+		if i.Right != "" {
+			label += strings.ToUpper(i.Right)
+		}
+	}
+	if i.SecType == "FUT" && i.Expiry != "" {
+		label += " " + i.Expiry
+	}
+	return label
+}
+
 func (i Instrument) MultiplierValue() float64 {
 	if i.Multiplier != "" {
 		if parsed, err := strconv.ParseFloat(i.Multiplier, 64); err == nil && parsed > 0 {
@@ -43,6 +83,68 @@ func (i Instrument) MultiplierValue() float64 {
 
 func (i Instrument) Notional(price, quantity float64) float64 {
 	return price * quantity * i.MultiplierValue()
+}
+
+type TradeLeg struct {
+	Instrument   Instrument     `json:"instrument"`
+	Direction    TradeDirection `json:"direction"`
+	Ratio        float64        `json:"ratio,omitempty"`
+	Quantity     float64        `json:"quantity,omitempty"`
+	EntryPrice   float64        `json:"entry_price,omitempty"`
+	CurrentPrice float64        `json:"current_price,omitempty"`
+	TargetPrice  float64        `json:"target_price,omitempty"`
+	StopLoss     float64        `json:"stop_loss,omitempty"`
+}
+
+func (l TradeLeg) EffectiveRatio() float64 {
+	if l.Ratio > 0 {
+		return l.Ratio
+	}
+	if l.Quantity > 0 {
+		return l.Quantity
+	}
+	return 1
+}
+
+func (l TradeLeg) EffectiveQuantity(units float64) float64 {
+	if units <= 0 {
+		units = 1
+	}
+	if l.Quantity > 0 {
+		return l.Quantity
+	}
+	return l.EffectiveRatio() * units
+}
+
+func (l TradeLeg) PriceOr(fallback float64) float64 {
+	if l.EntryPrice > 0 {
+		return l.EntryPrice
+	}
+	if l.CurrentPrice > 0 {
+		return l.CurrentPrice
+	}
+	return fallback
+}
+
+func (l TradeLeg) CurrentOr(fallback float64) float64 {
+	if l.CurrentPrice > 0 {
+		return l.CurrentPrice
+	}
+	if l.EntryPrice > 0 {
+		return l.EntryPrice
+	}
+	return fallback
+}
+
+func (l TradeLeg) SignedPrice(price float64) float64 {
+	if l.Direction == Short {
+		return -price
+	}
+	return price
+}
+
+func (l TradeLeg) GrossNotional(price, units float64) float64 {
+	return math.Abs(l.Instrument.Notional(price, l.EffectiveQuantity(units)))
 }
 
 // Opportunity is scanner output — a tradeable setup detected from signals
@@ -83,7 +185,9 @@ type Thesis struct {
 	DeskID        string         `json:"desk_id"`
 	Domain        string         `json:"domain,omitempty"`
 	Strategy      string         `json:"strategy"`
+	Structure     string         `json:"structure,omitempty"`
 	Instrument    Instrument     `json:"instrument"`
+	Legs          []TradeLeg     `json:"legs,omitempty"`
 	Direction     TradeDirection `json:"direction"`
 
 	Conviction  float64    `json:"conviction"`
@@ -156,7 +260,9 @@ type Order struct {
 	ID          string         `json:"id"`
 	ThesisID    string         `json:"thesis_id"`
 	DeskID      string         `json:"desk_id"`
+	Structure   string         `json:"structure,omitempty"`
 	Instrument  Instrument     `json:"instrument"`
+	Legs        []TradeLeg     `json:"legs,omitempty"`
 	Direction   TradeDirection `json:"direction"`
 	Quantity    float64        `json:"quantity"`
 	OrderType   OrderType      `json:"order_type"`
@@ -182,7 +288,9 @@ const (
 type Fill struct {
 	OrderID     string         `json:"order_id"`
 	IBKROrderID int64          `json:"ibkr_order_id"`
+	Structure   string         `json:"structure,omitempty"`
 	Instrument  Instrument     `json:"instrument"`
+	Legs        []TradeLeg     `json:"legs,omitempty"`
 	Direction   TradeDirection `json:"direction"`
 	Quantity    float64        `json:"quantity"`
 	AvgPrice    float64        `json:"avg_price"`
@@ -195,7 +303,9 @@ type Position struct {
 	ID             string         `json:"id"`
 	ThesisID       string         `json:"thesis_id"`
 	DeskID         string         `json:"desk_id"`
+	Structure      string         `json:"structure,omitempty"`
 	Instrument     Instrument     `json:"instrument"`
+	Legs           []TradeLeg     `json:"legs,omitempty"`
 	Direction      TradeDirection `json:"direction"`
 	Quantity       float64        `json:"quantity"`
 	EntryPrice     float64        `json:"entry_price"`
@@ -278,6 +388,181 @@ func (c *CompetenceState) InferAutonomy() AutonomyMode {
 
 func (c *CompetenceState) TotalObservations() int {
 	return c.SuccessCount + c.FailureCount
+}
+
+func (t Thesis) IsMultiLeg() bool {
+	return len(t.Legs) > 0
+}
+
+func (t Thesis) PrimaryInstrument() Instrument {
+	return primaryInstrument(t.Legs, t.Instrument)
+}
+
+func (t Thesis) ExecutionInstruments() []Instrument {
+	return tradeInstruments(t.Legs, t.Instrument)
+}
+
+func (t Thesis) DisplaySymbol() string {
+	return tradeDisplaySymbol(t.Structure, t.Legs, t.Instrument)
+}
+
+func (t Thesis) ExecutionCapability() string {
+	return tradeCapability(t.Structure, t.Legs, t.Instrument)
+}
+
+func (t Thesis) GrossEntryNotional(units float64) float64 {
+	return tradeGrossNotional(t.Legs, t.Instrument, t.EntryPrice, units)
+}
+
+func (o Order) IsMultiLeg() bool {
+	return len(o.Legs) > 0
+}
+
+func (o Order) PrimaryInstrument() Instrument {
+	return primaryInstrument(o.Legs, o.Instrument)
+}
+
+func (o Order) ExecutionInstruments() []Instrument {
+	return tradeInstruments(o.Legs, o.Instrument)
+}
+
+func (o Order) DisplaySymbol() string {
+	return tradeDisplaySymbol(o.Structure, o.Legs, o.Instrument)
+}
+
+func (o Order) ExecutionCapability() string {
+	return tradeCapability(o.Structure, o.Legs, o.Instrument)
+}
+
+func (o Order) GrossNotional() float64 {
+	if o.Notional > 0 {
+		return o.Notional
+	}
+	return tradeGrossNotional(o.Legs, o.Instrument, o.LimitPrice, o.Quantity)
+}
+
+func (f Fill) PrimaryInstrument() Instrument {
+	return primaryInstrument(f.Legs, f.Instrument)
+}
+
+func (f Fill) DisplaySymbol() string {
+	return tradeDisplaySymbol(f.Structure, f.Legs, f.Instrument)
+}
+
+func (p Position) IsMultiLeg() bool {
+	return len(p.Legs) > 0
+}
+
+func (p Position) PrimaryInstrument() Instrument {
+	return primaryInstrument(p.Legs, p.Instrument)
+}
+
+func (p Position) ExecutionInstruments() []Instrument {
+	return tradeInstruments(p.Legs, p.Instrument)
+}
+
+func (p Position) DisplaySymbol() string {
+	return tradeDisplaySymbol(p.Structure, p.Legs, p.Instrument)
+}
+
+func (p Position) GrossExposure() float64 {
+	return tradeCurrentGrossExposure(p.Legs, p.Instrument, p.CurrentPrice, p.Quantity)
+}
+
+func normalizeKeyPart(value string) string {
+	if value == "" {
+		return "_"
+	}
+	return strings.ToUpper(strings.TrimSpace(value))
+}
+
+func primaryInstrument(legs []TradeLeg, fallback Instrument) Instrument {
+	if len(legs) == 0 {
+		return fallback
+	}
+	return legs[0].Instrument
+}
+
+func tradeInstruments(legs []TradeLeg, fallback Instrument) []Instrument {
+	if len(legs) == 0 {
+		if fallback.Symbol == "" {
+			return nil
+		}
+		return []Instrument{fallback}
+	}
+
+	instruments := make([]Instrument, 0, len(legs))
+	for _, leg := range legs {
+		instruments = append(instruments, leg.Instrument)
+	}
+	return instruments
+}
+
+func tradeDisplaySymbol(structure string, legs []TradeLeg, fallback Instrument) string {
+	if len(legs) == 0 {
+		return fallback.Label()
+	}
+
+	labels := make([]string, 0, len(legs))
+	for _, leg := range legs {
+		side := "+"
+		if leg.Direction == Short {
+			side = "-"
+		}
+		ratio := leg.EffectiveRatio()
+		labels = append(labels, side+trimFloat(ratio)+" "+leg.Instrument.Label())
+	}
+
+	prefix := strings.TrimSpace(structure)
+	if prefix == "" {
+		prefix = "combo"
+	}
+	return prefix + "[" + strings.Join(labels, " / ") + "]"
+}
+
+func tradeCapability(structure string, legs []TradeLeg, fallback Instrument) string {
+	if strings.TrimSpace(structure) != "" && !strings.EqualFold(structure, "single") {
+		return strings.ToLower(strings.TrimSpace(structure))
+	}
+	if len(legs) > 1 {
+		secTypes := make([]string, 0, len(legs))
+		for _, leg := range legs {
+			secTypes = append(secTypes, strings.ToLower(leg.Instrument.SecType))
+		}
+		return "combo." + strings.Join(secTypes, "_")
+	}
+	if fallback.SecType == "" {
+		return "single"
+	}
+	return strings.ToUpper(fallback.SecType)
+}
+
+func tradeGrossNotional(legs []TradeLeg, fallback Instrument, fallbackPrice, units float64) float64 {
+	if len(legs) == 0 {
+		return math.Abs(fallback.Notional(fallbackPrice, units))
+	}
+
+	total := 0.0
+	for _, leg := range legs {
+		total += leg.GrossNotional(leg.PriceOr(fallbackPrice), units)
+	}
+	return total
+}
+
+func tradeCurrentGrossExposure(legs []TradeLeg, fallback Instrument, fallbackPrice, units float64) float64 {
+	if len(legs) == 0 {
+		return math.Abs(fallback.Notional(fallbackPrice, units))
+	}
+
+	total := 0.0
+	for _, leg := range legs {
+		total += math.Abs(leg.Instrument.Notional(leg.CurrentOr(fallbackPrice), leg.EffectiveQuantity(units)))
+	}
+	return total
+}
+
+func trimFloat(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 // Regime represents current market conditions

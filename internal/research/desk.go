@@ -34,7 +34,8 @@ func NewDesk(llmRouter *llm.Router, minConviction float64) *Desk {
 const researchPrompt = `You are a trading research desk. Given this opportunity, build a rigorous trading thesis.
 
 You must determine:
-1. INSTRUMENT: What exactly to trade (ticker, option strike/expiry if applicable)
+1. STRUCTURE: single, bull_call_spread, or bear_put_spread
+2. INSTRUMENT / LEGS: What exactly to trade. Use a single instrument for simple trades. Use explicit legs only for debit vertical spreads.
 2. DIRECTION: Long or short
 3. ENTRY: Target entry price
 4. TARGET: Price target (where to take profit)
@@ -46,11 +47,24 @@ You must determine:
 10. KILL RULES: Conditions that would invalidate the thesis
 
 Think like Bill Ackman. Deep conviction requires deep analysis. Don't trade unless you have an edge.
+If you choose a spread, it must be a defined-risk debit vertical:
+- bull_call_spread = long lower-strike call + short higher-strike call, same expiry
+- bear_put_spread = long higher-strike put + short lower-strike put, same expiry
+Do not propose condors, calendars, straddles, pairs, baskets, naked shorts, or undefined-risk structures yet.
 
 Respond in JSON:
 {
+  "structure": "single|bull_call_spread|bear_put_spread",
   "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
-  "direction": "long|short",
+  "legs": [
+    {
+      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
+      "direction": "long|short",
+      "ratio": 1,
+      "entry_price": 0.0
+    }
+  ],
+  "direction": "long",
   "entry_price": 0.0,
   "target_price": 0.0,
   "stop_loss": 0.0,
@@ -118,40 +132,49 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 	}
 
 	killRules := parseKillRules(result.KillRules, result.StopLoss)
+	legs := normalizeTradeLegs(result.Legs, result.EntryPrice)
+	structure := normalizeStructure(result.Structure, legs)
+	primary := model.Instrument{
+		Symbol:   result.Instrument.Symbol,
+		SecType:  result.Instrument.SecType,
+		Currency: result.Instrument.Currency,
+		Exchange: normalizeExchange(result.Instrument.Exchange),
+		Expiry:   result.Instrument.Expiry,
+		Strike:   result.Instrument.Strike,
+		Right:    result.Instrument.Right,
+	}
+	if primary.Symbol == "" && len(legs) > 0 {
+		primary = legs[0].Instrument
+	}
 
 	thesis := &model.Thesis{
 		ID:            uuid.New().String(),
 		OpportunityID: opp.ID,
 		DeskID:        deskID,
 		Strategy:      normalizeStrategy(result.Strategy),
-		Instrument: model.Instrument{
-			Symbol:   result.Instrument.Symbol,
-			SecType:  result.Instrument.SecType,
-			Currency: result.Instrument.Currency,
-			Exchange: normalizeExchange(result.Instrument.Exchange),
-			Expiry:   result.Instrument.Expiry,
-			Strike:   result.Instrument.Strike,
-			Right:    result.Instrument.Right,
-		},
-		Direction:    model.TradeDirection(result.Direction),
-		Conviction:   normalizeConviction(result.Conviction),
-		Health:       0.85, // Initial health
-		Evidence:     evidence,
-		CounterArgs:  result.CounterArgs,
-		EntryPrice:   result.EntryPrice,
-		TargetPrice:  result.TargetPrice,
-		StopLoss:     result.StopLoss,
-		PositionSize: normalizePositionSizePct(result.PositionSizePct),
-		TimeHorizon:  time.Duration(result.TimeHorizonHours) * time.Hour,
-		KillRules:    killRules,
-		Status:       model.ThesisEmbryo,
-		CreatedAt:    time.Now(),
+		Structure:     structure,
+		Instrument:    primary,
+		Legs:          legs,
+		Direction:     model.TradeDirection(result.Direction),
+		Conviction:    normalizeConviction(result.Conviction),
+		Health:        0.85, // Initial health
+		Evidence:      evidence,
+		CounterArgs:   result.CounterArgs,
+		EntryPrice:    result.EntryPrice,
+		TargetPrice:   result.TargetPrice,
+		StopLoss:      result.StopLoss,
+		PositionSize:  normalizePositionSizePct(result.PositionSizePct),
+		TimeHorizon:   time.Duration(result.TimeHorizonHours) * time.Hour,
+		KillRules:     killRules,
+		Status:        model.ThesisEmbryo,
+		CreatedAt:     time.Now(),
 	}
 
 	d.log.Info("thesis formed",
 		"id", thesis.ID,
 		"desk", deskID,
-		"symbol", thesis.Instrument.Symbol,
+		"symbol", thesis.DisplaySymbol(),
+		"structure", thesis.Structure,
 		"direction", thesis.Direction,
 		"conviction", thesis.Conviction,
 		"strategy", thesis.Strategy,
@@ -161,6 +184,7 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 }
 
 type researchResult struct {
+	Structure  string `json:"structure"`
 	Instrument struct {
 		Symbol   string  `json:"symbol"`
 		SecType  string  `json:"sec_type"`
@@ -170,6 +194,20 @@ type researchResult struct {
 		Strike   float64 `json:"strike"`
 		Right    string  `json:"right"`
 	} `json:"instrument"`
+	Legs []struct {
+		Instrument struct {
+			Symbol   string  `json:"symbol"`
+			SecType  string  `json:"sec_type"`
+			Currency string  `json:"currency"`
+			Exchange string  `json:"exchange"`
+			Expiry   string  `json:"expiry"`
+			Strike   float64 `json:"strike"`
+			Right    string  `json:"right"`
+		} `json:"instrument"`
+		Direction  string  `json:"direction"`
+		Ratio      float64 `json:"ratio"`
+		EntryPrice float64 `json:"entry_price"`
+	} `json:"legs"`
 	Direction        string          `json:"direction"`
 	EntryPrice       float64         `json:"entry_price"`
 	TargetPrice      float64         `json:"target_price"`
@@ -187,9 +225,66 @@ type researchResult struct {
 func instrumentNames(instruments []model.Instrument) []string {
 	names := make([]string, len(instruments))
 	for i, inst := range instruments {
-		names[i] = inst.Symbol
+		names[i] = inst.Label()
 	}
 	return names
+}
+
+func normalizeTradeLegs(raw []struct {
+	Instrument struct {
+		Symbol   string  `json:"symbol"`
+		SecType  string  `json:"sec_type"`
+		Currency string  `json:"currency"`
+		Exchange string  `json:"exchange"`
+		Expiry   string  `json:"expiry"`
+		Strike   float64 `json:"strike"`
+		Right    string  `json:"right"`
+	} `json:"instrument"`
+	Direction  string  `json:"direction"`
+	Ratio      float64 `json:"ratio"`
+	EntryPrice float64 `json:"entry_price"`
+}, fallbackEntry float64) []model.TradeLeg {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	legs := make([]model.TradeLeg, 0, len(raw))
+	for _, leg := range raw {
+		if strings.TrimSpace(leg.Instrument.Symbol) == "" {
+			continue
+		}
+		direction := model.TradeDirection(strings.ToLower(strings.TrimSpace(leg.Direction)))
+		if direction != model.Short {
+			direction = model.Long
+		}
+		ratio := leg.Ratio
+		if ratio <= 0 {
+			ratio = 1
+		}
+		entryPrice := leg.EntryPrice
+		if entryPrice <= 0 {
+			entryPrice = fallbackEntry
+		}
+		legs = append(legs, model.TradeLeg{
+			Instrument: model.Instrument{
+				Symbol:   leg.Instrument.Symbol,
+				SecType:  leg.Instrument.SecType,
+				Currency: leg.Instrument.Currency,
+				Exchange: normalizeExchange(leg.Instrument.Exchange),
+				Expiry:   leg.Instrument.Expiry,
+				Strike:   leg.Instrument.Strike,
+				Right:    leg.Instrument.Right,
+			},
+			Direction:  direction,
+			Ratio:      ratio,
+			EntryPrice: entryPrice,
+		})
+	}
+
+	if len(legs) <= 1 {
+		return nil
+	}
+	return legs
 }
 
 func parseKillRules(raw json.RawMessage, stopLoss float64) []model.KillRule {
@@ -303,6 +398,17 @@ func normalizeStrategy(value string) string {
 	default:
 		return value
 	}
+}
+
+func normalizeStructure(value string, legs []model.TradeLeg) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value != "" {
+		return value
+	}
+	if len(legs) > 1 {
+		return "custom_combo"
+	}
+	return "single"
 }
 
 func normalizeExchange(value string) string {

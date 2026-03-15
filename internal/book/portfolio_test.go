@@ -57,3 +57,70 @@ func TestBookMarkKeepsEquityAndUpdatesPnL(t *testing.T) {
 		t.Fatalf("expected net exposure 120, got %.2f", snapshot.NetExposure)
 	}
 }
+
+func TestBookMarksMultiLegVerticalSpread(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 1000)
+	bk.SetDeskCapital("desk-1", 1000)
+
+	longCall := model.Instrument{
+		Symbol:   "NVDA",
+		SecType:  "OPT",
+		Exchange: "SMART",
+		Currency: "USD",
+		Expiry:   "20260619",
+		Strike:   120,
+		Right:    "C",
+	}
+	shortCall := longCall
+	shortCall.Strike = 130
+
+	fill := &model.Fill{
+		OrderID:    "spread-1",
+		Structure:  "bull_call_spread",
+		Instrument: longCall,
+		Legs: []model.TradeLeg{
+			{Instrument: longCall, Direction: model.Long, Ratio: 1, Quantity: 1, EntryPrice: 4.0},
+			{Instrument: shortCall, Direction: model.Short, Ratio: 1, Quantity: 1, EntryPrice: 1.5},
+		},
+		Direction: model.Long,
+		Quantity:  1,
+		AvgPrice:  2.5,
+		FilledAt:  time.Now(),
+	}
+	thesis := &model.Thesis{
+		ID:         "thesis-2",
+		DeskID:     "desk-1",
+		Structure:  "bull_call_spread",
+		Instrument: longCall,
+		Legs: []model.TradeLeg{
+			{Instrument: longCall, Direction: model.Long, Ratio: 1, EntryPrice: 4.0},
+			{Instrument: shortCall, Direction: model.Short, Ratio: 1, EntryPrice: 1.5},
+		},
+		Direction: model.Long,
+	}
+
+	bk.OpenPosition(fill, thesis)
+	bk.Mark(map[string]float64{
+		longCall.Key():  5.5,
+		shortCall.Key(): 2.0,
+	})
+
+	open := bk.GetOpenPositions()
+	if len(open) != 1 {
+		t.Fatalf("expected one open position, got %d", len(open))
+	}
+	if got := open[0].CurrentPrice; got != 3.5 {
+		t.Fatalf("expected net combo price 3.5, got %.2f", got)
+	}
+	if got := open[0].UnrealizedPnL; got != 100 {
+		t.Fatalf("expected unrealized pnl 100, got %.2f", got)
+	}
+
+	snapshot := bk.Snapshot()
+	if snapshot.NAV != 1100 {
+		t.Fatalf("expected NAV 1100 after combo mark, got %.2f", snapshot.NAV)
+	}
+	if snapshot.GrossExposure != 750 {
+		t.Fatalf("expected gross exposure 750, got %.2f", snapshot.GrossExposure)
+	}
+}

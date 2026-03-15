@@ -79,14 +79,18 @@ func (r *Router) Complete(ctx context.Context, req Request) (*Response, error) {
 
 // Convenience for single-prompt calls
 func (r *Router) Ask(ctx context.Context, tier Tier, system, prompt string) (string, error) {
+	return r.AskWithLimit(ctx, tier, system, prompt, 4096, 0.7)
+}
+
+func (r *Router) AskWithLimit(ctx context.Context, tier Tier, system, prompt string, maxTokens int, temperature float64) (string, error) {
 	req := Request{
 		Messages: []Message{
 			{Role: RoleSystem, Content: system},
 			{Role: RoleUser, Content: prompt},
 		},
 		Tier:        tier,
-		MaxTokens:   4096,
-		Temperature: 0.7,
+		MaxTokens:   maxTokens,
+		Temperature: temperature,
 	}
 	resp, err := r.Complete(ctx, req)
 	if err != nil {
@@ -97,14 +101,18 @@ func (r *Router) Ask(ctx context.Context, tier Tier, system, prompt string) (str
 
 // AskJSON is like Ask but requests JSON output
 func (r *Router) AskJSON(ctx context.Context, tier Tier, system, prompt string) (string, error) {
+	return r.AskJSONWithLimit(ctx, tier, system, prompt, 4096, 0.3)
+}
+
+func (r *Router) AskJSONWithLimit(ctx context.Context, tier Tier, system, prompt string, maxTokens int, temperature float64) (string, error) {
 	req := Request{
 		Messages: []Message{
 			{Role: RoleSystem, Content: system},
 			{Role: RoleUser, Content: prompt},
 		},
 		Tier:        tier,
-		MaxTokens:   4096,
-		Temperature: 0.3,
+		MaxTokens:   maxTokens,
+		Temperature: temperature,
 		JSONMode:    true,
 	}
 	resp, err := r.Complete(ctx, req)

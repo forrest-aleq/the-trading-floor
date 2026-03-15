@@ -21,6 +21,15 @@ type Engine struct {
 	minScore float64 // Minimum score to pass (0-100)
 }
 
+const (
+	scannerRequestTimeout    = 8 * time.Second
+	scannerMaxTokens         = 192
+	scannerCompactMaxTokens  = 128
+	scannerContentLimit      = 500
+	scannerCompactContentMax = 220
+	scannerStaleSignalAge    = 6 * time.Hour
+)
+
 func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
 	if minScore == 0 {
 		minScore = 70 // Default: aggressive filter — most signals should be rejected
@@ -57,19 +66,59 @@ Respond in JSON:
 
 // Evaluate checks if a signal contains a tradeable opportunity
 func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string) (*model.Opportunity, bool) {
-	content := formatSignal(sig)
-
-	domainGuide := domainContext(domain)
-	prompt := fmt.Sprintf("Domain filter: %s\n", domain)
-	if domainGuide != "" {
-		prompt += fmt.Sprintf("\nDomain specialization:\n%s\n", domainGuide)
-	}
-	prompt += fmt.Sprintf("\nSignal:\n%s", content)
-
-	resp, err := e.llm.AskJSON(ctx, llm.TierSpeed, scannerPrompt, prompt)
-	if err != nil {
-		e.log.Warn("scanner LLM error", "error", err, "signal_id", sig.ID)
+	if shouldSkipSignal(sig) {
+		e.log.Debug("scanner skipped by deterministic prefilter",
+			"signal_id", sig.ID,
+			"source", sig.Source,
+			"category", sig.Category,
+			"type", sig.Type,
+			"urgency", sig.Urgency,
+		)
 		return nil, false
+	}
+
+	prompts := []struct {
+		name      string
+		content   string
+		maxTokens int
+	}{
+		{
+			name:      "default",
+			content:   buildPrompt(domain, formatSignalWithLimit(sig, scannerContentLimit, 4, 12)),
+			maxTokens: scannerMaxTokens,
+		},
+		{
+			name:      "compact",
+			content:   buildPrompt(domain, formatSignalWithLimit(sig, scannerCompactContentMax, 2, 6)),
+			maxTokens: scannerCompactMaxTokens,
+		},
+	}
+
+	var resp string
+	var err error
+	for i, candidate := range prompts {
+		reqCtx, cancel := context.WithTimeout(ctx, scannerRequestTimeout)
+		resp, err = e.llm.AskJSONWithLimit(reqCtx, llm.TierSpeed, scannerPrompt, candidate.content, candidate.maxTokens, 0.1)
+		cancel()
+		if err == nil {
+			break
+		}
+		if i == len(prompts)-1 || !isContextWindowError(err) {
+			e.log.Warn("scanner LLM error",
+				"error", err,
+				"signal_id", sig.ID,
+				"attempt", candidate.name,
+				"prompt_chars", len(candidate.content),
+				"max_tokens", candidate.maxTokens,
+			)
+			return nil, false
+		}
+		e.log.Warn("scanner request exceeded context window, retrying compact prompt",
+			"signal_id", sig.ID,
+			"attempt", candidate.name,
+			"prompt_chars", len(candidate.content),
+			"max_tokens", candidate.maxTokens,
+		)
 	}
 
 	cleaned, err := llm.ExtractJSON(resp)
@@ -132,6 +181,16 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 	return opp, true
 }
 
+func shouldSkipSignal(sig signal.Signal) bool {
+	if !sig.Timestamp.IsZero() && time.Since(sig.Timestamp) > scannerStaleSignalAge {
+		return true
+	}
+	if sig.Type == signal.TypeSocial && sig.Urgency < 0.5 && len(sig.CorroboratingSources) == 0 {
+		return true
+	}
+	return false
+}
+
 type scanResult struct {
 	Tradeable   bool    `json:"tradeable"`
 	Score       float64 `json:"score"`
@@ -187,6 +246,10 @@ Preferred instruments: high-liquidity stocks and ETFs suitable for systematic en
 }
 
 func formatSignal(sig signal.Signal) string {
+	return formatSignalWithLimit(sig, scannerContentLimit, 4, 12)
+}
+
+func formatSignalWithLimit(sig signal.Signal, contentLimit, relatedLimit, entityLimit int) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Source: %s\n", sig.Source))
 	sb.WriteString(fmt.Sprintf("Type: %s\n", sig.Type))
@@ -196,23 +259,23 @@ func formatSignal(sig signal.Signal) string {
 		sb.WriteString(fmt.Sprintf("Cluster: %s\n", sig.ClusterID))
 	}
 	if len(sig.RelatedSignalIDs) > 0 {
-		sb.WriteString(fmt.Sprintf("Related signals: %d (%s)\n", len(sig.RelatedSignalIDs), strings.Join(sampleStrings(sig.RelatedSignalIDs, 4), ", ")))
+		sb.WriteString(fmt.Sprintf("Related signals: %d (%s)\n", len(sig.RelatedSignalIDs), strings.Join(sampleStrings(sig.RelatedSignalIDs, relatedLimit), ", ")))
 	}
 	if len(sig.CorroboratingSources) > 0 {
-		sb.WriteString(fmt.Sprintf("Corroborating sources: %s\n", strings.Join(sampleStrings(sig.CorroboratingSources, 4), ", ")))
+		sb.WriteString(fmt.Sprintf("Corroborating sources: %s\n", strings.Join(sampleStrings(sig.CorroboratingSources, relatedLimit), ", ")))
 	}
 	if len(sig.CorroboratingEntities) > 0 {
-		sb.WriteString(fmt.Sprintf("Corroborating entities: %s\n", strings.Join(sampleStrings(sig.CorroboratingEntities, 4), ", ")))
+		sb.WriteString(fmt.Sprintf("Corroborating entities: %s\n", strings.Join(sampleStrings(sig.CorroboratingEntities, relatedLimit), ", ")))
 	}
 	if sig.Translated != "" {
-		sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(sig.Translated, 1200)))
+		sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(sig.Translated, contentLimit)))
 	} else if len(sig.Raw) > 0 {
-		sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(string(sig.Raw), 1200)))
+		sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(string(sig.Raw), contentLimit)))
 	}
 	if len(sig.Entities) > 0 {
 		entities := sig.Entities
-		if len(entities) > 12 {
-			entities = entities[:12]
+		if len(entities) > entityLimit {
+			entities = entities[:entityLimit]
 		}
 		names := make([]string, len(entities))
 		for i, e := range entities {
@@ -239,4 +302,25 @@ func truncateForPrompt(text string, max int) string {
 		return text[:max]
 	}
 	return text[:max-3] + "..."
+}
+
+func buildPrompt(domain, content string) string {
+	domainGuide := domainContext(domain)
+	prompt := fmt.Sprintf("Domain filter: %s\n", domain)
+	if domainGuide != "" {
+		prompt += fmt.Sprintf("\nDomain specialization:\n%s\n", domainGuide)
+	}
+	prompt += fmt.Sprintf("\nSignal:\n%s", content)
+	return prompt
+}
+
+func isContextWindowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "context size") ||
+		strings.Contains(message, "context window") ||
+		strings.Contains(message, "too many tokens") ||
+		strings.Contains(message, "maximum context length")
 }

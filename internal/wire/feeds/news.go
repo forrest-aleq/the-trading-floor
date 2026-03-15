@@ -14,10 +14,12 @@ import (
 
 // NewsFeed polls RSS feeds for news signals.
 type NewsFeed struct {
-	log     *slog.Logger
-	sources []RSSSource
-	http    *http.Client
-	states  map[string]*sourceState
+	log             *slog.Logger
+	sources         []RSSSource
+	http            *http.Client
+	states          map[string]*sourceState
+	maxItemsPerPoll int
+	maxItemAge      time.Duration
 }
 
 type RSSSource struct {
@@ -49,10 +51,12 @@ func NewNewsFeed(sources []RSSSource) *NewsFeed {
 	}
 
 	return &NewsFeed{
-		log:     slog.Default().With("component", "feed-news"),
-		sources: sources,
-		http:    newFeedHTTPClient(),
-		states:  states,
+		log:             slog.Default().With("component", "feed-news"),
+		sources:         sources,
+		http:            newFeedHTTPClient(),
+		states:          states,
+		maxItemsPerPoll: readFeedInt("WIRE_NEWS_MAX_ITEMS_PER_SOURCE", 5),
+		maxItemAge:      readFeedDuration("WIRE_NEWS_MAX_ITEM_AGE", 6*time.Hour),
 	}
 }
 
@@ -97,8 +101,15 @@ func (f *NewsFeed) fetchAndSend(ctx context.Context, src RSSSource, out chan<- s
 		return
 	}
 	state.RecordSuccess()
+	emitted := 0
+	now := time.Now()
 
 	for _, item := range items {
+		publishedAt := signalTimestamp(item.PubDate)
+		if f.maxItemAge > 0 && now.Sub(publishedAt) > f.maxItemAge {
+			continue
+		}
+
 		guid := strings.TrimSpace(item.GUID)
 		if guid == "" {
 			guid = strings.TrimSpace(item.Link)
@@ -128,7 +139,7 @@ func (f *NewsFeed) fetchAndSend(ctx context.Context, src RSSSource, out chan<- s
 			Source:     src.Name,
 			Type:       signal.TypeNews,
 			Category:   src.Category,
-			Timestamp:  signalTimestamp(item.PubDate),
+			Timestamp:  publishedAt,
 			Urgency:    0.5,
 			Entities:   entities,
 			Raw:        content,
@@ -138,8 +149,17 @@ func (f *NewsFeed) fetchAndSend(ctx context.Context, src RSSSource, out chan<- s
 
 		select {
 		case out <- sig:
+			emitted++
+			if f.maxItemsPerPoll > 0 && emitted >= f.maxItemsPerPoll {
+				f.log.Info("rss source burst capped", "source", src.Name, "emitted", emitted, "max_items", f.maxItemsPerPoll)
+				return
+			}
 		case <-ctx.Done():
 			return
 		}
+	}
+
+	if emitted > 0 {
+		f.log.Info("rss source emitted signals", "source", src.Name, "count", emitted)
 	}
 }

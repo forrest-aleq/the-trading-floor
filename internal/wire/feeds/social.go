@@ -17,17 +17,21 @@ import (
 // Polls Reddit (pushshift) and StockTwits for high-engagement posts
 // mentioning tickers.
 type SocialFeed struct {
-	log      *slog.Logger
-	client   *http.Client
-	interval time.Duration
-	states   map[string]*sourceState
+	log               *slog.Logger
+	client            *http.Client
+	interval          time.Duration
+	states            map[string]*sourceState
+	maxStockTwitsPoll int
+	maxRedditPoll     int
 }
 
 func NewSocialFeed() *SocialFeed {
 	return &SocialFeed{
-		log:      slog.Default().With("component", "feed-social"),
-		client:   newFeedHTTPClient(),
-		interval: 2 * time.Minute,
+		log:               slog.Default().With("component", "feed-social"),
+		client:            newFeedHTTPClient(),
+		interval:          2 * time.Minute,
+		maxStockTwitsPoll: readFeedInt("WIRE_SOCIAL_MAX_STOCKTWITS_ITEMS", 4),
+		maxRedditPoll:     readFeedInt("WIRE_SOCIAL_MAX_REDDIT_ITEMS", 3),
 		states: map[string]*sourceState{
 			"stocktwits":            newSourceState(2048),
 			"reddit/wallstreetbets": newSourceState(2048),
@@ -107,7 +111,12 @@ func (f *SocialFeed) pollStockTwits(ctx context.Context, out chan<- signal.Signa
 
 	newCount := 0
 	for _, sym := range result.Symbols {
-		id := fmt.Sprintf("stocktwits-trending-%s-%s", sym.Symbol, time.Now().Format("2006-01-02-15"))
+		symbol := strings.ToUpper(strings.TrimSpace(sym.Symbol))
+		if len(symbol) == 0 || len(symbol) > 5 || !isAlpha(symbol) {
+			continue
+		}
+
+		id := fmt.Sprintf("stocktwits-trending-%s-%s", symbol, time.Now().Format("2006-01-02-15"))
 		if state.Seen(id) {
 			continue
 		}
@@ -115,7 +124,7 @@ func (f *SocialFeed) pollStockTwits(ctx context.Context, out chan<- signal.Signa
 
 		raw, _ := json.Marshal(map[string]string{
 			"source": "stocktwits",
-			"symbol": sym.Symbol,
+			"symbol": symbol,
 			"title":  sym.Title,
 			"type":   "trending",
 		})
@@ -127,13 +136,17 @@ func (f *SocialFeed) pollStockTwits(ctx context.Context, out chan<- signal.Signa
 			Category:   "flows",
 			Timestamp:  time.Now(),
 			Urgency:    0.4,
-			Entities:   []signal.Entity{{Name: sym.Symbol, Type: "instrument"}},
+			Entities:   []signal.Entity{{Name: symbol, Type: "instrument"}},
 			Raw:        raw,
-			Translated: fmt.Sprintf("StockTwits: %s (%s) is trending", sym.Symbol, sym.Title),
+			Translated: fmt.Sprintf("StockTwits: %s (%s) is trending", symbol, sym.Title),
 		}
 
 		select {
 		case out <- sig:
+			if f.maxStockTwitsPoll > 0 && newCount >= f.maxStockTwitsPoll {
+				f.log.Info("stocktwits burst capped", "max_items", f.maxStockTwitsPoll)
+				return
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -252,13 +265,17 @@ func (f *SocialFeed) pollReddit(ctx context.Context, out chan<- signal.Signal, s
 
 		select {
 		case out <- sig:
+			if f.maxRedditPoll > 0 && newCount >= f.maxRedditPoll {
+				f.log.Info("reddit burst capped", "subreddit", subreddit, "max_items", f.maxRedditPoll)
+				return
+			}
 		case <-ctx.Done():
 			return
 		}
 	}
 
 	if newCount > 0 {
-		f.log.Info("reddit posts fetched", "subreddit", subreddit, "new", newCount)
+		f.log.Info("reddit posts emitted", "subreddit", subreddit, "new", newCount)
 	}
 }
 

@@ -74,6 +74,15 @@ type DeskConfig struct {
 	CouncilThreshold float64
 }
 
+const (
+	deskScannerTimeout    = 20 * time.Second
+	deskResearchTimeout   = 45 * time.Second
+	deskProsecutionTimout = 35 * time.Second
+	deskCouncilTimeout    = 45 * time.Second
+	deskExecutionTimeout  = 30 * time.Second
+	deskSlowStageWarnAt   = 10 * time.Second
+)
+
 func NewDesk(cfg DeskConfig) *Desk {
 	if cfg.MinConviction == 0 {
 		cfg.MinConviction = 0.65
@@ -121,11 +130,17 @@ func NewDesk(cfg DeskConfig) *Desk {
 func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	span := trace.FromContext(ctx).WithStage("scanner")
 	ctx = trace.IntoContext(ctx, span)
-
-	d.persistSignal(ctx, sig)
 	scanTerritory := d.assessScanTerritory()
 
-	opp, ok := d.scanner.Evaluate(ctx, sig, d.Domain)
+	stageStart := time.Now()
+	scanCtx, scanCancel := context.WithTimeout(ctx, deskScannerTimeout)
+	opp, ok := d.scanner.Evaluate(scanCtx, sig, d.Domain)
+	scanCancel()
+	d.logStage("scanner", stageStart,
+		"signal_id", sig.ID,
+		"tradeable", ok,
+		"scan_territory", scanTerritory.Status,
+	)
 	if !ok {
 		return
 	}
@@ -139,7 +154,14 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	span = span.WithStage("research")
 	ctx = trace.IntoContext(ctx, span)
 
-	thesis, err := d.research.Investigate(ctx, opp, d.ID)
+	stageStart = time.Now()
+	researchCtx, researchCancel := context.WithTimeout(ctx, deskResearchTimeout)
+	thesis, err := d.research.Investigate(researchCtx, opp, d.ID)
+	researchCancel()
+	d.logStage("research", stageStart,
+		"signal_id", sig.ID,
+		"opportunity_id", opp.ID,
+	)
 	if err != nil {
 		d.log.Warn("research failed", append(span.Fields(), "error", err)...)
 		return
@@ -183,12 +205,27 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	autonomy := d.resolveAutonomy(scanTerritory, thesis)
 	d.applyAutonomy(thesis, autonomy)
+	d.log.Info("autonomy resolved",
+		"thesis_id", thesis.ID,
+		"mode", autonomy.Mode,
+		"reason", autonomy.Reason,
+		"scan_territory", autonomy.ScanTerritory.Status,
+		"execution_territory", autonomy.ExecTerritory.Status,
+		"competence_key", autonomy.CompetenceKey,
+	)
 	d.persistThesis(ctx, thesis)
 
 	span = span.WithStage("prosecutor")
 	ctx = trace.IntoContext(ctx, span)
 
-	prosecution := d.prosecutor.Challenge(ctx, thesis)
+	stageStart = time.Now()
+	prosecutionCtx, prosecutionCancel := context.WithTimeout(ctx, deskProsecutionTimout)
+	prosecution := d.prosecutor.Challenge(prosecutionCtx, thesis)
+	prosecutionCancel()
+	d.logStage("prosecutor", stageStart,
+		"thesis_id", thesis.ID,
+		"verdict", prosecution.Verdict,
+	)
 	thesis.Prosecution = prosecution
 	thesis.Status = model.ThesisProsecuted
 	d.persistThesis(ctx, thesis)
@@ -219,7 +256,14 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		span = span.WithStage("council")
 		ctx = trace.IntoContext(ctx, span)
 
-		verdict := d.council.Debate(ctx, thesis)
+		stageStart = time.Now()
+		councilCtx, councilCancel := context.WithTimeout(ctx, deskCouncilTimeout)
+		verdict := d.council.Debate(councilCtx, thesis)
+		councilCancel()
+		d.logStage("council", stageStart,
+			"thesis_id", thesis.ID,
+			"approved", verdict.Approved,
+		)
 		thesis.CouncilVerdict = verdict
 		d.persistThesis(ctx, thesis)
 		if !verdict.Approved {
@@ -303,7 +347,14 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		span = span.WithStage("execution")
 		ctx = trace.IntoContext(ctx, span)
 
-		fill, err := d.execution.Submit(ctx, decision.Token, *decision.AdjustedOrder)
+		stageStart = time.Now()
+		executionCtx, executionCancel := context.WithTimeout(ctx, deskExecutionTimeout)
+		fill, err := d.execution.Submit(executionCtx, decision.Token, *decision.AdjustedOrder)
+		executionCancel()
+		d.logStage("execution", stageStart,
+			"thesis_id", thesis.ID,
+			"symbol", thesis.Instrument.Symbol,
+		)
 		if err != nil {
 			d.log.Error("execution failed", "thesis_id", thesis.ID, "error", err)
 			return
@@ -547,15 +598,6 @@ func (d *Desk) applyAutonomy(thesis *model.Thesis, decision autonomyDecision) {
 	}
 }
 
-func (d *Desk) persistSignal(ctx context.Context, sig signal.Signal) {
-	if d.store == nil {
-		return
-	}
-	if err := d.store.UpsertSignal(ctx, sig); err != nil {
-		d.log.Warn("persist signal failed", "signal_id", sig.ID, "error", err)
-	}
-}
-
 func (d *Desk) persistOpportunity(ctx context.Context, opp *model.Opportunity) {
 	if d.store == nil || opp == nil {
 		return
@@ -590,4 +632,14 @@ func (d *Desk) recordAntiPortfolio(ctx context.Context, thesis *model.Thesis, re
 	if err := d.store.InsertAntiPortfolio(ctx, thesis, reason); err != nil {
 		d.log.Warn("persist anti-portfolio failed", "thesis_id", thesis.ID, "error", err)
 	}
+}
+
+func (d *Desk) logStage(stage string, started time.Time, fields ...any) {
+	duration := time.Since(started).Round(time.Millisecond)
+	fields = append(fields, "stage", stage, "duration", duration.String())
+	if duration >= deskSlowStageWarnAt {
+		d.log.Warn("desk stage slow", fields...)
+		return
+	}
+	d.log.Debug("desk stage complete", fields...)
 }

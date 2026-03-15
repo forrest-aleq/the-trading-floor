@@ -28,6 +28,13 @@ type SubTeam struct {
 	mu  sync.Mutex
 }
 
+const (
+	subTeamAgentTimeout    = 30 * time.Second
+	subTeamSynthesisTimout = 40 * time.Second
+	subTeamAgentMaxTokens  = 512
+	subTeamSynthMaxTokens  = 768
+)
+
 // SubAgent is a single specialist agent within a sub-team.
 type SubAgent struct {
 	Role   string // e.g. "sector_analyst", "risk_modeler", "catalyst_tracker"
@@ -114,7 +121,10 @@ func (st *SubTeam) run(ctx context.Context) *SubTeamResult {
 
 			prompt := fmt.Sprintf("You are a %s on a temporary research sub-team. Purpose: %s\n\nProvide your analysis in 2-3 paragraphs. Be specific with data points, names, and numbers.", a.Role, st.Purpose)
 
-			resp, err := st.llm.Ask(ctx, llm.TierAnalysis, a.Prompt, prompt)
+			callCtx, cancel := context.WithTimeout(ctx, subTeamAgentTimeout)
+			defer cancel()
+
+			resp, err := st.llm.AskWithLimit(callCtx, llm.TierAnalysis, a.Prompt, prompt, subTeamAgentMaxTokens, 0.4)
 			if err != nil {
 				st.log.Warn("sub-team agent failed", "role", a.Role, "error", err)
 				return
@@ -160,7 +170,10 @@ func (st *SubTeam) synthesize(ctx context.Context, analyses map[string]string) s
 
 	systemPrompt := "You are a research director synthesizing analyses from your sub-team. Combine their perspectives into a unified recommendation. Highlight areas of agreement and disagreement. Provide a clear actionable conclusion in 2-3 paragraphs."
 
-	resp, err := st.llm.Ask(ctx, llm.TierAnalysis, systemPrompt, prompt)
+	callCtx, cancel := context.WithTimeout(ctx, subTeamSynthesisTimout)
+	defer cancel()
+
+	resp, err := st.llm.AskWithLimit(callCtx, llm.TierAnalysis, systemPrompt, prompt, subTeamSynthMaxTokens, 0.4)
 	if err != nil {
 		st.log.Warn("sub-team synthesis failed", "error", err)
 		return "synthesis failed"

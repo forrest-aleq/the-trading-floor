@@ -63,6 +63,8 @@ Respond in JSON:
   "reasoning": "..."
 }`
 
+const researchMaxTokens = 1024
+
 // Investigate takes an opportunity and produces a thesis
 func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID string) (*model.Thesis, error) {
 	prompt := fmt.Sprintf("Opportunity (score: %.0f, urgency: %.2f, category: %s):\n\nInstruments: %v\nDirection: %s\nSignal IDs: %v",
@@ -75,7 +77,7 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 			opp.CascadeInfo.SourceDomain, opp.CascadeInfo.TargetGaps, opp.CascadeInfo.Confidence)
 	}
 
-	resp, err := d.llm.AskJSON(ctx, llm.TierAnalysis, researchPrompt, prompt)
+	resp, err := d.llm.AskJSONWithLimit(ctx, llm.TierAnalysis, researchPrompt, prompt, researchMaxTokens, 0.2)
 	if err != nil {
 		return nil, fmt.Errorf("research LLM error: %w", err)
 	}

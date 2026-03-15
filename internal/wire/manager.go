@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hnic/trading-floor/internal/observe"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
@@ -22,6 +23,7 @@ type Manager struct {
 	feeds       []Feed
 	subscribers []chan signal.Signal
 	mu          sync.RWMutex
+	statsMu     sync.RWMutex
 
 	overflowMu     sync.Mutex
 	overflow       []queuedDelivery
@@ -39,6 +41,11 @@ type Manager struct {
 	totalOverflowed   atomic.Int64
 	totalReplayed     atomic.Int64
 	totalDropped      atomic.Int64
+	receivedBySource  map[string]int64
+	dedupedBySource   map[string]int64
+	lastSignalID      string
+	lastSignalSource  string
+	lastSignalAt      time.Time
 
 	// Config
 	bufferSize    int
@@ -54,14 +61,16 @@ type Feed interface {
 
 func NewManager() *Manager {
 	return &Manager{
-		log:             slog.Default().With("component", "wire"),
-		bufferSize:      10000,
-		maxOverflow:     50000,
-		retryInterval:   50 * time.Millisecond,
-		overflowNotify:  make(chan struct{}, 1),
-		deduper:         NewDeduper(2048, 0.92),
-		clusterer:       NewClusterer(1024, 0.88),
-		crossReferencer: NewCrossReferencer(4096, 16),
+		log:              slog.Default().With("component", "wire"),
+		bufferSize:       10000,
+		maxOverflow:      50000,
+		retryInterval:    50 * time.Millisecond,
+		overflowNotify:   make(chan struct{}, 1),
+		deduper:          NewDeduper(2048, 0.92),
+		clusterer:        NewClusterer(1024, 0.88),
+		crossReferencer:  NewCrossReferencer(4096, 16),
+		receivedBySource: make(map[string]int64),
+		dedupedBySource:  make(map[string]int64),
 	}
 }
 
@@ -88,7 +97,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	// Start all feeds
 	for _, feed := range m.feeds {
 		f := feed
-		go func() {
+		observe.SafeGo(m.log, "feed panic", func() {
 			m.log.Info("starting feed", "name", f.Name())
 			if err := f.Start(ctx, ingress); err != nil {
 				if errors.Is(err, context.Canceled) {
@@ -97,11 +106,11 @@ func (m *Manager) Start(ctx context.Context) error {
 				}
 				m.log.Error("feed error", "name", f.Name(), "error", err)
 			}
-		}()
+		}, "feed", f.Name())
 	}
 
 	// Fan-out loop
-	go func() {
+	observe.SafeGo(m.log, "wire fan-out panic", func() {
 		for {
 			select {
 			case <-ctx.Done():
@@ -112,9 +121,18 @@ func (m *Manager) Start(ctx context.Context) error {
 				}
 				m.totalReceived.Add(1)
 				sig = NormalizeSignal(sig)
+				m.recordSignalIngress(sig)
+				m.log.Debug("wire ingested signal",
+					"signal_id", sig.ID,
+					"source", sig.Source,
+					"type", sig.Type,
+					"category", sig.Category,
+				)
 
 				if m.deduper != nil && m.deduper.IsDuplicate(sig) {
 					m.totalDeduped.Add(1)
+					m.recordSignalDedup(sig.Source)
+					m.log.Debug("wire deduped signal", "signal_id", sig.ID, "source", sig.Source)
 					continue
 				}
 				if m.clusterer != nil {
@@ -129,6 +147,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 				// Fan out to all subscribers
 				m.mu.RLock()
+				subscriberCount := len(m.subscribers)
 				for _, sub := range m.subscribers {
 					select {
 					case sub <- sig:
@@ -149,11 +168,19 @@ func (m *Manager) Start(ctx context.Context) error {
 					}
 				}
 				m.mu.RUnlock()
+				m.log.Debug("wire fanned out signal",
+					"signal_id", sig.ID,
+					"source", sig.Source,
+					"subscribers", subscriberCount,
+					"cluster_id", sig.ClusterID,
+				)
 			}
 		}
-	}()
+	})
 
-	go m.drainOverflow(ctx)
+	observe.SafeGo(m.log, "wire overflow drain panic", func() {
+		m.drainOverflow(ctx)
+	})
 
 	m.log.Info("wire started", "feeds", len(m.feeds), "subscribers", len(m.subscribers))
 	return nil
@@ -164,6 +191,19 @@ func (m *Manager) Stats() WireStats {
 	m.overflowMu.Lock()
 	pendingOverflow := len(m.overflow)
 	m.overflowMu.Unlock()
+	m.statsMu.RLock()
+	receivedBySource := make(map[string]int64, len(m.receivedBySource))
+	for source, count := range m.receivedBySource {
+		receivedBySource[source] = count
+	}
+	dedupedBySource := make(map[string]int64, len(m.dedupedBySource))
+	for source, count := range m.dedupedBySource {
+		dedupedBySource[source] = count
+	}
+	lastSignalID := m.lastSignalID
+	lastSignalSource := m.lastSignalSource
+	lastSignalAt := m.lastSignalAt
+	m.statsMu.RUnlock()
 
 	return WireStats{
 		TotalReceived:     m.totalReceived.Load(),
@@ -176,6 +216,11 @@ func (m *Manager) Stats() WireStats {
 		PendingOverflow:   pendingOverflow,
 		ActiveFeeds:       len(m.feeds),
 		Subscribers:       len(m.subscribers),
+		ReceivedBySource:  receivedBySource,
+		DedupedBySource:   dedupedBySource,
+		LastSignalID:      lastSignalID,
+		LastSignalSource:  lastSignalSource,
+		LastSignalAt:      lastSignalAt,
 	}
 }
 
@@ -190,6 +235,29 @@ type WireStats struct {
 	PendingOverflow   int
 	ActiveFeeds       int
 	Subscribers       int
+	ReceivedBySource  map[string]int64
+	DedupedBySource   map[string]int64
+	LastSignalID      string
+	LastSignalSource  string
+	LastSignalAt      time.Time
+}
+
+func (m *Manager) recordSignalIngress(sig signal.Signal) {
+	m.statsMu.Lock()
+	defer m.statsMu.Unlock()
+	m.receivedBySource[sig.Source]++
+	m.lastSignalID = sig.ID
+	m.lastSignalSource = sig.Source
+	m.lastSignalAt = sig.Timestamp
+	if m.lastSignalAt.IsZero() {
+		m.lastSignalAt = time.Now()
+	}
+}
+
+func (m *Manager) recordSignalDedup(source string) {
+	m.statsMu.Lock()
+	defer m.statsMu.Unlock()
+	m.dedupedBySource[source]++
 }
 
 func (m *Manager) enqueueOverflow(sub chan signal.Signal, sig signal.Signal) bool {

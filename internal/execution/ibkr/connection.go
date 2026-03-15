@@ -59,6 +59,8 @@ type Connection struct {
 	ib *ibsync.IB
 }
 
+const accountSummaryProbeTimeout = 3 * time.Second
+
 func NewConnection(cfg Config) *Connection {
 	return &Connection{
 		cfg: cfg,
@@ -145,13 +147,36 @@ func (c *Connection) validateGateway() error {
 	}
 	c.log.Info("gateway validated", "accounts", len(accounts))
 
-	// Verify we can read account summary (detects read-only API mode)
-	summary := ib.AccountSummary()
-	if len(summary) == 0 {
-		c.log.Warn("empty account summary — API may be in read-only mode")
+	// Probe account summary without making it a startup hard-gate. TWS sessions
+	// can take a while to surface summary data, and blocking here stalls the
+	// entire daemon before the floor can start.
+	if err := c.probeAccountSummary(ib); err != nil {
+		c.log.Warn("gateway account summary probe incomplete", "error", err)
 	}
 
 	return nil
+}
+
+func (c *Connection) probeAccountSummary(ib *ibsync.IB) error {
+	if ib == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	summaryCh := make(chan int, 1)
+	go func() {
+		summaryCh <- len(ib.AccountSummary())
+	}()
+
+	select {
+	case count := <-summaryCh:
+		if count == 0 {
+			return fmt.Errorf("empty account summary — API may be in read-only mode")
+		}
+		c.log.Info("gateway account summary available", "items", count)
+		return nil
+	case <-time.After(accountSummaryProbeTimeout):
+		return fmt.Errorf("account summary probe timed out after %s", accountSummaryProbeTimeout)
+	}
 }
 
 func (c *Connection) Disconnect() {

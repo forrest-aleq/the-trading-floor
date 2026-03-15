@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/pkg/model"
@@ -18,6 +19,11 @@ type Council struct {
 	llm        *llm.Router
 	archetypes []Archetype
 }
+
+const (
+	councilPerspectiveMaxTokens = 384
+	councilPerspectiveTimeout   = 25 * time.Second
+)
 
 type perspectiveResult struct {
 	name       string
@@ -106,7 +112,10 @@ Prosecution Verdict: %s`,
 		go func(a Archetype) {
 			defer wg.Done()
 
-			resp, err := c.llm.AskJSON(ctx, llm.TierCritical, a.Prompt, thesisPrompt)
+			callCtx, cancel := context.WithTimeout(ctx, councilPerspectiveTimeout)
+			defer cancel()
+
+			resp, err := c.llm.AskJSONWithLimit(callCtx, llm.TierCritical, a.Prompt, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
 			if err != nil {
 				c.log.Warn("council archetype failed", "archetype", a.Name, "error", err)
 				return

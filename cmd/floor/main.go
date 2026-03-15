@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -35,9 +37,10 @@ func main() {
 	_ = godotenv.Load()
 
 	sessionID := uuid.New().String()[:8]
+	logLevel := parseLogLevel(os.Getenv("LOG_LEVEL"))
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: logLevel,
 	})))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -65,7 +68,9 @@ func main() {
 
 	// --- IBKR ---
 	pacing := ibkr.NewPacingBudget()
-	go pacing.Run(ctx)
+	observe.SafeGo(slog.Default().With("component", "runtime"), "ibkr pacing loop panic", func() {
+		pacing.Run(ctx)
+	}, "task", "ibkr_pacing")
 
 	ibkrCfg := ibkr.DefaultConfig()
 	ibkrClient := ibkr.NewClient(ibkrCfg)
@@ -79,7 +84,9 @@ func main() {
 	// --- Book + Execution ---
 	execMgr := execution.NewManager(ibkrClient)
 	bk := book.NewBook(ibkrClient, 1_000_000)
-	go bk.StartReconcile(ctx)
+	observe.SafeGo(slog.Default().With("component", "runtime"), "book reconcile loop panic", func() {
+		bk.StartReconcile(ctx)
+	}, "task", "book_reconcile")
 	slog.Info("book and execution initialized")
 
 	// --- Centralized Market Data ---
@@ -95,7 +102,9 @@ func main() {
 			}
 		}
 	})
-	go mdMgr.Run(ctx)
+	observe.SafeGo(slog.Default().With("component", "runtime"), "market data loop panic", func() {
+		mdMgr.Run(ctx)
+	}, "task", "marketdata")
 	slog.Info("market data manager initialized", "watchlist", len(feeds.DefaultWatchlist()))
 
 	// --- Shared Services ---
@@ -138,6 +147,7 @@ func main() {
 	researchDesk := research.NewDesk(llmRouter, 0.65)
 	prosecutor := research.NewProsecutor(llmRouter)
 	council := research.NewCouncil(llmRouter)
+	startBeliefDecay(ctx, beliefGraph)
 	slog.Info("decision services initialized")
 
 	// --- Audit Log ---
@@ -167,6 +177,7 @@ func main() {
 
 	// --- Floor + Desks ---
 	floor := firm.NewFloor(wireMgr, sessionID)
+	floor.SetStore(db)
 	desksByID := map[string]*firm.Desk{}
 
 	// 40 desks: 20 Group A (full MARS beliefs) + 20 Group B (control, no belief updates)
@@ -247,7 +258,9 @@ func main() {
 			"price":  exitPrice,
 		})
 	})
-	go monitor.Run(ctx)
+	observe.SafeGo(slog.Default().With("component", "runtime"), "position monitor panic", func() {
+		monitor.Run(ctx)
+	}, "task", "position_monitor")
 
 	// --- CEO Referee ---
 	allDesks := make([]*firm.Desk, 0, len(desksByID))
@@ -256,7 +269,9 @@ func main() {
 	}
 	ceo := firm.NewCEO(bk, beliefGraph, floor)
 	ceo.SetDesks(allDesks)
-	go ceo.Run(ctx)
+	observe.SafeGo(slog.Default().With("component", "runtime"), "ceo loop panic", func() {
+		ceo.Run(ctx)
+	}, "task", "ceo")
 
 	// --- Regime Detector ---
 	regimeDetector := regime.NewDetector(ibkrClient, func(old, newRegime model.Regime) {
@@ -266,7 +281,9 @@ func main() {
 			"new": newRegime.Key(),
 		})
 	})
-	go regimeDetector.Run(ctx)
+	observe.SafeGo(slog.Default().With("component", "runtime"), "regime detector panic", func() {
+		regimeDetector.Run(ctx)
+	}, "task", "regime_detector")
 
 	groupA, groupB := 0, 0
 	for _, d := range desks {
@@ -286,6 +303,7 @@ func main() {
 	)
 
 	slog.Info("trading floor is LIVE — processing signals")
+	startRuntimeHeartbeat(ctx, floor, bk)
 
 	if err := floor.Run(ctx); err != nil {
 		if err == context.Canceled {
@@ -303,6 +321,173 @@ func main() {
 	)
 
 	fmt.Println("trading-floor: shutdown complete")
+}
+
+func parseLogLevel(raw string) slog.Level {
+	switch raw {
+	case "debug", "DEBUG":
+		return slog.LevelDebug
+	case "warn", "WARN", "warning", "WARNING":
+		return slog.LevelWarn
+	case "error", "ERROR":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func heartbeatInterval() time.Duration {
+	raw := os.Getenv("RUNTIME_HEARTBEAT_INTERVAL")
+	if raw == "" {
+		return 30 * time.Second
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 30 * time.Second
+	}
+	return d
+}
+
+func startBeliefDecay(ctx context.Context, graph *belief.Graph) {
+	if graph == nil {
+		return
+	}
+
+	interval := readRuntimeDuration("BELIEF_DECAY_INTERVAL", 24*time.Hour)
+	decayPct := readRuntimeFloat("BELIEF_DECAY_PCT", 1.0)
+	if decayPct <= 0 {
+		return
+	}
+
+	log := slog.Default().With("component", "belief_decay")
+	observe.SafeGo(log, "belief decay loop panic", func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				graph.DecayAll(decayPct)
+				log.Info("belief decay applied", "interval", interval, "decay_pct", decayPct)
+			}
+		}
+	}, "interval", interval.String(), "decay_pct", decayPct)
+}
+
+func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book) {
+	if floor == nil || bk == nil {
+		return
+	}
+
+	interval := heartbeatInterval()
+	log := slog.Default().With("component", "heartbeat")
+	observe.SafeGo(log, "runtime heartbeat panic", func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		var prevSignals int64
+		var prevTrades int64
+		var prevReceived int64
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				stats := floor.Stats()
+				snapshot := bk.Snapshot()
+
+				signalDelta := stats.SignalsProcessed - prevSignals
+				tradeDelta := stats.TradesExecuted - prevTrades
+				receivedDelta := stats.WireStats.TotalReceived - prevReceived
+
+				fields := []any{
+					"workers", stats.Workers,
+					"signals_processed", stats.SignalsProcessed,
+					"signals_delta", signalDelta,
+					"trades_executed", stats.TradesExecuted,
+					"trades_delta", tradeDelta,
+					"tasks_enqueued", stats.TasksEnqueued,
+					"tasks_started", stats.TasksStarted,
+					"tasks_completed", stats.TasksCompleted,
+					"tasks_dropped", stats.TasksDropped,
+					"tasks_skipped", stats.TasksSkipped,
+					"active_tasks", stats.ActiveTasks,
+					"task_queue_depth", stats.TaskQueueDepth,
+					"task_queue_capacity", stats.TaskQueueCap,
+					"wire_received", stats.WireStats.TotalReceived,
+					"wire_received_delta", receivedDelta,
+					"wire_deduped", stats.WireStats.TotalDeduped,
+					"wire_corroborated", stats.WireStats.TotalCorroborated,
+					"wire_overflow_pending", stats.WireStats.PendingOverflow,
+					"wire_dropped", stats.WireStats.TotalDropped,
+					"open_positions", snapshot.OpenPositions,
+					"total_trades", snapshot.TotalTrades,
+					"nav", snapshot.NAV,
+					"cash", snapshot.Cash,
+					"gross_exposure", snapshot.GrossExposure,
+					"net_exposure", snapshot.NetExposure,
+					"daily_pnl", snapshot.DailyPnL,
+					"monthly_pnl", snapshot.MonthlyPnL,
+					"received_by_source", stats.WireStats.ReceivedBySource,
+				}
+				if !stats.WireStats.LastSignalAt.IsZero() {
+					fields = append(fields,
+						"last_signal_id", stats.WireStats.LastSignalID,
+						"last_signal_source", stats.WireStats.LastSignalSource,
+						"last_signal_age", time.Since(stats.WireStats.LastSignalAt).Round(time.Second).String(),
+					)
+				}
+				log.Info("runtime heartbeat", fields...)
+
+				if stats.WireStats.TotalReceived == 0 || (signalDelta == 0 && stats.TaskQueueDepth == 0 && stats.ActiveTasks == 0) {
+					log.Warn("signal ingress is idle",
+						"signals_processed", stats.SignalsProcessed,
+						"wire_received", stats.WireStats.TotalReceived,
+						"last_signal_source", stats.WireStats.LastSignalSource,
+					)
+				}
+				if stats.TaskQueueDepth > 0 && stats.TasksCompleted == 0 {
+					log.Warn("desk task queue is backlogged",
+						"task_queue_depth", stats.TaskQueueDepth,
+						"active_tasks", stats.ActiveTasks,
+						"tasks_enqueued", stats.TasksEnqueued,
+						"tasks_completed", stats.TasksCompleted,
+					)
+				}
+
+				prevSignals = stats.SignalsProcessed
+				prevTrades = stats.TradesExecuted
+				prevReceived = stats.WireStats.TotalReceived
+			}
+		}
+	})
+}
+
+func readRuntimeDuration(name string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func readRuntimeFloat(name string, fallback float64) float64 {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(raw, 64)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
 }
 
 type deskDef struct {

@@ -53,6 +53,8 @@ Respond in JSON:
   "reasoning": "..."
 }`
 
+const prosecutionMaxTokens = 768
+
 // Challenge attempts to kill a thesis
 func (p *Prosecutor) Challenge(ctx context.Context, thesis *model.Thesis) *model.Prosecution {
 	prompt := fmt.Sprintf(`Thesis to prosecute:
@@ -78,7 +80,7 @@ Counter Arguments Already Considered:
 		formatCounterArgs(thesis.CounterArgs),
 	)
 
-	resp, err := p.llm.AskJSON(ctx, llm.TierCritical, prosecutionPrompt, prompt)
+	resp, err := p.llm.AskJSONWithLimit(ctx, llm.TierCritical, prosecutionPrompt, prompt, prosecutionMaxTokens, 0.2)
 	if err != nil {
 		p.log.Error("prosecution LLM error", "error", err, "thesis_id", thesis.ID)
 		// On LLM error, default to weakened (conservative)

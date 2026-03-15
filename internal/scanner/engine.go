@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,13 +23,13 @@ type Engine struct {
 	minScore float64 // Minimum score to pass (0-100)
 }
 
-const (
-	scannerRequestTimeout    = 8 * time.Second
-	scannerMaxTokens         = 192
-	scannerCompactMaxTokens  = 128
-	scannerContentLimit      = 500
-	scannerCompactContentMax = 220
-	scannerStaleSignalAge    = 6 * time.Hour
+var (
+	scannerRequestTimeout    = readDurationEnv("SCANNER_REQUEST_TIMEOUT", 15*time.Second)
+	scannerMaxTokens         = readIntEnv("SCANNER_MAX_TOKENS", 128)
+	scannerCompactMaxTokens  = readIntEnv("SCANNER_COMPACT_MAX_TOKENS", 96)
+	scannerContentLimit      = readIntEnv("SCANNER_CONTENT_LIMIT", 500)
+	scannerCompactContentMax = readIntEnv("SCANNER_COMPACT_CONTENT_LIMIT", 220)
+	scannerStaleSignalAge    = readDurationEnv("SCANNER_STALE_SIGNAL_AGE", 6*time.Hour)
 )
 
 func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
@@ -41,7 +43,9 @@ func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
 	}
 }
 
-const scannerPrompt = `You are a trading signal scanner. Your DEFAULT response should be tradeable: false. Most signals are noise.
+const scannerPrompt = `You are a trading signal scanner. Output one final JSON object only.
+Do not include chain-of-thought, thinking tags, XML, markdown, or any explanatory preamble.
+Your DEFAULT response should be tradeable: false. Most signals are noise.
 
 Only mark tradeable: true if ALL of these are met:
 1. There is a SPECIFIC, actionable trade thesis (not vague commentary)
@@ -61,7 +65,7 @@ Respond in JSON:
   "direction": "long" or "short",
   "urgency": 0.0-1.0,
   "category": "geopolitical|macro|corporate|flows|tail|volatility|sector|systematic",
-  "reasoning": "brief explanation"
+  "reasoning": "brief explanation, 12 words max"
 }`
 
 // Evaluate checks if a signal contains a tradeable opportunity
@@ -123,7 +127,12 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 
 	cleaned, err := llm.ExtractJSON(resp)
 	if err != nil {
-		e.log.Warn("scanner JSON extraction failed", "error", err, "signal_id", sig.ID)
+		e.log.Warn("scanner JSON extraction failed",
+			"error", err,
+			"signal_id", sig.ID,
+			"response_len", len(resp),
+			"response_excerpt", truncateForPrompt(resp, 240),
+		)
 		return nil, false
 	}
 
@@ -189,6 +198,32 @@ func shouldSkipSignal(sig signal.Signal) bool {
 		return true
 	}
 	return false
+}
+
+func readIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func readDurationEnv(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 type scanResult struct {

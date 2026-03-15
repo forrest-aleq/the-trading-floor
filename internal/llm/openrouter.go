@@ -94,6 +94,7 @@ func (c *OpenRouterClient) Complete(ctx context.Context, req Request) (*Response
 	for i, m := range req.Messages {
 		messages[i] = orMessage{Role: string(m.Role), Content: m.Content}
 	}
+	messages = applyLocalQwenJSONControls(c.baseURL, model, req.JSONMode, messages)
 
 	orReq := orRequest{
 		Model:       model,
@@ -219,6 +220,29 @@ func (c *OpenRouterClient) supportsStructuredJSON() bool {
 	}
 }
 
+func applyLocalQwenJSONControls(baseURL, model string, jsonMode bool, messages []orMessage) []orMessage {
+	if !jsonMode || !isLocalQwenModel(baseURL, model) || len(messages) == 0 {
+		return messages
+	}
+
+	for i := range messages {
+		if strings.Contains(messages[i].Content, "/no_think") || strings.Contains(messages[i].Content, "/think") {
+			return messages
+		}
+	}
+
+	preferred := 0
+	for i, message := range messages {
+		if message.Role == string(RoleSystem) {
+			preferred = i
+			break
+		}
+	}
+
+	messages[preferred].Content = "/no_think\n" + messages[preferred].Content
+	return messages
+}
+
 func makeLimiter(baseURL string) chan struct{} {
 	maxConcurrent := 0
 	if raw := strings.TrimSpace(os.Getenv("LLM_MAX_CONCURRENCY")); raw != "" {
@@ -243,6 +267,14 @@ func isLocalLLM(baseURL string) bool {
 
 	host := strings.ToLower(u.Hostname())
 	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+func isLocalQwenModel(baseURL, model string) bool {
+	if !isLocalLLM(baseURL) {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(lower, "qwen/")
 }
 
 func shouldRetryLocalLLM(baseURL string, statusCode, attempt, attempts int) bool {
@@ -286,7 +318,7 @@ func DefaultRouter() *Router {
 
 	speedModel := os.Getenv("LLM_MODEL_SPEED")
 	if speedModel == "" {
-		speedModel = "qwen/qwen3.5-9b"
+		speedModel = "qwen/qwen3-8b"
 	}
 	analysisModel := os.Getenv("LLM_MODEL_ANALYSIS")
 	if analysisModel == "" {

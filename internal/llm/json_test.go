@@ -33,6 +33,10 @@ func TestExtractJSON(t *testing.T) {
 			name:  "whitespace padded",
 			input: "  \n  {\"score\": 50}  \n  ",
 		},
+		{
+			name:  "think tags around JSON",
+			input: "<think>\ninternal reasoning\n</think>\n\n{\"tradeable\": false, \"score\": 12}",
+		},
 	}
 
 	for _, tt := range tests {

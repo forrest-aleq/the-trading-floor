@@ -90,3 +90,26 @@ func TestMakeLimiterDefaultsToTwoForLocalLLM(t *testing.T) {
 		t.Fatalf("expected local limiter capacity 2, got %d", cap(limiter))
 	}
 }
+
+func TestApplyLocalQwenJSONControlsAddsNoThinkForLocalQwenJSON(t *testing.T) {
+	messages := []orMessage{
+		{Role: string(RoleSystem), Content: "Return JSON only."},
+		{Role: string(RoleUser), Content: "Scan this signal."},
+	}
+
+	got := applyLocalQwenJSONControls("http://127.0.0.1:1234/v1", "qwen/qwen3-8b", true, messages)
+	if got[0].Content != "/no_think\nReturn JSON only." {
+		t.Fatalf("unexpected system message %q", got[0].Content)
+	}
+}
+
+func TestApplyLocalQwenJSONControlsLeavesRemoteModelsUntouched(t *testing.T) {
+	messages := []orMessage{
+		{Role: string(RoleSystem), Content: "Return JSON only."},
+	}
+
+	got := applyLocalQwenJSONControls("https://openrouter.ai/api/v1", "qwen/qwen3-8b", true, messages)
+	if got[0].Content != "Return JSON only." {
+		t.Fatalf("expected remote model to be unchanged, got %q", got[0].Content)
+	}
+}

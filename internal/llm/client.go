@@ -8,8 +8,8 @@ import (
 type Tier int
 
 const (
-	TierSpeed    Tier = iota // Qwen 7B — translation, filtering, scanning
-	TierAnalysis             // Qwen 72B — research, synthesis, thesis formation
+	TierSpeed    Tier = iota // Fast local model — translation, filtering, scanning
+	TierAnalysis             // Larger local model — research, synthesis, thesis formation
 	TierCritical             // Claude Sonnet — prosecution, council, critical decisions
 )
 
@@ -30,12 +30,12 @@ type Message struct {
 
 // Request to an LLM
 type Request struct {
-	Messages    []Message         `json:"messages"`
-	Model       string            `json:"model,omitempty"` // Override model selection
-	Temperature float64           `json:"temperature,omitempty"`
-	MaxTokens   int               `json:"max_tokens,omitempty"`
-	JSONMode    bool              `json:"json_mode,omitempty"`
-	Tier        Tier              `json:"-"` // Used by router, not sent to API
+	Messages    []Message `json:"messages"`
+	Model       string    `json:"model,omitempty"` // Override model selection
+	Temperature float64   `json:"temperature,omitempty"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+	JSONMode    bool      `json:"json_mode,omitempty"`
+	Tier        Tier      `json:"-"` // Used by router, not sent to API
 }
 
 // Response from an LLM
@@ -53,8 +53,8 @@ type Client interface {
 
 // Router sends requests to the right model based on tier
 type Router struct {
-	speed    Client // Qwen 7B or fast model
-	analysis Client // Qwen 72B or mid-tier model
+	speed    Client // Fast model
+	analysis Client // Larger analysis model
 	critical Client // Claude Sonnet
 }
 

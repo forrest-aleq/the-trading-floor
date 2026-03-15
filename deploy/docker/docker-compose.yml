@@ -36,11 +36,11 @@ services:
       # LLM — set your OpenRouter API key
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
-      LLM_MODEL_SPEED: ${LLM_MODEL_SPEED:-qwen/qwen3.5-7b}
-      LLM_MODEL_ANALYSIS: ${LLM_MODEL_ANALYSIS:-qwen/qwen3.5-72b}
+      LLM_MODEL_SPEED: ${LLM_MODEL_SPEED:-qwen/qwen3.5-9b}
+      LLM_MODEL_ANALYSIS: ${LLM_MODEL_ANALYSIS:-qwen/qwen3.5-35b-a3b}
       LLM_MODEL_CRITICAL: ${LLM_MODEL_CRITICAL:-anthropic/claude-sonnet-4-20250514}
 
-      TRADING_FLOOR_MIGRATION_PATH: /migrations/001_init.sql
+      TRADING_FLOOR_MIGRATION_PATH: /migrations
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

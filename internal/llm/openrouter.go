@@ -275,8 +275,8 @@ func retryDelay(attempt int) time.Duration {
 	}
 }
 
-// DefaultRouter creates a router using OpenRouter for all tiers.
-// In production, speed/analysis would be self-hosted Qwen.
+// DefaultRouter creates a router using OpenRouter-compatible clients for all tiers.
+// The default speed/analysis ids match the local LM Studio setup used for this repo.
 func DefaultRouter() *Router {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	baseURL := os.Getenv("LLM_BASE_URL")
@@ -286,11 +286,11 @@ func DefaultRouter() *Router {
 
 	speedModel := os.Getenv("LLM_MODEL_SPEED")
 	if speedModel == "" {
-		speedModel = "qwen/qwen3.5-7b"
+		speedModel = "qwen/qwen3.5-9b"
 	}
 	analysisModel := os.Getenv("LLM_MODEL_ANALYSIS")
 	if analysisModel == "" {
-		analysisModel = "qwen/qwen3.5-72b"
+		analysisModel = "qwen/qwen3.5-35b-a3b"
 	}
 	criticalModel := os.Getenv("LLM_MODEL_CRITICAL")
 	if criticalModel == "" {

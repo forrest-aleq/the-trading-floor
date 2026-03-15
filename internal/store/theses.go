@@ -59,13 +59,15 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 		`INSERT INTO theses (
 			id, opportunity_id, desk_id, strategy, instrument, direction, conviction, health,
 			evidence, counter_args, entry_price, target_price, stop_loss, position_size,
-			time_horizon, kill_rules, status, prosecution, council_verdict, outcome,
-			created_at, resolved_at
+			time_horizon, kill_rules, status, autonomy_mode, scan_territory, execution_territory,
+			competence_key, competence_trust, competence_confidence, prosecution, council_verdict, outcome,
+			created_at, resolved_at, domain
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8,
 			$9, $10, $11, $12, $13, $14,
 			NULLIF($15, '')::interval, $16, $17, $18, $19, $20,
-			$21, $22
+			$21, $22, $23, $24, $25, $26,
+			$27, $28, $29
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			opportunity_id = EXCLUDED.opportunity_id,
@@ -83,10 +85,17 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 			time_horizon = EXCLUDED.time_horizon,
 			kill_rules = EXCLUDED.kill_rules,
 			status = EXCLUDED.status,
+			autonomy_mode = EXCLUDED.autonomy_mode,
+			scan_territory = EXCLUDED.scan_territory,
+			execution_territory = EXCLUDED.execution_territory,
+			competence_key = EXCLUDED.competence_key,
+			competence_trust = EXCLUDED.competence_trust,
+			competence_confidence = EXCLUDED.competence_confidence,
 			prosecution = EXCLUDED.prosecution,
 			council_verdict = EXCLUDED.council_verdict,
 			outcome = EXCLUDED.outcome,
-			resolved_at = EXCLUDED.resolved_at`,
+			resolved_at = EXCLUDED.resolved_at,
+			domain = EXCLUDED.domain`,
 		thesis.ID,
 		thesis.OpportunityID,
 		thesis.DeskID,
@@ -104,11 +113,18 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 		horizon,
 		killRules,
 		string(thesis.Status),
+		string(thesis.AutonomyMode),
+		thesis.ScanTerritory,
+		thesis.ExecutionTerritory,
+		thesis.CompetenceKey,
+		thesis.CompetenceTrust,
+		thesis.CompetenceConfidence,
 		prosecution,
 		councilVerdict,
 		outcome,
 		thesis.CreatedAt,
 		thesis.ResolvedAt,
+		thesis.Domain,
 	)
 	return err
 }
@@ -116,7 +132,9 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	row := db.Pool.QueryRow(ctx,
 		`SELECT instrument, direction, strategy, conviction, health, evidence, counter_args,
-		        entry_price, target_price, stop_loss, position_size, prosecution, status
+		        entry_price, target_price, stop_loss, position_size, prosecution, status,
+		        autonomy_mode, scan_territory, execution_territory, competence_key,
+		        competence_trust, competence_confidence, domain
 		   FROM theses
 		  WHERE id = $1`,
 		id,
@@ -129,6 +147,7 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	var prosecution []byte
 	var direction string
 	var status string
+	var autonomyMode string
 
 	err := row.Scan(
 		&instrument,
@@ -144,6 +163,13 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 		&thesis.PositionSize,
 		&prosecution,
 		&status,
+		&autonomyMode,
+		&thesis.ScanTerritory,
+		&thesis.ExecutionTerritory,
+		&thesis.CompetenceKey,
+		&thesis.CompetenceTrust,
+		&thesis.CompetenceConfidence,
+		&thesis.Domain,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -155,6 +181,7 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	thesis.ID = id
 	thesis.Direction = model.TradeDirection(direction)
 	thesis.Status = model.ThesisStatus(status)
+	thesis.AutonomyMode = model.AutonomyMode(autonomyMode)
 
 	if len(instrument) > 0 {
 		if err := json.Unmarshal(instrument, &thesis.Instrument); err != nil {

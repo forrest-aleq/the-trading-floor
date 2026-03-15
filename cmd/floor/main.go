@@ -100,6 +100,34 @@ func main() {
 	riskGate := risk.NewGate(risk.DefaultLimits())
 	beliefGraph := belief.NewGraph()
 	engramStore := memory.NewEngramStore()
+	if db != nil {
+		states, err := db.LoadCompetenceStates(ctx)
+		if err != nil {
+			slog.Warn("load competence states failed", "error", err)
+		} else {
+			beliefGraph.Load(states)
+			slog.Info("competence states hydrated", "count", len(states))
+		}
+
+		engramRecords, err := db.LoadEngrams(ctx)
+		if err != nil {
+			slog.Warn("load engrams failed", "error", err)
+		} else {
+			engramStore.Load(engramsFromRecords(engramRecords))
+			slog.Info("engrams hydrated", "count", len(engramRecords))
+		}
+
+		beliefGraph.SetChangeHandler(func(state *model.CompetenceState) {
+			if err := db.UpsertCompetenceState(context.Background(), state); err != nil {
+				slog.Warn("persist competence state failed", "key", state.Key, "error", err)
+			}
+		})
+		engramStore.SetChangeHandler(func(engram *memory.Engram) {
+			if err := db.UpsertEngram(context.Background(), engramRecordFromMemory(engram)); err != nil {
+				slog.Warn("persist engram failed", "id", engram.ID, "error", err)
+			}
+		})
+	}
 	learnWorker := memory.NewLearnWorker(beliefGraph, engramStore)
 	scan := scanner.NewEngine(llmRouter, 70)
 	researchDesk := research.NewDesk(llmRouter, 0.65)
@@ -359,5 +387,51 @@ func fullDeskConfig() []deskDef {
 		{"sys-statarb-b", "systematic", "B", 25_000},  // Statistical arbitrage
 		{"sys-momentum-b", "systematic", "B", 25_000},
 		{"sys-meanrev-b", "systematic", "B", 25_000},
+	}
+}
+
+func engramsFromRecords(records []*store.EngramRecord) []*memory.Engram {
+	engrams := make([]*memory.Engram, 0, len(records))
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		engrams = append(engrams, &memory.Engram{
+			ID:             record.ID,
+			IntentKey:      record.IntentKey,
+			ContextPattern: record.ContextPattern,
+			Capability:     record.Capability,
+			DeskID:         record.DeskID,
+			Layer:          record.Layer,
+			SuccessCount:   record.SuccessCount,
+			FailureCount:   record.FailureCount,
+			AvgReturn:      record.AvgReturn,
+			Sharpe:         record.Sharpe,
+			RegimeTags:     append([]string(nil), record.RegimeTags...),
+			CreatedAt:      record.CreatedAt,
+			UpdatedAt:      record.UpdatedAt,
+		})
+	}
+	return engrams
+}
+
+func engramRecordFromMemory(engram *memory.Engram) *store.EngramRecord {
+	if engram == nil {
+		return nil
+	}
+	return &store.EngramRecord{
+		ID:             engram.ID,
+		IntentKey:      engram.IntentKey,
+		ContextPattern: engram.ContextPattern,
+		Capability:     engram.Capability,
+		DeskID:         engram.DeskID,
+		Layer:          engram.Layer,
+		SuccessCount:   engram.SuccessCount,
+		FailureCount:   engram.FailureCount,
+		AvgReturn:      engram.AvgReturn,
+		Sharpe:         engram.Sharpe,
+		RegimeTags:     append([]string(nil), engram.RegimeTags...),
+		CreatedAt:      engram.CreatedAt,
+		UpdatedAt:      engram.UpdatedAt,
 	}
 }

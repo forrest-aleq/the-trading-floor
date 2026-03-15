@@ -27,6 +27,10 @@ func NewLearnWorker(graph *belief.Graph, engrams *EngramStore) *LearnWorker {
 // ProcessOutcome handles a completed trade
 func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.ThesisOutcome, regime model.Regime) {
 	key := belief.CompetenceKey(thesis.DeskID, thesis.Strategy, thesis.Instrument.SecType, regime.Key())
+	scanKey := ""
+	if thesis.Domain != "" {
+		scanKey = belief.CompetenceKey(thesis.DeskID, "scan", thesis.Domain, regime.Key())
+	}
 
 	// Calculate magnitude: realized_return / expected_risk, clamped to [-2, 2]
 	expectedRisk := math.Abs(thesis.EntryPrice - thesis.StopLoss)
@@ -65,8 +69,14 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 
 	if outcome.Profitable {
 		l.graph.ApplySuccess(key, magnitude)
+		if scanKey != "" {
+			l.graph.ApplySuccess(scanKey, magnitude)
+		}
 	} else {
 		l.graph.ApplyFailure(key, magnitude, boundaryViolation)
+		if scanKey != "" {
+			l.graph.ApplyFailure(scanKey, magnitude, boundaryViolation)
+		}
 	}
 
 	// Record engram for pattern caching

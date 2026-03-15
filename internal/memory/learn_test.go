@@ -15,6 +15,7 @@ func TestLearnWorkerRecordsGlobalAndDeskEngrams(t *testing.T) {
 	thesis := &model.Thesis{
 		ID:           "thesis-1",
 		DeskID:       "desk-a",
+		Domain:       "macro",
 		Strategy:     "macro",
 		EntryPrice:   100,
 		StopLoss:     95,
@@ -37,6 +38,14 @@ func TestLearnWorkerRecordsGlobalAndDeskEngrams(t *testing.T) {
 	}
 
 	worker.ProcessOutcome(thesis, outcome, regime)
+
+	state, ok := graph.Lookup("desk-a", "scan", "macro", regime.Key())
+	if !ok {
+		t.Fatal("expected scan competence state to be recorded")
+	}
+	if state.SuccessCount != 1 {
+		t.Fatalf("expected scan competence success count to be 1, got %d", state.SuccessCount)
+	}
 
 	stats := store.Stats()
 	if stats.Total != 2 {

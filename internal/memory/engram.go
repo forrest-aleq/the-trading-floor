@@ -42,10 +42,11 @@ func (e *Engram) TotalObservations() int {
 
 // EngramStore is an in-memory engram library.
 type EngramStore struct {
-	mu      sync.RWMutex
-	log     *slog.Logger
-	engrams map[string]*Engram   // id -> engram
-	byKey   map[string][]*Engram // intent_key -> engrams
+	mu       sync.RWMutex
+	log      *slog.Logger
+	engrams  map[string]*Engram   // id -> engram
+	byKey    map[string][]*Engram // intent_key -> engrams
+	onChange func(*Engram)
 }
 
 func NewEngramStore() *EngramStore {
@@ -56,11 +57,29 @@ func NewEngramStore() *EngramStore {
 	}
 }
 
-// Record records an outcome for a pattern. Creates or updates the engram.
-func (s *EngramStore) Record(intentKey, contextPattern, capability, deskID string, regime []string, profitable bool, returnPct float64) {
+func (s *EngramStore) SetChangeHandler(fn func(*Engram)) {
+	s.mu.Lock()
+	s.onChange = fn
+	s.mu.Unlock()
+}
+
+func (s *EngramStore) Load(records []*Engram) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	for _, incoming := range records {
+		if incoming == nil || incoming.ID == "" {
+			continue
+		}
+		engram := cloneEngram(incoming)
+		s.engrams[engram.ID] = engram
+		s.byKey[engram.IntentKey] = append(s.byKey[engram.IntentKey], engram)
+	}
+}
+
+// Record records an outcome for a pattern. Creates or updates the engram.
+func (s *EngramStore) Record(intentKey, contextPattern, capability, deskID string, regime []string, profitable bool, returnPct float64) {
+	s.mu.Lock()
 	layer := 1
 	if deskID != "" {
 		layer = 2
@@ -116,6 +135,12 @@ func (s *EngramStore) Record(intentKey, contextPattern, capability, deskID strin
 			engram.RegimeTags = append(engram.RegimeTags, tag)
 		}
 	}
+	changed := cloneEngram(engram)
+	handler := s.onChange
+	s.mu.Unlock()
+	if handler != nil {
+		handler(changed)
+	}
 }
 
 // Lookup returns engrams matching an intent key, prioritizing desk-specific (Layer 2)
@@ -156,7 +181,7 @@ func (s *EngramStore) All() []*Engram {
 
 	result := make([]*Engram, 0, len(s.engrams))
 	for _, e := range s.engrams {
-		result = append(result, e)
+		result = append(result, cloneEngram(e))
 	}
 	return result
 }
@@ -185,4 +210,15 @@ type EngramStats struct {
 	Global       int
 	DeskSpecific int
 	Mature       int // >= 10 observations
+}
+
+func cloneEngram(engram *Engram) *Engram {
+	if engram == nil {
+		return nil
+	}
+	cloned := *engram
+	if len(engram.RegimeTags) > 0 {
+		cloned.RegimeTags = append([]string(nil), engram.RegimeTags...)
+	}
+	return &cloned
 }

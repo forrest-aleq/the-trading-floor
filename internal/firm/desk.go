@@ -123,6 +123,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	ctx = trace.IntoContext(ctx, span)
 
 	d.persistSignal(ctx, sig)
+	scanTerritory := d.assessScanTerritory()
 
 	opp, ok := d.scanner.Evaluate(ctx, sig, d.Domain)
 	if !ok {
@@ -143,6 +144,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		d.log.Warn("research failed", append(span.Fields(), "error", err)...)
 		return
 	}
+	thesis.Domain = d.Domain
 
 	d.maybeSpawnSubTeam(ctx, thesis)
 
@@ -179,6 +181,10 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		return
 	}
 
+	autonomy := d.resolveAutonomy(scanTerritory, thesis)
+	d.applyAutonomy(thesis, autonomy)
+	d.persistThesis(ctx, thesis)
+
 	span = span.WithStage("prosecutor")
 	ctx = trace.IntoContext(ctx, span)
 
@@ -208,7 +214,8 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	}
 
 	// Council debate for large positions
-	if d.council != nil && thesis.PositionSize > d.councilThreshold {
+	requiresCouncil := d.council != nil && (thesis.PositionSize > d.councilThreshold || autonomy.Mode == model.Supervised)
+	if requiresCouncil {
 		span = span.WithStage("council")
 		ctx = trace.IntoContext(ctx, span)
 
@@ -235,6 +242,9 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	span = span.WithStage("risk")
 	ctx = trace.IntoContext(ctx, span)
+	if autonomy.Mode == model.Supervised {
+		thesis.PositionSize *= 0.5
+	}
 	d.normalizePositionSize(thesis)
 
 	order := model.Order{
@@ -275,38 +285,55 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		return
 	}
 
-	span = span.WithStage("execution")
-	ctx = trace.IntoContext(ctx, span)
-
-	fill, err := d.execution.Submit(ctx, decision.Token, *decision.AdjustedOrder)
-	if err != nil {
-		d.log.Error("execution failed", "thesis_id", thesis.ID, "error", err)
-		return
-	}
-
 	span = span.WithStage("book")
 	ctx = trace.IntoContext(ctx, span)
 
-	pos := d.book.OpenPosition(fill, thesis)
-	thesis.Status = model.ThesisActive
+	var pos *model.Position
+	if autonomy.Mode == model.Restricted {
+		pos = d.book.OpenShadowPosition(thesis)
+		thesis.Status = model.ThesisNursery
+		d.log.Info("thesis routed to shadow book",
+			"thesis_id", thesis.ID,
+			"symbol", thesis.Instrument.Symbol,
+			"scan_territory", thesis.ScanTerritory,
+			"execution_territory", thesis.ExecutionTerritory,
+			"autonomy_mode", thesis.AutonomyMode,
+		)
+	} else {
+		span = span.WithStage("execution")
+		ctx = trace.IntoContext(ctx, span)
+
+		fill, err := d.execution.Submit(ctx, decision.Token, *decision.AdjustedOrder)
+		if err != nil {
+			d.log.Error("execution failed", "thesis_id", thesis.ID, "error", err)
+			return
+		}
+
+		span = span.WithStage("book")
+		ctx = trace.IntoContext(ctx, span)
+		pos = d.book.OpenPosition(fill, thesis)
+		thesis.Status = model.ThesisActive
+	}
 	d.rememberThesis(thesis)
 	d.persistThesis(ctx, thesis)
 	d.persistPosition(ctx, pos)
 
-	if d.onTrade != nil {
+	if d.onTrade != nil && autonomy.Mode != model.Restricted {
 		d.onTrade()
 	}
 
 	d.log.Info("trade executed",
 		"thesis_id", thesis.ID,
-		"symbol", fill.Instrument.Symbol,
-		"direction", fill.Direction,
-		"price", fill.AvgPrice,
-		"quantity", fill.Quantity,
+		"symbol", pos.Instrument.Symbol,
+		"direction", pos.Direction,
+		"price", pos.EntryPrice,
+		"quantity", pos.Quantity,
 		"conviction", thesis.Conviction,
 		"strategy", thesis.Strategy,
 		"desk", d.ID,
 		"ab_group", d.ABGroup,
+		"autonomy_mode", thesis.AutonomyMode,
+		"shadow", pos.Shadow,
 		"time", time.Now().Format(time.RFC3339),
 	)
 }
@@ -438,6 +465,86 @@ func (d *Desk) normalizePositionSize(thesis *model.Thesis) {
 		quantity = math.Max(1, math.Floor(quantity))
 	}
 	thesis.PositionSize = quantity
+}
+
+type autonomyDecision struct {
+	Mode          model.AutonomyMode
+	ScanTerritory belief.TerritoryAssessment
+	ExecTerritory belief.TerritoryAssessment
+	CompetenceKey string
+	Reason        string
+}
+
+func (d *Desk) assessScanTerritory() belief.TerritoryAssessment {
+	if d.ABGroup != "A" || d.beliefs == nil {
+		return belief.TerritoryAssessment{Status: belief.TerritoryKnown}
+	}
+	return d.beliefs.AssessTerritory(d.ID, "scan", d.Domain, d.regime.Key(), 20)
+}
+
+func (d *Desk) resolveAutonomy(scanTerritory belief.TerritoryAssessment, thesis *model.Thesis) autonomyDecision {
+	if thesis == nil {
+		return autonomyDecision{Mode: model.Autonomous}
+	}
+
+	key := belief.CompetenceKey(d.ID, thesis.Strategy, thesis.Instrument.SecType, d.regime.Key())
+	if d.ABGroup != "A" || d.beliefs == nil {
+		return autonomyDecision{
+			Mode:          model.Autonomous,
+			ScanTerritory: scanTerritory,
+			ExecTerritory: belief.TerritoryAssessment{Status: belief.TerritoryKnown},
+			CompetenceKey: key,
+			Reason:        "control_group",
+		}
+	}
+
+	execTerritory := d.beliefs.AssessTerritory(d.ID, thesis.Strategy, thesis.Instrument.SecType, d.regime.Key(), 20)
+	decision := autonomyDecision{
+		Mode:          model.Restricted,
+		ScanTerritory: scanTerritory,
+		ExecTerritory: execTerritory,
+		CompetenceKey: key,
+		Reason:        "unknown_territory",
+	}
+
+	switch {
+	case scanTerritory.Status == belief.TerritoryUnknown:
+		decision.Reason = "unknown_scan_territory"
+	case scanTerritory.Status == belief.TerritoryAdjacent:
+		decision.Mode = model.Supervised
+		decision.Reason = "adjacent_scan_territory"
+	case execTerritory.Status == belief.TerritoryAdjacent:
+		decision.Mode = model.Supervised
+		decision.Reason = "adjacent_execution_territory"
+	case execTerritory.Status == belief.TerritoryKnown && execTerritory.Exact != nil:
+		decision.Mode = execTerritory.Exact.Autonomy
+		decision.Reason = "earned_autonomy"
+	default:
+		decision.Reason = "unknown_execution_territory"
+	}
+
+	return decision
+}
+
+func (d *Desk) applyAutonomy(thesis *model.Thesis, decision autonomyDecision) {
+	if thesis == nil {
+		return
+	}
+
+	thesis.AutonomyMode = decision.Mode
+	thesis.ScanTerritory = string(decision.ScanTerritory.Status)
+	thesis.ExecutionTerritory = string(decision.ExecTerritory.Status)
+	thesis.CompetenceKey = decision.CompetenceKey
+
+	if decision.ExecTerritory.Exact != nil {
+		thesis.CompetenceTrust = decision.ExecTerritory.Exact.Trust
+		thesis.CompetenceConfidence = decision.ExecTerritory.Exact.Confidence
+		return
+	}
+	if decision.ScanTerritory.Exact != nil {
+		thesis.CompetenceTrust = decision.ScanTerritory.Exact.Trust
+		thesis.CompetenceConfidence = decision.ScanTerritory.Exact.Confidence
+	}
 }
 
 func (d *Desk) persistSignal(ctx context.Context, sig signal.Signal) {

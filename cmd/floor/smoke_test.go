@@ -108,6 +108,38 @@ func TestSmokeFullPipeline(t *testing.T) {
 	bk := book.NewBook(broker, 1_000_000)
 	riskGate := risk.NewGate(risk.DefaultLimits())
 	beliefGraph := belief.NewGraph()
+	regimeKey := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "neutral",
+		Liquidity:  "normal",
+	}.Key()
+	beliefGraph.Load([]*model.CompetenceState{
+		{
+			Key:          belief.CompetenceKey("test-desk", "scan", "corporate", regimeKey),
+			DeskID:       "test-desk",
+			Capability:   "scan",
+			Context:      "corporate",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+		{
+			Key:          belief.CompetenceKey("test-desk", "event", "STK", regimeKey),
+			DeskID:       "test-desk",
+			Capability:   "event",
+			Context:      "STK",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+	})
 	learnWorker := memory.NewLearnWorker(beliefGraph, nil)
 	scan := scanner.NewEngine(router, 40)
 	researchDesk := research.NewDesk(router, 0.65)
@@ -188,11 +220,13 @@ func TestSmokeFullPipeline(t *testing.T) {
 	}
 
 	states := beliefGraph.All()
-	if len(states) != 1 {
-		t.Fatalf("expected 1 belief state, got %d", len(states))
+	if len(states) != 2 {
+		t.Fatalf("expected 2 belief states, got %d", len(states))
 	}
-	if states[0].FailureCount != 1 {
-		t.Fatalf("expected 1 recorded failure, got %+v", states[0])
+	for _, state := range states {
+		if state.FailureCount != 21 {
+			t.Fatalf("expected seeded failure count to increment to 21, got %+v", state)
+		}
 	}
 
 	cancel()

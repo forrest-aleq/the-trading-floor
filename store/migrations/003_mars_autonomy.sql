@@ -1,0 +1,11 @@
+ALTER TABLE theses
+    ADD COLUMN IF NOT EXISTS autonomy_mode TEXT DEFAULT '',
+    ADD COLUMN IF NOT EXISTS scan_territory TEXT DEFAULT '',
+    ADD COLUMN IF NOT EXISTS execution_territory TEXT DEFAULT '',
+    ADD COLUMN IF NOT EXISTS competence_key TEXT DEFAULT '',
+    ADD COLUMN IF NOT EXISTS competence_trust FLOAT DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS competence_confidence FLOAT DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS domain TEXT DEFAULT '';
+
+ALTER TABLE positions
+    ADD COLUMN IF NOT EXISTS shadow BOOLEAN DEFAULT false;

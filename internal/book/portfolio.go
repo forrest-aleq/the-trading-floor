@@ -74,24 +74,7 @@ func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Posit
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	pos := &model.Position{
-		ID:             fill.OrderID,
-		ThesisID:       thesis.ID,
-		DeskID:         thesis.DeskID,
-		Instrument:     fill.Instrument,
-		Direction:      fill.Direction,
-		Quantity:       fill.Quantity,
-		EntryPrice:     fill.AvgPrice,
-		CurrentPrice:   fill.AvgPrice,
-		IBKROrderID:    fill.IBKROrderID,
-		IBKRContractID: fill.Instrument.ConID,
-		Status:         "open",
-		OpenedAt:       fill.FilledAt,
-	}
-	if pos.OpenedAt.IsZero() {
-		pos.OpenedAt = time.Now()
-	}
-
+	pos := b.newPosition(fill, thesis)
 	b.positions[pos.ID] = pos
 	b.deskPositions[pos.DeskID]++
 	b.totalTrades++
@@ -117,6 +100,56 @@ func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Posit
 	return pos
 }
 
+func (b *Book) OpenShadowPosition(thesis *model.Thesis) *model.Position {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	fill := &model.Fill{
+		OrderID:    thesis.ID,
+		Instrument: thesis.Instrument,
+		Direction:  thesis.Direction,
+		Quantity:   thesis.PositionSize,
+		AvgPrice:   thesis.EntryPrice,
+		FilledAt:   time.Now(),
+	}
+	pos := b.newPosition(fill, thesis)
+	pos.Shadow = true
+	b.positions[pos.ID] = pos
+	b.recalculateLocked()
+
+	b.log.Info("shadow position opened",
+		"id", pos.ID,
+		"desk", pos.DeskID,
+		"symbol", pos.Instrument.Symbol,
+		"direction", pos.Direction,
+		"qty", pos.Quantity,
+		"price", pos.EntryPrice,
+	)
+
+	return pos
+}
+
+func (b *Book) newPosition(fill *model.Fill, thesis *model.Thesis) *model.Position {
+	pos := &model.Position{
+		ID:             fill.OrderID,
+		ThesisID:       thesis.ID,
+		DeskID:         thesis.DeskID,
+		Instrument:     fill.Instrument,
+		Direction:      fill.Direction,
+		Quantity:       fill.Quantity,
+		EntryPrice:     fill.AvgPrice,
+		CurrentPrice:   fill.AvgPrice,
+		IBKROrderID:    fill.IBKROrderID,
+		IBKRContractID: fill.Instrument.ConID,
+		Status:         "open",
+		OpenedAt:       fill.FilledAt,
+	}
+	if pos.OpenedAt.IsZero() {
+		pos.OpenedAt = time.Now()
+	}
+	return pos
+}
+
 func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason string) (*model.ThesisOutcome, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -130,10 +163,12 @@ func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason st
 	}
 
 	notional := pos.Instrument.Notional(exitPrice, pos.Quantity)
-	if pos.Direction == model.Long {
-		b.cash += notional
-	} else {
-		b.cash -= notional
+	if !pos.Shadow {
+		if pos.Direction == model.Long {
+			b.cash += notional
+		} else {
+			b.cash -= notional
+		}
 	}
 
 	var pnl float64
@@ -150,11 +185,13 @@ func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason st
 	now := time.Now()
 	pos.ClosedAt = &now
 
-	b.deskPnL[pos.DeskID] += pnl
-	if b.deskPositions[pos.DeskID] > 0 {
-		b.deskPositions[pos.DeskID]--
+	if !pos.Shadow {
+		b.deskPnL[pos.DeskID] += pnl
+		if b.deskPositions[pos.DeskID] > 0 {
+			b.deskPositions[pos.DeskID]--
+		}
+		b.dailyPnL += pnl
 	}
-	b.dailyPnL += pnl
 	b.recalculateLocked()
 
 	holdingHours := now.Sub(pos.OpenedAt).Hours()
@@ -187,7 +224,7 @@ func (b *Book) Mark(prices map[string]float64) {
 	defer b.mu.Unlock()
 
 	for _, pos := range b.positions {
-		if pos.Status != "open" {
+		if pos.Status != "open" || pos.Shadow {
 			continue
 		}
 
@@ -205,7 +242,7 @@ func (b *Book) Snapshot() PortfolioSnapshot {
 
 	openCount := 0
 	for _, pos := range b.positions {
-		if pos.Status == "open" {
+		if pos.Status == "open" && !pos.Shadow {
 			openCount++
 		}
 	}
@@ -280,7 +317,7 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 
 	bookByKey := make(map[string]*model.Position)
 	for _, pos := range b.positions {
-		if pos.Status != "open" {
+		if pos.Status != "open" || pos.Shadow {
 			continue
 		}
 		bookByKey[reconcileKey(pos.IBKRContractID, pos.Instrument.Symbol)] = pos

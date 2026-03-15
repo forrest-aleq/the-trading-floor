@@ -37,8 +37,8 @@ type stubBroker struct {
 	connected atomic.Bool
 }
 
-func (b *stubBroker) IsConnected() bool                                              { return b.connected.Load() }
-func (b *stubBroker) IsPaper() bool                                                  { return true }
+func (b *stubBroker) IsConnected() bool { return b.connected.Load() }
+func (b *stubBroker) IsPaper() bool     { return true }
 func (b *stubBroker) PlaceOrder(_ context.Context, o model.Order) (*model.Fill, error) {
 	return &model.Fill{
 		OrderID:    o.ID,
@@ -49,8 +49,8 @@ func (b *stubBroker) PlaceOrder(_ context.Context, o model.Order) (*model.Fill, 
 		FilledAt:   time.Now(),
 	}, nil
 }
-func (b *stubBroker) CancelOrder(_ context.Context, _ int64) error                   { return nil }
-func (b *stubBroker) GetPositions(_ context.Context) ([]ibkr.IBKRPosition, error)    { return nil, nil }
+func (b *stubBroker) CancelOrder(_ context.Context, _ int64) error                { return nil }
+func (b *stubBroker) GetPositions(_ context.Context) ([]ibkr.IBKRPosition, error) { return nil, nil }
 func (b *stubBroker) GetAccountSummary(_ context.Context) (*ibkr.AccountSummary, error) {
 	return &ibkr.AccountSummary{NetLiquidation: 1_000_000, Cash: 1_000_000}, nil
 }
@@ -121,6 +121,38 @@ func TestSmokeEndToEnd(t *testing.T) {
 	bk := book.NewBook(broker, 1_000_000)
 	riskGate := risk.NewGate(risk.DefaultLimits())
 	beliefGraph := belief.NewGraph()
+	regimeKey := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "neutral",
+		Liquidity:  "normal",
+	}.Key()
+	beliefGraph.Load([]*model.CompetenceState{
+		{
+			Key:          belief.CompetenceKey("test-desk-a1", "scan", "corporate", regimeKey),
+			DeskID:       "test-desk-a1",
+			Capability:   "scan",
+			Context:      "corporate",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+		{
+			Key:          belief.CompetenceKey("test-desk-a1", "event", "STK", regimeKey),
+			DeskID:       "test-desk-a1",
+			Capability:   "event",
+			Context:      "STK",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+	})
 	learnWorker := memory.NewLearnWorker(beliefGraph, nil)
 	scan := scanner.NewEngine(router, 70)
 	researchDesk := research.NewDesk(router, 0.65)

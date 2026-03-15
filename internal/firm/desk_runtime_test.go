@@ -92,7 +92,7 @@ func TestDeskSkipsCouncilForSmallPctAndSpawnsSubTeam(t *testing.T) {
 		scriptedLLM{response: string(prosecuteResp)},
 	)
 
-	desk, bk := newRuntimeDesk(t, "A", router, nil)
+	desk, bk, _ := newRuntimeDesk(t, "A", router, nil, nil)
 	ctx := context.Background()
 	desk.Process(ctx, signal.Signal{
 		ID:        "sig-1",
@@ -151,8 +151,8 @@ func TestControlDeskSkipsEngramBoost(t *testing.T) {
 		engrams.Record("macro_STK", "macro_medium_neutral_risk_on_normal", "macro", "", []string{"medium", "neutral", "risk_on"}, false, -1)
 	}
 
-	deskA, bookA := newRuntimeDesk(t, "A", router, engrams)
-	deskB, bookB := newRuntimeDesk(t, "B", router, engrams)
+	deskA, bookA, _ := newRuntimeDesk(t, "A", router, engrams, nil)
+	deskB, bookB, _ := newRuntimeDesk(t, "B", router, engrams, nil)
 
 	sig := signal.Signal{
 		ID:        "sig-2",
@@ -175,7 +175,153 @@ func TestControlDeskSkipsEngramBoost(t *testing.T) {
 	}
 }
 
-func newRuntimeDesk(t *testing.T, group string, router *llm.Router, engrams *memory.EngramStore) (*firm.Desk, *book.Book) {
+func TestTreatmentDeskUsesShadowModeUntilCompetenceIsEarned(t *testing.T) {
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "AAPL", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        100.0,
+		"target_price":       110.0,
+		"stop_loss":          95.0,
+		"conviction":         0.8,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.01,
+		"strategy":           "event",
+		"evidence":           []string{"catalyst", "follow-through"},
+		"counter_args":       []string{"already priced"},
+		"kill_rules":         []map[string]any{{"condition": "price_below_stop", "threshold": 95.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"crowded"},
+		"missing_data":          []string{"flow"},
+		"historical_analogues":  []string{"prior event"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"AAPL","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.8,"category":"corporate","reasoning":"event"}`},
+		scriptedLLM{response: string(researchResp)},
+		scriptedLLM{response: string(prosecuteResp)},
+	)
+
+	deskA, bookA, _ := newRuntimeDesk(t, "A", router, nil, nil)
+	deskB, bookB, _ := newRuntimeDesk(t, "B", router, nil, nil)
+
+	sig := signal.Signal{
+		ID:        "sig-shadow",
+		Source:    "test",
+		Type:      signal.TypeNews,
+		Category:  "corporate",
+		Timestamp: time.Now(),
+		Urgency:   0.8,
+		Raw:       []byte(`AAPL event catalyst forms`),
+	}
+
+	deskA.Process(context.Background(), sig)
+	deskB.Process(context.Background(), sig)
+
+	posA := fetchOpenPosition(t, bookA)
+	if !posA.Shadow {
+		t.Fatal("expected treatment desk to open a shadow position on cold start")
+	}
+	thesisA, _ := deskA.GetThesis(posA.ThesisID)
+	if thesisA == nil || thesisA.AutonomyMode != model.Restricted {
+		t.Fatalf("expected restricted autonomy for treatment desk, got %+v", thesisA)
+	}
+
+	posB := fetchOpenPosition(t, bookB)
+	if posB.Shadow {
+		t.Fatal("expected control desk to execute live position")
+	}
+	thesisB, _ := deskB.GetThesis(posB.ThesisID)
+	if thesisB == nil || thesisB.AutonomyMode != model.Autonomous {
+		t.Fatalf("expected control desk to remain autonomous, got %+v", thesisB)
+	}
+}
+
+func TestTreatmentDeskExecutesLiveWhenCompetenceIsKnown(t *testing.T) {
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "AAPL", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        100.0,
+		"target_price":       110.0,
+		"stop_loss":          95.0,
+		"conviction":         0.8,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.01,
+		"strategy":           "event",
+		"evidence":           []string{"catalyst", "follow-through"},
+		"counter_args":       []string{"already priced"},
+		"kill_rules":         []map[string]any{{"condition": "price_below_stop", "threshold": 95.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"crowded"},
+		"missing_data":          []string{"flow"},
+		"historical_analogues":  []string{"prior event"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"AAPL","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.8,"category":"corporate","reasoning":"event"}`},
+		scriptedLLM{response: string(researchResp)},
+		scriptedLLM{response: string(prosecuteResp)},
+	)
+
+	graph := belief.NewGraph()
+	regimeKey := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "neutral",
+		Liquidity:  "normal",
+	}.Key()
+	graph.Load([]*model.CompetenceState{
+		{
+			Key:          belief.CompetenceKey("desk-A", "scan", "corporate", regimeKey),
+			DeskID:       "desk-A",
+			Capability:   "scan",
+			Context:      "corporate",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+		{
+			Key:          belief.CompetenceKey("desk-A", "event", "STK", regimeKey),
+			DeskID:       "desk-A",
+			Capability:   "event",
+			Context:      "STK",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+	})
+
+	desk, bk, _ := newRuntimeDesk(t, "A", router, nil, graph)
+	desk.Process(context.Background(), signal.Signal{
+		ID:        "sig-live",
+		Source:    "test",
+		Type:      signal.TypeNews,
+		Category:  "corporate",
+		Timestamp: time.Now(),
+		Urgency:   0.8,
+		Raw:       []byte(`AAPL event catalyst forms`),
+	})
+
+	pos := fetchOpenPosition(t, bk)
+	if pos.Shadow {
+		t.Fatal("expected treatment desk to execute live once competence is known")
+	}
+}
+
+func newRuntimeDesk(t *testing.T, group string, router *llm.Router, engrams *memory.EngramStore, graph *belief.Graph) (*firm.Desk, *book.Book, *belief.Graph) {
 	t.Helper()
 
 	broker := &runtimeStubBroker{}
@@ -184,7 +330,10 @@ func newRuntimeDesk(t *testing.T, group string, router *llm.Router, engrams *mem
 	execMgr := execution.NewManager(broker)
 	bk := book.NewBook(broker, 1_000_000)
 	riskGate := risk.NewGate(risk.DefaultLimits())
-	beliefGraph := belief.NewGraph()
+	beliefGraph := graph
+	if beliefGraph == nil {
+		beliefGraph = belief.NewGraph()
+	}
 	scan := scanner.NewEngine(router, 40)
 	researchDesk := research.NewDesk(router, 0.65)
 	prosecutor := research.NewProsecutor(router)
@@ -207,19 +356,26 @@ func newRuntimeDesk(t *testing.T, group string, router *llm.Router, engrams *mem
 		Engrams:    engrams,
 	})
 
-	return desk, bk
+	return desk, bk, beliefGraph
 }
 
 func fetchActiveThesis(t *testing.T, desk *firm.Desk, bk *book.Book) *model.Thesis {
+	t.Helper()
+
+	pos := fetchOpenPosition(t, bk)
+	thesis, ok := desk.GetThesis(pos.ThesisID)
+	if !ok || thesis == nil {
+		t.Fatalf("expected active thesis for position %s", pos.ThesisID)
+	}
+	return thesis
+}
+
+func fetchOpenPosition(t *testing.T, bk *book.Book) *model.Position {
 	t.Helper()
 
 	positions := bk.GetOpenPositions()
 	if len(positions) != 1 {
 		t.Fatalf("expected exactly one open position, got %d", len(positions))
 	}
-	thesis, ok := desk.GetThesis(positions[0].ThesisID)
-	if !ok || thesis == nil {
-		t.Fatalf("expected active thesis for position %s", positions[0].ThesisID)
-	}
-	return thesis
+	return positions[0]
 }

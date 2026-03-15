@@ -17,15 +17,16 @@ func (db *DB) UpsertPosition(ctx context.Context, pos *model.Position) error {
 	_, err = db.Pool.Exec(ctx,
 		`INSERT INTO positions (
 			id, thesis_id, desk_id, instrument, direction, quantity, entry_price, current_price,
-			unrealized_pnl, realized_pnl, ibkr_order_id, ibkr_contract_id, status, opened_at, closed_at
+			unrealized_pnl, realized_pnl, ibkr_order_id, ibkr_contract_id, shadow, status, opened_at, closed_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8,
-			$9, $10, $11, $12, $13, $14, $15
+			$9, $10, $11, $12, $13, $14, $15, $16
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			current_price = EXCLUDED.current_price,
 			unrealized_pnl = EXCLUDED.unrealized_pnl,
 			realized_pnl = EXCLUDED.realized_pnl,
+			shadow = EXCLUDED.shadow,
 			status = EXCLUDED.status,
 			closed_at = EXCLUDED.closed_at`,
 		pos.ID,
@@ -40,6 +41,7 @@ func (db *DB) UpsertPosition(ctx context.Context, pos *model.Position) error {
 		pos.RealizedPnL,
 		pos.IBKROrderID,
 		pos.IBKRContractID,
+		pos.Shadow,
 		pos.Status,
 		pos.OpenedAt,
 		pos.ClosedAt,

@@ -81,6 +81,7 @@ type Thesis struct {
 	ID            string         `json:"id"`
 	OpportunityID string         `json:"opportunity_id"`
 	DeskID        string         `json:"desk_id"`
+	Domain        string         `json:"domain,omitempty"`
 	Strategy      string         `json:"strategy"`
 	Instrument    Instrument     `json:"instrument"`
 	Direction     TradeDirection `json:"direction"`
@@ -99,9 +100,15 @@ type Thesis struct {
 	KillRules []KillRule   `json:"kill_rules"`
 	Status    ThesisStatus `json:"status"`
 
-	Prosecution    *Prosecution    `json:"prosecution,omitempty"`
-	CouncilVerdict *CouncilVerdict `json:"council_verdict,omitempty"`
-	Outcome        *ThesisOutcome  `json:"outcome,omitempty"`
+	AutonomyMode         AutonomyMode    `json:"autonomy_mode,omitempty"`
+	ScanTerritory        string          `json:"scan_territory,omitempty"`
+	ExecutionTerritory   string          `json:"execution_territory,omitempty"`
+	CompetenceKey        string          `json:"competence_key,omitempty"`
+	CompetenceTrust      float64         `json:"competence_trust,omitempty"`
+	CompetenceConfidence float64         `json:"competence_confidence,omitempty"`
+	Prosecution          *Prosecution    `json:"prosecution,omitempty"`
+	CouncilVerdict       *CouncilVerdict `json:"council_verdict,omitempty"`
+	Outcome              *ThesisOutcome  `json:"outcome,omitempty"`
 
 	CreatedAt  time.Time  `json:"created_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
@@ -197,6 +204,7 @@ type Position struct {
 	RealizedPnL    float64        `json:"realized_pnl"`
 	IBKROrderID    int64          `json:"ibkr_order_id,omitempty"`
 	IBKRContractID int64          `json:"ibkr_contract_id,omitempty"`
+	Shadow         bool           `json:"shadow,omitempty"`
 	Status         string         `json:"status"` // open, closing, closed
 	OpenedAt       time.Time      `json:"opened_at"`
 	ClosedAt       *time.Time     `json:"closed_at,omitempty"`
@@ -266,6 +274,10 @@ func (c *CompetenceState) InferAutonomy() AutonomyMode {
 		return Supervised
 	}
 	return Restricted
+}
+
+func (c *CompetenceState) TotalObservations() int {
+	return c.SuccessCount + c.FailureCount
 }
 
 // Regime represents current market conditions

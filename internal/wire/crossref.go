@@ -4,14 +4,19 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
 type signalRef struct {
-	id       string
-	source   string
-	cluster  string
-	entities []string
+	id         string
+	source     string
+	cluster    string
+	entities   []string
+	text       string
+	ownerGroup string
+	trust      float64
+	primary    bool
 }
 
 // CrossReferencer links repeated evidence across clusters and entities so desks
@@ -51,17 +56,41 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if sig.EvidenceMeta == nil {
+		sig.EvidenceMeta = buildEvidenceMeta(sig)
+	}
+	meta := sig.EvidenceMeta.Clone()
+	if meta == nil {
+		meta = &evidence.Metadata{}
+	}
+
 	related := newOrderedStrings(sig.RelatedSignalIDs...)
 	sources := newOrderedStrings()
 	entities := newOrderedStrings()
+	ownerGroups := newOrderedStrings()
+	if meta.SourceOwnerGroup != "" {
+		ownerGroups.Add(meta.SourceOwnerGroup)
+	}
+	corroboratingOwnerGroups := newOrderedStrings()
+	candidateRefs := make(map[string]signalRef)
 
 	if sig.ClusterID != "" {
 		for _, ref := range c.byCluster[sig.ClusterID] {
+			candidateRefs[ref.id] = ref
 			if ref.id != sig.ID {
 				related.Add(ref.id)
 			}
 			if ref.source != "" && ref.source != sig.Source {
 				sources.Add(ref.source)
+			}
+			if ref.ownerGroup != "" {
+				ownerGroups.Add(ref.ownerGroup)
+				if ref.ownerGroup != meta.SourceOwnerGroup {
+					corroboratingOwnerGroups.Add(ref.ownerGroup)
+				}
+			}
+			if ref.primary {
+				meta.HasPrimarySource = true
 			}
 		}
 	}
@@ -70,11 +99,21 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 	for _, key := range entityKeys(sig.Entities) {
 		matched := false
 		for _, ref := range c.byEntity[key] {
+			candidateRefs[ref.id] = ref
 			if ref.id != sig.ID {
 				related.Add(ref.id)
 			}
 			if ref.source != "" && ref.source != sig.Source {
 				sources.Add(ref.source)
+			}
+			if ref.ownerGroup != "" {
+				ownerGroups.Add(ref.ownerGroup)
+				if ref.ownerGroup != meta.SourceOwnerGroup {
+					corroboratingOwnerGroups.Add(ref.ownerGroup)
+				}
+			}
+			if ref.primary {
+				meta.HasPrimarySource = true
 			}
 			matched = true
 		}
@@ -88,6 +127,18 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 	sig.RelatedSignalIDs = related.Last(c.maxRelated)
 	sig.CorroboratingSources = sources.Last(c.maxLabels)
 	sig.CorroboratingEntities = entities.Last(c.maxLabels)
+	meta.CorroboratingOwnerGroups = corroboratingOwnerGroups.Last(c.maxLabels)
+	meta.DistinctSources = len(newOrderedStrings(append([]string{sig.Source}, sig.CorroboratingSources...)...).items)
+	meta.DistinctOwnerGroups = len(ownerGroups.items)
+	meta.HasPrimarySource = meta.HasPrimarySource || meta.SourceTier == "primary" || meta.SourceType == "primary" || meta.SourceType == "market"
+
+	refs := make([]signalRef, 0, len(candidateRefs))
+	for _, ref := range candidateRefs {
+		refs = append(refs, ref)
+	}
+	meta.ContradictionCount, meta.ContradictionSeverity, meta.ConflictingSignalIDs = detectContradictions(sig, refs)
+	meta.EvidenceScore = roundEvidence(scoreEvidence(meta))
+	sig.EvidenceMeta = meta
 
 	c.record(sig)
 	return sig
@@ -99,6 +150,12 @@ func (c *CrossReferencer) record(sig signal.Signal) {
 		source:   sig.Source,
 		cluster:  sig.ClusterID,
 		entities: entityKeys(sig.Entities),
+		text:     canonicalText(sig),
+	}
+	if sig.EvidenceMeta != nil {
+		ref.ownerGroup = sig.EvidenceMeta.SourceOwnerGroup
+		ref.trust = sig.EvidenceMeta.SourceTrust
+		ref.primary = sig.EvidenceMeta.SourceTier == "primary" || sig.EvidenceMeta.SourceType == "primary" || sig.EvidenceMeta.SourceType == "market"
 	}
 
 	if ref.cluster != "" {

@@ -17,6 +17,7 @@ import (
 	"github.com/hnic/trading-floor/internal/scanner"
 	"github.com/hnic/trading-floor/internal/store"
 	"github.com/hnic/trading-floor/internal/trace"
+	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
@@ -149,6 +150,16 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	}
 
 	d.persistOpportunity(ctx, opp)
+	if allowed, reason := opp.EvidenceGate(); !allowed {
+		d.log.Info("opportunity blocked by evidence gate",
+			"signal_id", sig.ID,
+			"opportunity_id", opp.ID,
+			"reason", reason,
+			"source_trust", evidenceTrustValue(opp.EvidenceMeta),
+			"evidence_score", evidenceScoreValue(opp.EvidenceMeta),
+		)
+		return
+	}
 
 	d.log.Info("opportunity detected",
 		append(span.Fields(), "score", opp.Score, "urgency", opp.Urgency, "category", opp.Category)...,
@@ -396,6 +407,20 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		"shadow", pos.Shadow,
 		"time", time.Now().Format(time.RFC3339),
 	)
+}
+
+func evidenceTrustValue(meta *evidence.Metadata) float64 {
+	if meta == nil {
+		return 0
+	}
+	return meta.SourceTrust
+}
+
+func evidenceScoreValue(meta *evidence.Metadata) float64 {
+	if meta == nil {
+		return 0
+	}
+	return meta.EvidenceScore
 }
 
 func (d *Desk) ProcessOutcome(ctx context.Context, thesis *model.Thesis, outcome *model.ThesisOutcome) {

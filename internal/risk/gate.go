@@ -102,6 +102,11 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 			Current: fmt.Sprintf("%.2f", thesis.Conviction),
 		})
 	}
+	if thesis != nil {
+		if allowed, reason := thesis.EvidenceRiskGate(); !allowed {
+			violations = append(violations, evidenceViolation(reason, thesis))
+		}
+	}
 
 	// 2. Position size vs desk capital
 	orderNotional := order.GrossNotional()
@@ -207,6 +212,38 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 		Allowed:       true,
 		AdjustedOrder: &adjustedOrder,
 		Token:         token,
+	}
+}
+
+func evidenceViolation(reason string, thesis *model.Thesis) model.Violation {
+	current := "unavailable"
+	if thesis != nil && thesis.EvidenceMeta != nil {
+		current = fmt.Sprintf("score=%.2f trust=%.2f freshness=%s contradictions=%d",
+			thesis.EvidenceMeta.EvidenceScore,
+			thesis.EvidenceMeta.SourceTrust,
+			thesis.EvidenceMeta.FreshnessStatus,
+			thesis.EvidenceMeta.ContradictionCount,
+		)
+	}
+
+	limit := "deterministic_evidence_gate"
+	switch reason {
+	case "stale_signal_evidence":
+		limit = "fresh_evidence_required"
+	case "contradictory_signal_evidence":
+		limit = "no_high_severity_conflicts"
+	case "uncorroborated_social_signal":
+		limit = "independent_owner_group_corroboration"
+	case "low_integrity_evidence":
+		limit = "trust>=0.45_or_independent_corroboration"
+	case "low_evidence_score":
+		limit = "evidence_score>=0.30"
+	}
+
+	return model.Violation{
+		Rule:    reason,
+		Limit:   limit,
+		Current: current,
 	}
 }
 

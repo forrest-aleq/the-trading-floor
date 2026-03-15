@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hnic/trading-floor/pkg/evidence"
 )
 
 // Direction for trades
@@ -149,15 +151,16 @@ func (l TradeLeg) GrossNotional(price, units float64) float64 {
 
 // Opportunity is scanner output — a tradeable setup detected from signals
 type Opportunity struct {
-	ID          string         `json:"id"`
-	SignalIDs   []string       `json:"signal_ids"`
-	Instruments []Instrument   `json:"instruments"`
-	Direction   TradeDirection `json:"direction"`
-	Urgency     float64        `json:"urgency"`
-	Score       float64        `json:"score"`
-	Category    string         `json:"category"`
-	CascadeInfo *CascadeInfo   `json:"cascade_info,omitempty"`
-	CreatedAt   time.Time      `json:"created_at"`
+	ID           string             `json:"id"`
+	SignalIDs    []string           `json:"signal_ids"`
+	Instruments  []Instrument       `json:"instruments"`
+	Direction    TradeDirection     `json:"direction"`
+	Urgency      float64            `json:"urgency"`
+	Score        float64            `json:"score"`
+	Category     string             `json:"category"`
+	EvidenceMeta *evidence.Metadata `json:"evidence_meta,omitempty"`
+	CascadeInfo  *CascadeInfo       `json:"cascade_info,omitempty"`
+	CreatedAt    time.Time          `json:"created_at"`
 }
 
 type CascadeInfo struct {
@@ -204,15 +207,16 @@ type Thesis struct {
 	KillRules []KillRule   `json:"kill_rules"`
 	Status    ThesisStatus `json:"status"`
 
-	AutonomyMode         AutonomyMode    `json:"autonomy_mode,omitempty"`
-	ScanTerritory        string          `json:"scan_territory,omitempty"`
-	ExecutionTerritory   string          `json:"execution_territory,omitempty"`
-	CompetenceKey        string          `json:"competence_key,omitempty"`
-	CompetenceTrust      float64         `json:"competence_trust,omitempty"`
-	CompetenceConfidence float64         `json:"competence_confidence,omitempty"`
-	Prosecution          *Prosecution    `json:"prosecution,omitempty"`
-	CouncilVerdict       *CouncilVerdict `json:"council_verdict,omitempty"`
-	Outcome              *ThesisOutcome  `json:"outcome,omitempty"`
+	AutonomyMode         AutonomyMode       `json:"autonomy_mode,omitempty"`
+	ScanTerritory        string             `json:"scan_territory,omitempty"`
+	ExecutionTerritory   string             `json:"execution_territory,omitempty"`
+	CompetenceKey        string             `json:"competence_key,omitempty"`
+	CompetenceTrust      float64            `json:"competence_trust,omitempty"`
+	CompetenceConfidence float64            `json:"competence_confidence,omitempty"`
+	EvidenceMeta         *evidence.Metadata `json:"evidence_meta,omitempty"`
+	Prosecution          *Prosecution       `json:"prosecution,omitempty"`
+	CouncilVerdict       *CouncilVerdict    `json:"council_verdict,omitempty"`
+	Outcome              *ThesisOutcome     `json:"outcome,omitempty"`
 
 	CreatedAt  time.Time  `json:"created_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`

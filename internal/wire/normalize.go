@@ -27,6 +27,7 @@ func NormalizeSignal(sig signal.Signal) signal.Signal {
 	if len(sig.Embedding) == 0 {
 		sig.Embedding = EmbedText(sig.Translated)
 	}
+	sig.EvidenceMeta = buildEvidenceMeta(sig)
 	return sig
 }
 

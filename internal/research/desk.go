@@ -86,6 +86,25 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 		opp.Score, opp.Urgency, opp.Category,
 		instrumentNames(opp.Instruments), opp.Direction, opp.SignalIDs,
 	)
+	if opp.EvidenceMeta != nil {
+		prompt += fmt.Sprintf(
+			"\n\nEvidence quality:\n  Source trust: %.2f\n  Source tier/type: %s / %s\n  Source lineage: %s / %s\n  Freshness: %s (age %.1fh, window %.1fh)\n  Distinct sources: %d\n  Distinct owner groups: %d\n  Has primary source: %t\n  Contradictions: %d (%s)\n  Evidence score: %.2f\nUse this to calibrate conviction. Contradictory or weak evidence should reduce confidence materially.",
+			opp.EvidenceMeta.SourceTrust,
+			opp.EvidenceMeta.SourceTier,
+			opp.EvidenceMeta.SourceType,
+			opp.EvidenceMeta.SourceDomain,
+			opp.EvidenceMeta.SourceOwnerGroup,
+			opp.EvidenceMeta.FreshnessStatus,
+			opp.EvidenceMeta.FreshnessAgeHours,
+			opp.EvidenceMeta.FreshnessWindowHours,
+			opp.EvidenceMeta.DistinctSources,
+			opp.EvidenceMeta.DistinctOwnerGroups,
+			opp.EvidenceMeta.HasPrimarySource,
+			opp.EvidenceMeta.ContradictionCount,
+			opp.EvidenceMeta.ContradictionSeverity,
+			opp.EvidenceMeta.EvidenceScore,
+		)
+	}
 
 	if opp.CascadeInfo != nil {
 		prompt += fmt.Sprintf("\n\nCascade detected:\n  Source domain: %s\n  Target gaps: %v\n  Confidence: %.2f",
@@ -167,6 +186,7 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 		TimeHorizon:   time.Duration(result.TimeHorizonHours) * time.Hour,
 		KillRules:     killRules,
 		Status:        model.ThesisEmbryo,
+		EvidenceMeta:  opp.EvidenceMeta.Clone(),
 		CreatedAt:     time.Now(),
 	}
 

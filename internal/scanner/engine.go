@@ -70,13 +70,16 @@ Respond in JSON:
 
 // Evaluate checks if a signal contains a tradeable opportunity
 func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string) (*model.Opportunity, bool) {
-	if shouldSkipSignal(sig) {
+	if skip, reason := shouldSkipSignal(sig); skip {
 		e.log.Debug("scanner skipped by deterministic prefilter",
 			"signal_id", sig.ID,
+			"reason", reason,
 			"source", sig.Source,
 			"category", sig.Category,
 			"type", sig.Type,
 			"urgency", sig.Urgency,
+			"source_trust", evidenceTrust(sig),
+			"evidence_score", evidenceScore(sig),
 		)
 		return nil, false
 	}
@@ -169,14 +172,15 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 	}
 
 	opp := &model.Opportunity{
-		ID:          uuid.New().String(),
-		SignalIDs:   []string{sig.ID},
-		Instruments: instruments,
-		Direction:   direction,
-		Urgency:     result.Urgency,
-		Score:       result.Score,
-		Category:    result.Category,
-		CreatedAt:   time.Now(),
+		ID:           uuid.New().String(),
+		SignalIDs:    []string{sig.ID},
+		Instruments:  instruments,
+		Direction:    direction,
+		Urgency:      result.Urgency,
+		Score:        result.Score,
+		Category:     result.Category,
+		EvidenceMeta: sig.EvidenceMeta.Clone(),
+		CreatedAt:    time.Now(),
 	}
 
 	e.log.Info("opportunity detected",
@@ -190,14 +194,17 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 	return opp, true
 }
 
-func shouldSkipSignal(sig signal.Signal) bool {
+func shouldSkipSignal(sig signal.Signal) (bool, string) {
+	if allowed, reason := sig.EvidenceGate(); !allowed {
+		return true, reason
+	}
 	if !sig.Timestamp.IsZero() && time.Since(sig.Timestamp) > scannerStaleSignalAge {
-		return true
+		return true, "stale_signal_age"
 	}
 	if sig.Type == signal.TypeSocial && sig.Urgency < 0.5 && len(sig.CorroboratingSources) == 0 {
-		return true
+		return true, "low_signal_social_noise"
 	}
-	return false
+	return false, ""
 }
 
 func readIntEnv(name string, fallback int) int {
@@ -302,6 +309,25 @@ func formatSignalWithLimit(sig signal.Signal, contentLimit, relatedLimit, entity
 	if len(sig.CorroboratingEntities) > 0 {
 		sb.WriteString(fmt.Sprintf("Corroborating entities: %s\n", strings.Join(sampleStrings(sig.CorroboratingEntities, relatedLimit), ", ")))
 	}
+	if sig.EvidenceMeta != nil {
+		sb.WriteString(fmt.Sprintf("Source trust: %.2f\n", sig.EvidenceMeta.SourceTrust))
+		if sig.EvidenceMeta.SourceTier != "" || sig.EvidenceMeta.SourceType != "" {
+			sb.WriteString(fmt.Sprintf("Source quality: tier=%s type=%s\n", sig.EvidenceMeta.SourceTier, sig.EvidenceMeta.SourceType))
+		}
+		if sig.EvidenceMeta.SourceDomain != "" || sig.EvidenceMeta.SourceOwnerGroup != "" {
+			sb.WriteString(fmt.Sprintf("Source lineage: domain=%s owner_group=%s\n", sig.EvidenceMeta.SourceDomain, sig.EvidenceMeta.SourceOwnerGroup))
+		}
+		if len(sig.EvidenceMeta.CorroboratingOwnerGroups) > 0 {
+			sb.WriteString(fmt.Sprintf("Independent owner groups: %s\n", strings.Join(sampleStrings(sig.EvidenceMeta.CorroboratingOwnerGroups, relatedLimit), ", ")))
+		}
+		if sig.EvidenceMeta.FreshnessStatus != "" {
+			sb.WriteString(fmt.Sprintf("Freshness: %s (age %.1fh / window %.1fh)\n", sig.EvidenceMeta.FreshnessStatus, sig.EvidenceMeta.FreshnessAgeHours, sig.EvidenceMeta.FreshnessWindowHours))
+		}
+		if sig.EvidenceMeta.ContradictionCount > 0 {
+			sb.WriteString(fmt.Sprintf("Contradictions: %d (%s)\n", sig.EvidenceMeta.ContradictionCount, sig.EvidenceMeta.ContradictionSeverity))
+		}
+		sb.WriteString(fmt.Sprintf("Evidence score: %.2f\n", sig.EvidenceMeta.EvidenceScore))
+	}
 	if sig.Translated != "" {
 		sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(sig.Translated, contentLimit)))
 	} else if len(sig.Raw) > 0 {
@@ -319,6 +345,20 @@ func formatSignalWithLimit(sig signal.Signal, contentLimit, relatedLimit, entity
 		sb.WriteString(fmt.Sprintf("Entities: %s\n", strings.Join(names, ", ")))
 	}
 	return sb.String()
+}
+
+func evidenceTrust(sig signal.Signal) float64 {
+	if sig.EvidenceMeta == nil {
+		return 0
+	}
+	return sig.EvidenceMeta.SourceTrust
+}
+
+func evidenceScore(sig signal.Signal) float64 {
+	if sig.EvidenceMeta == nil {
+		return 0
+	}
+	return sig.EvidenceMeta.EvidenceScore
 }
 
 func sampleStrings(items []string, max int) []string {

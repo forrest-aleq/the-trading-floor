@@ -93,7 +93,11 @@ Counter Arguments Already Considered:
 
 	cleaned, cleanErr := llm.ExtractJSON(resp)
 	if cleanErr != nil {
-		p.log.Error("prosecution JSON extraction failed", "error", cleanErr)
+		p.log.Error("prosecution JSON extraction failed",
+			"error", cleanErr,
+			"response_len", len(resp),
+			"response_excerpt", truncateForLog(resp, 320),
+		)
 		return &model.Prosecution{
 			Verdict:    "weakened",
 			BearArgs:   []string{"prosecution JSON extraction failed — defaulting to conservative"},
@@ -103,7 +107,10 @@ Counter Arguments Already Considered:
 
 	var result prosecutionResult
 	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
-		p.log.Error("prosecution parse error", "error", err)
+		p.log.Error("prosecution parse error",
+			"error", err,
+			"response_excerpt", truncateForLog(cleaned, 320),
+		)
 		return &model.Prosecution{
 			Verdict:    "weakened",
 			BearArgs:   []string{"prosecution parse error — defaulting to conservative"},

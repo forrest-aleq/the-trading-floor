@@ -123,7 +123,12 @@ Prosecution Verdict: %s`,
 
 			cleaned, err := llm.ExtractJSON(resp)
 			if err != nil {
-				c.log.Warn("council JSON extraction failed", "archetype", a.Name, "error", err)
+				c.log.Warn("council JSON extraction failed",
+					"archetype", a.Name,
+					"error", err,
+					"response_len", len(resp),
+					"response_excerpt", truncateForLog(resp, 320),
+				)
 				return
 			}
 
@@ -134,7 +139,11 @@ Prosecution Verdict: %s`,
 				Reasoning            string  `json:"reasoning"`
 			}
 			if err := json.Unmarshal([]byte(cleaned), &pr); err != nil {
-				c.log.Warn("council parse failed", "archetype", a.Name, "error", err)
+				c.log.Warn("council parse failed",
+					"archetype", a.Name,
+					"error", err,
+					"response_excerpt", truncateForLog(cleaned, 320),
+				)
 				return
 			}
 

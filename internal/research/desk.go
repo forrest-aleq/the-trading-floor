@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -84,6 +85,11 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 
 	cleaned, err := llm.ExtractJSON(resp)
 	if err != nil {
+		d.log.Warn("research JSON extraction failed",
+			"error", err,
+			"response_len", len(resp),
+			"response_excerpt", truncateForLog(resp, 320),
+		)
 		return nil, fmt.Errorf("research JSON extraction: %w", err)
 	}
 
@@ -111,38 +117,31 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 		}
 	}
 
-	killRules := make([]model.KillRule, len(result.KillRules))
-	for i, kr := range result.KillRules {
-		killRules[i] = model.KillRule{
-			Condition: kr.Condition,
-			Threshold: kr.Threshold,
-			Action:    kr.Action,
-		}
-	}
+	killRules := parseKillRules(result.KillRules, result.StopLoss)
 
 	thesis := &model.Thesis{
 		ID:            uuid.New().String(),
 		OpportunityID: opp.ID,
 		DeskID:        deskID,
-		Strategy:      result.Strategy,
+		Strategy:      normalizeStrategy(result.Strategy),
 		Instrument: model.Instrument{
 			Symbol:   result.Instrument.Symbol,
 			SecType:  result.Instrument.SecType,
 			Currency: result.Instrument.Currency,
-			Exchange: result.Instrument.Exchange,
+			Exchange: normalizeExchange(result.Instrument.Exchange),
 			Expiry:   result.Instrument.Expiry,
 			Strike:   result.Instrument.Strike,
 			Right:    result.Instrument.Right,
 		},
 		Direction:    model.TradeDirection(result.Direction),
-		Conviction:   result.Conviction,
+		Conviction:   normalizeConviction(result.Conviction),
 		Health:       0.85, // Initial health
 		Evidence:     evidence,
 		CounterArgs:  result.CounterArgs,
 		EntryPrice:   result.EntryPrice,
 		TargetPrice:  result.TargetPrice,
 		StopLoss:     result.StopLoss,
-		PositionSize: result.PositionSizePct,
+		PositionSize: normalizePositionSizePct(result.PositionSizePct),
 		TimeHorizon:  time.Duration(result.TimeHorizonHours) * time.Hour,
 		KillRules:    killRules,
 		Status:       model.ThesisEmbryo,
@@ -171,22 +170,18 @@ type researchResult struct {
 		Strike   float64 `json:"strike"`
 		Right    string  `json:"right"`
 	} `json:"instrument"`
-	Direction        string   `json:"direction"`
-	EntryPrice       float64  `json:"entry_price"`
-	TargetPrice      float64  `json:"target_price"`
-	StopLoss         float64  `json:"stop_loss"`
-	Conviction       float64  `json:"conviction"`
-	TimeHorizonHours int      `json:"time_horizon_hours"`
-	PositionSizePct  float64  `json:"position_size_pct"`
-	Strategy         string   `json:"strategy"`
-	Evidence         []string `json:"evidence"`
-	CounterArgs      []string `json:"counter_args"`
-	KillRules        []struct {
-		Condition string  `json:"condition"`
-		Threshold float64 `json:"threshold"`
-		Action    string  `json:"action"`
-	} `json:"kill_rules"`
-	Reasoning string `json:"reasoning"`
+	Direction        string          `json:"direction"`
+	EntryPrice       float64         `json:"entry_price"`
+	TargetPrice      float64         `json:"target_price"`
+	StopLoss         float64         `json:"stop_loss"`
+	Conviction       float64         `json:"conviction"`
+	TimeHorizonHours int             `json:"time_horizon_hours"`
+	PositionSizePct  float64         `json:"position_size_pct"`
+	Strategy         string          `json:"strategy"`
+	Evidence         []string        `json:"evidence"`
+	CounterArgs      []string        `json:"counter_args"`
+	KillRules        json.RawMessage `json:"kill_rules"`
+	Reasoning        string          `json:"reasoning"`
 }
 
 func instrumentNames(instruments []model.Instrument) []string {
@@ -195,4 +190,136 @@ func instrumentNames(instruments []model.Instrument) []string {
 		names[i] = inst.Symbol
 	}
 	return names
+}
+
+func parseKillRules(raw json.RawMessage, stopLoss float64) []model.KillRule {
+	if len(raw) == 0 {
+		return defaultKillRules(stopLoss)
+	}
+
+	var structured []struct {
+		Condition string  `json:"condition"`
+		Threshold float64 `json:"threshold"`
+		Action    string  `json:"action"`
+	}
+	if err := json.Unmarshal(raw, &structured); err == nil {
+		killRules := make([]model.KillRule, 0, len(structured))
+		for _, kr := range structured {
+			if strings.TrimSpace(kr.Condition) == "" {
+				continue
+			}
+			action := strings.TrimSpace(kr.Action)
+			if action == "" {
+				action = "alert"
+			}
+			killRules = append(killRules, model.KillRule{
+				Condition: kr.Condition,
+				Threshold: kr.Threshold,
+				Action:    action,
+			})
+		}
+		if len(killRules) > 0 {
+			return killRules
+		}
+	}
+
+	var stringRules []string
+	if err := json.Unmarshal(raw, &stringRules); err == nil {
+		killRules := make([]model.KillRule, 0, len(stringRules))
+		for _, rule := range stringRules {
+			rule = strings.TrimSpace(rule)
+			if rule == "" {
+				continue
+			}
+			killRules = append(killRules, model.KillRule{
+				Condition: rule,
+				Threshold: stopLoss,
+				Action:    "alert",
+			})
+		}
+		if len(killRules) > 0 {
+			return killRules
+		}
+	}
+
+	return defaultKillRules(stopLoss)
+}
+
+func defaultKillRules(stopLoss float64) []model.KillRule {
+	if stopLoss <= 0 {
+		return nil
+	}
+	return []model.KillRule{{
+		Condition: "price_below_stop",
+		Threshold: stopLoss,
+		Action:    "close",
+	}}
+}
+
+func normalizeConviction(value float64) float64 {
+	switch {
+	case value > 1 && value <= 100:
+		value /= 100
+	case value > 100:
+		value = 1
+	case value < 0:
+		value = 0
+	}
+	if value > 1 {
+		value = 1
+	}
+	return value
+}
+
+func normalizePositionSizePct(value float64) float64 {
+	switch {
+	case value > 1 && value <= 100:
+		value /= 100
+	case value > 100:
+		value = 1
+	case value < 0:
+		value = 0
+	}
+	return value
+}
+
+func normalizeStrategy(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case value == "":
+		return "event"
+	case strings.Contains(value, "tail"):
+		return "tail"
+	case strings.Contains(value, "macro"):
+		return "macro"
+	case strings.Contains(value, "contrarian"):
+		return "contrarian"
+	case strings.Contains(value, "fundamental"):
+		return "fundamental"
+	case strings.Contains(value, "scalp"):
+		return "scalper"
+	case strings.Contains(value, "event"), strings.Contains(value, "earnings"), strings.Contains(value, "catalyst"), strings.Contains(value, "momentum"):
+		return "event"
+	default:
+		return value
+	}
+}
+
+func normalizeExchange(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "SMART"
+	}
+	return value
+}
+
+func truncateForLog(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	if max <= 3 {
+		return value[:max]
+	}
+	return value[:max-3] + "..."
 }

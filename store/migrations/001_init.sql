@@ -1,38 +1,75 @@
 -- Trading Floor: Initial Schema
--- Requires: CREATE EXTENSION vector; (pgvector)
+-- Uses pgvector when available, falls back to double precision[] embeddings otherwise.
 
-CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
------------------------------------------------------------
--- Signals
------------------------------------------------------------
-CREATE TABLE signals (
-    id              TEXT PRIMARY KEY,
-    source          TEXT NOT NULL,
-    type            TEXT NOT NULL,
-    category        TEXT,
-    content         TEXT,
-    language        TEXT DEFAULT 'en',
-    translated      TEXT,
-    entities        JSONB,
-    urgency         FLOAT DEFAULT 0,
-    strength        FLOAT DEFAULT 0,
-    direction       TEXT,
-    embedding       vector(1536),
-    content_hash    TEXT,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
+DO $schema$
+DECLARE
+    vector_available BOOLEAN := FALSE;
+    vector_enabled BOOLEAN := FALSE;
+    embedding_type TEXT := 'double precision[]';
+    signals_embedding_udt TEXT := '';
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_available_extensions
+        WHERE name = 'vector'
+    ) INTO vector_available;
 
-CREATE INDEX idx_signals_embedding ON signals USING ivfflat (embedding vector_cosine_ops);
-CREATE INDEX idx_signals_content_hash ON signals (content_hash);
-CREATE INDEX idx_signals_created_at ON signals (created_at);
-CREATE INDEX idx_signals_source ON signals (source);
+    IF vector_available THEN
+        BEGIN
+            EXECUTE 'CREATE EXTENSION IF NOT EXISTS vector';
+            vector_enabled := TRUE;
+        EXCEPTION
+            WHEN OTHERS THEN
+                vector_enabled := FALSE;
+        END;
+    END IF;
+
+    IF vector_enabled THEN
+        embedding_type := 'vector(1536)';
+    END IF;
+
+    EXECUTE format($signals$
+        CREATE TABLE IF NOT EXISTS signals (
+            id              TEXT PRIMARY KEY,
+            source          TEXT NOT NULL,
+            type            TEXT NOT NULL,
+            category        TEXT,
+            content         TEXT,
+            language        TEXT DEFAULT 'en',
+            translated      TEXT,
+            entities        JSONB,
+            urgency         FLOAT DEFAULT 0,
+            strength        FLOAT DEFAULT 0,
+            direction       TEXT,
+            embedding       %s,
+            content_hash    TEXT,
+            created_at      TIMESTAMPTZ DEFAULT NOW()
+        )
+    $signals$, embedding_type);
+
+    SELECT COALESCE(udt_name, '')
+    INTO signals_embedding_udt
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'signals'
+      AND column_name = 'embedding';
+
+    IF signals_embedding_udt = 'vector' THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_signals_embedding ON signals USING ivfflat (embedding vector_cosine_ops)';
+    END IF;
+END
+$schema$;
+
+CREATE INDEX IF NOT EXISTS idx_signals_content_hash ON signals (content_hash);
+CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals (created_at);
+CREATE INDEX IF NOT EXISTS idx_signals_source ON signals (source);
 
 -----------------------------------------------------------
 -- Opportunities (scanner output)
 -----------------------------------------------------------
-CREATE TABLE opportunities (
+CREATE TABLE IF NOT EXISTS opportunities (
     id              TEXT PRIMARY KEY,
     signal_ids      TEXT[] NOT NULL,
     instruments     JSONB NOT NULL,
@@ -47,7 +84,7 @@ CREATE TABLE opportunities (
 -----------------------------------------------------------
 -- Theses (research output)
 -----------------------------------------------------------
-CREATE TABLE theses (
+CREATE TABLE IF NOT EXISTS theses (
     id              TEXT PRIMARY KEY,
     opportunity_id  TEXT REFERENCES opportunities(id),
     desk_id         TEXT NOT NULL,
@@ -72,14 +109,14 @@ CREATE TABLE theses (
     resolved_at     TIMESTAMPTZ
 );
 
-CREATE INDEX idx_theses_desk ON theses (desk_id);
-CREATE INDEX idx_theses_status ON theses (status);
-CREATE INDEX idx_theses_strategy ON theses (strategy);
+CREATE INDEX IF NOT EXISTS idx_theses_desk ON theses (desk_id);
+CREATE INDEX IF NOT EXISTS idx_theses_status ON theses (status);
+CREATE INDEX IF NOT EXISTS idx_theses_strategy ON theses (strategy);
 
 -----------------------------------------------------------
 -- Positions (live book)
 -----------------------------------------------------------
-CREATE TABLE positions (
+CREATE TABLE IF NOT EXISTS positions (
     id              TEXT PRIMARY KEY,
     thesis_id       TEXT REFERENCES theses(id),
     desk_id         TEXT NOT NULL,
@@ -97,13 +134,13 @@ CREATE TABLE positions (
     closed_at       TIMESTAMPTZ
 );
 
-CREATE INDEX idx_positions_desk ON positions (desk_id);
-CREATE INDEX idx_positions_status ON positions (status);
+CREATE INDEX IF NOT EXISTS idx_positions_desk ON positions (desk_id);
+CREATE INDEX IF NOT EXISTS idx_positions_status ON positions (status);
 
 -----------------------------------------------------------
 -- Belief Graph (competence states)
 -----------------------------------------------------------
-CREATE TABLE competence_states (
+CREATE TABLE IF NOT EXISTS competence_states (
     key             TEXT PRIMARY KEY,
     desk_id         TEXT NOT NULL,
     capability      TEXT NOT NULL,
@@ -120,13 +157,13 @@ CREATE TABLE competence_states (
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_competence_desk ON competence_states (desk_id);
-CREATE INDEX idx_competence_capability ON competence_states (capability);
+CREATE INDEX IF NOT EXISTS idx_competence_desk ON competence_states (desk_id);
+CREATE INDEX IF NOT EXISTS idx_competence_capability ON competence_states (capability);
 
 -----------------------------------------------------------
 -- Engrams (cached winning plays)
 -----------------------------------------------------------
-CREATE TABLE engrams (
+CREATE TABLE IF NOT EXISTS engrams (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     intent_key      TEXT NOT NULL,
     context_pattern TEXT NOT NULL,
@@ -143,14 +180,14 @@ CREATE TABLE engrams (
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_engrams_intent ON engrams (intent_key);
-CREATE INDEX idx_engrams_desk ON engrams (desk_id);
-CREATE INDEX idx_engrams_capability ON engrams (capability);
+CREATE INDEX IF NOT EXISTS idx_engrams_intent ON engrams (intent_key);
+CREATE INDEX IF NOT EXISTS idx_engrams_desk ON engrams (desk_id);
+CREATE INDEX IF NOT EXISTS idx_engrams_capability ON engrams (capability);
 
 -----------------------------------------------------------
 -- Anti-Portfolio (rejected theses + counterfactual)
 -----------------------------------------------------------
-CREATE TABLE anti_portfolio (
+CREATE TABLE IF NOT EXISTS anti_portfolio (
     id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     thesis_snapshot  JSONB NOT NULL,
     rejection_reason TEXT NOT NULL,
@@ -166,13 +203,13 @@ CREATE TABLE anti_portfolio (
     created_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_anti_portfolio_desk ON anti_portfolio (desk_id);
-CREATE INDEX idx_anti_portfolio_reason ON anti_portfolio (rejection_reason);
+CREATE INDEX IF NOT EXISTS idx_anti_portfolio_desk ON anti_portfolio (desk_id);
+CREATE INDEX IF NOT EXISTS idx_anti_portfolio_reason ON anti_portfolio (rejection_reason);
 
 -----------------------------------------------------------
 -- Episodes (full trade lifecycle for episodic memory)
 -----------------------------------------------------------
-CREATE TABLE episodes (
+CREATE TABLE IF NOT EXISTS episodes (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     thesis_id       TEXT REFERENCES theses(id),
     desk_id         TEXT NOT NULL,
@@ -192,14 +229,14 @@ CREATE TABLE episodes (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_episodes_desk ON episodes (desk_id);
-CREATE INDEX idx_episodes_strategy ON episodes (strategy);
-CREATE INDEX idx_episodes_regime ON episodes (regime);
+CREATE INDEX IF NOT EXISTS idx_episodes_desk ON episodes (desk_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_strategy ON episodes (strategy);
+CREATE INDEX IF NOT EXISTS idx_episodes_regime ON episodes (regime);
 
 -----------------------------------------------------------
 -- Audit Log (immutable, append-only)
 -----------------------------------------------------------
-CREATE TABLE audit_log (
+CREATE TABLE IF NOT EXISTS audit_log (
     id              BIGSERIAL PRIMARY KEY,
     timestamp       TIMESTAMPTZ DEFAULT NOW(),
     desk_id         TEXT,
@@ -210,14 +247,14 @@ CREATE TABLE audit_log (
     order_id        INT
 );
 
-CREATE INDEX idx_audit_timestamp ON audit_log (timestamp);
-CREATE INDEX idx_audit_desk ON audit_log (desk_id);
-CREATE INDEX idx_audit_type ON audit_log (event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log (timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_desk ON audit_log (desk_id);
+CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_log (event_type);
 
 -----------------------------------------------------------
 -- Desk Performance (daily snapshots for CEO referee)
 -----------------------------------------------------------
-CREATE TABLE desk_performance (
+CREATE TABLE IF NOT EXISTS desk_performance (
     id              BIGSERIAL PRIMARY KEY,
     desk_id         TEXT NOT NULL,
     date            DATE NOT NULL,
@@ -239,18 +276,15 @@ CREATE TABLE desk_performance (
 -----------------------------------------------------------
 -- Regime State (current market regime detection)
 -----------------------------------------------------------
-CREATE TABLE regime_state (
+CREATE TABLE IF NOT EXISTS regime_state (
     id              BIGSERIAL PRIMARY KEY,
-    dimension       TEXT NOT NULL,
-    value           TEXT NOT NULL,
-    previous_value  TEXT,
-    confidence      FLOAT DEFAULT 0,
-    detected_at     TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(dimension)
+    timestamp       TIMESTAMPTZ DEFAULT NOW(),
+    regime          TEXT NOT NULL,
+    vix_level       FLOAT,
+    vix_percentile  FLOAT,
+    term_structure  FLOAT,
+    realized_vol    FLOAT,
+    confidence      FLOAT
 );
 
-INSERT INTO regime_state (dimension, value) VALUES
-    ('volatility', 'medium'),
-    ('trend', 'neutral'),
-    ('risk', 'neutral'),
-    ('liquidity', 'normal');
+CREATE INDEX IF NOT EXISTS idx_regime_timestamp ON regime_state (timestamp DESC);

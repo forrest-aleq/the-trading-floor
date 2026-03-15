@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/hnic/trading-floor/pkg/signal"
 )
@@ -18,13 +20,22 @@ func (db *DB) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 		language = sig.Languages[0]
 	}
 
+	embeddingExpr := "$12"
+	var embeddingValue any
+	if db.signalEmbeddingIsVector {
+		embeddingExpr = "NULLIF($12, '')::vector"
+		embeddingValue = vectorLiteral(sig.Embedding)
+	} else {
+		embeddingValue = embeddingArray(sig.Embedding)
+	}
+
 	_, err = db.Pool.Exec(ctx,
-		`INSERT INTO signals (
+		fmt.Sprintf(`INSERT INTO signals (
 			id, source, type, category, content, language, translated, entities,
-			urgency, strength, direction, content_hash, created_at
+			urgency, strength, direction, embedding, content_hash, created_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8,
-			$9, $10, $11, $12, $13
+			$9, $10, $11, %s, $13, $14
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			translated = EXCLUDED.translated,
@@ -32,7 +43,8 @@ func (db *DB) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 			urgency = EXCLUDED.urgency,
 			strength = EXCLUDED.strength,
 			direction = EXCLUDED.direction,
-			content_hash = EXCLUDED.content_hash`,
+			embedding = EXCLUDED.embedding,
+			content_hash = EXCLUDED.content_hash`, embeddingExpr),
 		sig.ID,
 		sig.Source,
 		string(sig.Type),
@@ -44,8 +56,33 @@ func (db *DB) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 		sig.Urgency,
 		sig.Strength,
 		string(sig.Direction),
+		embeddingValue,
 		sig.ContentHash,
 		sig.Timestamp,
 	)
 	return err
+}
+
+func vectorLiteral(embedding []float32) string {
+	if len(embedding) == 0 {
+		return ""
+	}
+
+	parts := make([]string, len(embedding))
+	for i, value := range embedding {
+		parts[i] = fmt.Sprintf("%.6f", value)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func embeddingArray(embedding []float32) []float64 {
+	if len(embedding) == 0 {
+		return nil
+	}
+
+	values := make([]float64, len(embedding))
+	for i, value := range embedding {
+		values[i] = float64(value)
+	}
+	return values
 }

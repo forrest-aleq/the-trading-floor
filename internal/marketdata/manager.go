@@ -3,6 +3,7 @@ package marketdata
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,15 +18,16 @@ type Subscriber func(prices map[string]float64)
 // Instead of each desk polling IBKR independently, this manager
 // maintains a shared watchlist and distributes updates to subscribers.
 type Manager struct {
-	log       *slog.Logger
-	client    MarketDataClient
-	pacing    *ibkr.PacingBudget
-	interval  time.Duration
+	log      *slog.Logger
+	client   MarketDataClient
+	pacing   *ibkr.PacingBudget
+	interval time.Duration
 
-	mu         sync.RWMutex
-	watchlist  map[string]model.Instrument // symbol -> instrument
-	prices     map[string]float64          // symbol -> last price
-	subscribers []Subscriber
+	mu            sync.RWMutex
+	watchlist     map[string]model.Instrument // symbol -> instrument
+	prices        map[string]float64          // symbol -> last price
+	suppressUntil map[string]time.Time
+	subscribers   []Subscriber
 }
 
 // MarketDataClient is the interface for fetching market data.
@@ -39,12 +41,13 @@ func NewManager(client MarketDataClient, pacing *ibkr.PacingBudget, interval tim
 		interval = 30 * time.Second
 	}
 	return &Manager{
-		log:       slog.Default().With("component", "marketdata"),
-		client:    client,
-		pacing:    pacing,
-		interval:  interval,
-		watchlist: make(map[string]model.Instrument),
-		prices:    make(map[string]float64),
+		log:           slog.Default().With("component", "marketdata"),
+		client:        client,
+		pacing:        pacing,
+		interval:      interval,
+		watchlist:     make(map[string]model.Instrument),
+		prices:        make(map[string]float64),
+		suppressUntil: make(map[string]time.Time),
 	}
 }
 
@@ -107,6 +110,9 @@ func (m *Manager) poll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if m.shouldSuppress(inst.Symbol, time.Now()) {
+			continue
+		}
 
 		// Respect pacing budget
 		if m.pacing != nil {
@@ -117,9 +123,12 @@ func (m *Manager) poll(ctx context.Context) {
 
 		md, err := m.client.ReqMarketData(ctx, inst)
 		if err != nil {
-			m.log.Warn("market data fetch failed", "symbol", inst.Symbol, "error", err)
+			backoff := marketDataBackoff(err, m.interval)
+			m.suppress(inst.Symbol, time.Now().Add(backoff))
+			m.log.Warn("market data fetch failed", "symbol", inst.Symbol, "error", err, "retry_after", backoff)
 			continue
 		}
+		m.clearSuppression(inst.Symbol)
 
 		price := bestPrice(md)
 		if price > 0 {
@@ -156,5 +165,36 @@ func bestPrice(md *ibkr.MarketData) float64 {
 		return md.Ask
 	default:
 		return 0
+	}
+}
+
+func (m *Manager) shouldSuppress(symbol string, now time.Time) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	until, ok := m.suppressUntil[symbol]
+	return ok && now.Before(until)
+}
+
+func (m *Manager) suppress(symbol string, until time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.suppressUntil[symbol] = until
+}
+
+func (m *Manager) clearSuppression(symbol string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.suppressUntil, symbol)
+}
+
+func marketDataBackoff(err error, interval time.Duration) time.Duration {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "not subscribed"),
+		strings.Contains(message, "additional subscription"),
+		strings.Contains(message, "delayed market data is available"):
+		return 10 * time.Minute
+	default:
+		return interval
 	}
 }

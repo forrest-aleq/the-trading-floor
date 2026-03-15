@@ -180,8 +180,7 @@ func cmdEvents(ctx context.Context, db *store.DB) {
 		`SELECT timestamp, event_type, COALESCE(desk_id, ''), severity, message
 		 FROM event_log ORDER BY timestamp DESC LIMIT 30`)
 	if err != nil {
-		// event_log might not exist yet
-		fmt.Fprintf(os.Stderr, "query failed (event_log may not exist yet — run migration 002): %v\n", err)
+		fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
 		return
 	}
 	defer rows.Close()

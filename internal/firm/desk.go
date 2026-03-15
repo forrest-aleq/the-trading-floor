@@ -9,6 +9,7 @@ import (
 
 	"github.com/hnic/trading-floor/internal/book"
 	"github.com/hnic/trading-floor/internal/execution"
+	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
 	"github.com/hnic/trading-floor/internal/research"
@@ -27,14 +28,17 @@ type Desk struct {
 	ABGroup     string // "A" (full MARS) or "B" (control)
 	Capital     float64
 	log         *slog.Logger
+	llm         *llm.Router
 	scanner     *scanner.Engine
 	research    *research.Desk
 	prosecutor  *research.Prosecutor
+	council     *research.Council
 	riskGate    *risk.Gate
 	execution   *execution.Manager
 	book        *book.Book
 	beliefs     *belief.Graph
 	learnWorker *memory.LearnWorker
+	engrams     *memory.EngramStore
 	store       *store.DB
 	onTrade     func()
 
@@ -52,14 +56,17 @@ type DeskConfig struct {
 	ABGroup string
 	Capital float64
 
+	LLM         *llm.Router
 	Scanner     *scanner.Engine
 	Research    *research.Desk
 	Prosecutor  *research.Prosecutor
+	Council     *research.Council
 	RiskGate    *risk.Gate
 	Execution   *execution.Manager
 	Book        *book.Book
 	Beliefs     *belief.Graph
 	LearnWorker *memory.LearnWorker
+	Engrams     *memory.EngramStore
 	Store       *store.DB
 	OnTrade     func()
 
@@ -85,14 +92,17 @@ func NewDesk(cfg DeskConfig) *Desk {
 		ABGroup:          cfg.ABGroup,
 		Capital:          cfg.Capital,
 		log:              slog.Default().With("component", "desk", "desk_id", cfg.ID),
+		llm:              cfg.LLM,
 		scanner:          cfg.Scanner,
 		research:         cfg.Research,
 		prosecutor:       cfg.Prosecutor,
+		council:          cfg.Council,
 		riskGate:         cfg.RiskGate,
 		execution:        cfg.Execution,
 		book:             cfg.Book,
 		beliefs:          cfg.Beliefs,
 		learnWorker:      cfg.LearnWorker,
+		engrams:          cfg.Engrams,
 		store:            cfg.Store,
 		onTrade:          cfg.OnTrade,
 		minConviction:    cfg.MinConviction,
@@ -133,7 +143,31 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		d.log.Warn("research failed", append(span.Fields(), "error", err)...)
 		return
 	}
-	d.normalizePositionSize(thesis)
+
+	d.maybeSpawnSubTeam(ctx, thesis)
+
+	// Engram lookup: boost conviction if we have a cached winning play for this pattern
+	if d.ABGroup == "A" && d.engrams != nil {
+		intentKey := thesis.Strategy + "_" + thesis.Instrument.SecType
+		engrams := d.engrams.Lookup(intentKey, d.ID)
+		for _, eg := range engrams {
+			if eg.TotalObservations() >= 5 && eg.WinRate() > 0.6 {
+				boost := (eg.WinRate() - 0.5) * 0.1 // max +0.05 boost
+				thesis.Conviction += boost
+				if thesis.Conviction > 1.0 {
+					thesis.Conviction = 1.0
+				}
+				d.log.Info("engram boost applied",
+					"intent", intentKey,
+					"win_rate", eg.WinRate(),
+					"boost", boost,
+					"new_conviction", thesis.Conviction,
+				)
+				break
+			}
+		}
+	}
+
 	d.persistThesis(ctx, thesis)
 
 	if thesis.Conviction < d.minConviction {
@@ -173,8 +207,35 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		return
 	}
 
+	// Council debate for large positions
+	if d.council != nil && thesis.PositionSize > d.councilThreshold {
+		span = span.WithStage("council")
+		ctx = trace.IntoContext(ctx, span)
+
+		verdict := d.council.Debate(ctx, thesis)
+		thesis.CouncilVerdict = verdict
+		d.persistThesis(ctx, thesis)
+		if !verdict.Approved {
+			d.log.Info("thesis rejected by council",
+				"thesis_id", thesis.ID,
+				"perspectives", len(verdict.Perspectives),
+			)
+			d.recordAntiPortfolio(ctx, thesis, "council_rejected")
+			return
+		}
+		thesis.Conviction = verdict.AdjustedConviction
+		thesis.PositionSize = verdict.AdjustedSize
+		d.log.Info("council approved",
+			"thesis_id", thesis.ID,
+			"adjusted_conviction", verdict.AdjustedConviction,
+			"adjusted_size", verdict.AdjustedSize,
+		)
+		d.persistThesis(ctx, thesis)
+	}
+
 	span = span.WithStage("risk")
 	ctx = trace.IntoContext(ctx, span)
+	d.normalizePositionSize(thesis)
 
 	order := model.Order{
 		ID:          thesis.ID,
@@ -308,12 +369,60 @@ func (d *Desk) forgetThesis(thesisID string) {
 	d.mu.Unlock()
 }
 
-func (d *Desk) normalizePositionSize(thesis *model.Thesis) {
-	if thesis == nil || thesis.PositionSize <= 0 || thesis.EntryPrice <= 0 || d.Capital <= 0 {
+func (d *Desk) maybeSpawnSubTeam(ctx context.Context, thesis *model.Thesis) {
+	if d.llm == nil || thesis == nil {
 		return
 	}
 
-	if thesis.PositionSize > 1 {
+	intent, shouldSpawn := ShouldSpawnSubTeam(thesis)
+	if !shouldSpawn {
+		return
+	}
+
+	agents, ok := DefaultSubTeamConfigs()[intent]
+	if !ok || len(agents) == 0 {
+		d.log.Warn("sub-team config missing", "intent", intent, "thesis_id", thesis.ID)
+		return
+	}
+
+	result := SpawnSubTeam(ctx, d.llm, SubTeamConfig{
+		DeskID:   d.ID,
+		Purpose:  intent,
+		Agents:   agents,
+		Deadline: 30 * time.Minute,
+	})
+	if result == nil {
+		return
+	}
+
+	// Attach sub-team output to the thesis so it affects downstream review.
+	for role, analysis := range result.Analyses {
+		if analysis == "" {
+			continue
+		}
+		thesis.Evidence = append(thesis.Evidence, model.Evidence{
+			Source:  "subteam:" + role,
+			Content: analysis,
+			Weight:  0.7,
+		})
+	}
+	if result.Consensus != "" {
+		thesis.Evidence = append(thesis.Evidence, model.Evidence{
+			Source:  "subteam:consensus:" + intent,
+			Content: result.Consensus,
+			Weight:  0.9,
+		})
+	}
+
+	d.log.Info("sub-team evidence merged",
+		"thesis_id", thesis.ID,
+		"intent", intent,
+		"analyses", len(result.Analyses),
+	)
+}
+
+func (d *Desk) normalizePositionSize(thesis *model.Thesis) {
+	if thesis == nil || thesis.PositionSize <= 0 || thesis.EntryPrice <= 0 || d.Capital <= 0 {
 		return
 	}
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/hnic/trading-floor/internal/execution/ibkr"
@@ -22,6 +23,7 @@ type MarketFeed struct {
 	client    MarketDataClient
 	watchlist []model.Instrument
 	interval  time.Duration
+	states    map[string]*sourceState
 }
 
 func NewMarketFeed(client MarketDataClient, watchlist []model.Instrument) *MarketFeed {
@@ -34,6 +36,7 @@ func NewMarketFeed(client MarketDataClient, watchlist []model.Instrument) *Marke
 		client:    client,
 		watchlist: watchlist,
 		interval:  30 * time.Second,
+		states:    marketStates(watchlist),
 	}
 }
 
@@ -49,11 +52,19 @@ func (f *MarketFeed) Start(ctx context.Context, out chan<- signal.Signal) error 
 			return ctx.Err()
 		case <-ticker.C:
 			for _, inst := range f.watchlist {
-				md, err := f.client.ReqMarketData(ctx, inst)
-				if err != nil {
-					f.log.Warn("market data error", "symbol", inst.Symbol, "error", err)
+				state := f.states[inst.Symbol]
+				if skip, remaining := state.ShouldPoll(time.Now()); skip {
+					f.log.Debug("skipping market symbol during backoff", "symbol", inst.Symbol, "retry_in", remaining)
 					continue
 				}
+
+				md, err := f.client.ReqMarketData(ctx, inst)
+				if err != nil {
+					backoff := state.RecordFailure(time.Now(), marketDataBackoff(err, f.interval))
+					f.log.Warn("market data error", "symbol", inst.Symbol, "error", err, "retry_after", backoff)
+					continue
+				}
+				state.RecordSuccess()
 
 				raw, err := json.Marshal(map[string]any{
 					"symbol": inst.Symbol,
@@ -72,10 +83,12 @@ func (f *MarketFeed) Start(ctx context.Context, out chan<- signal.Signal) error 
 					Source:    "ibkr-market",
 					Type:      signal.TypePrice,
 					Category:  "market",
-					Timestamp: time.Now(),
+					Timestamp: time.UnixMilli(md.Timestamp).UTC(),
 					Urgency:   0.3,
 					Entities:  []signal.Entity{{Name: inst.Symbol, Type: "instrument"}},
 					Raw:       raw,
+					Translated: fmt.Sprintf("Market data %s last %.2f bid %.2f ask %.2f volume %d",
+						inst.Symbol, md.Last, md.Bid, md.Ask, md.Volume),
 				}
 
 				select {
@@ -85,6 +98,29 @@ func (f *MarketFeed) Start(ctx context.Context, out chan<- signal.Signal) error 
 				}
 			}
 		}
+	}
+}
+
+func marketStates(watchlist []model.Instrument) map[string]*sourceState {
+	states := make(map[string]*sourceState, len(watchlist))
+	for _, inst := range watchlist {
+		if inst.Symbol == "" {
+			continue
+		}
+		states[inst.Symbol] = newSourceState(64)
+	}
+	return states
+}
+
+func marketDataBackoff(err error, interval time.Duration) time.Duration {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "not subscribed"),
+		strings.Contains(message, "additional subscription"),
+		strings.Contains(message, "delayed market data is available"):
+		return 10 * time.Minute
+	default:
+		return interval
 	}
 }
 

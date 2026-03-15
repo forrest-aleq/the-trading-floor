@@ -108,7 +108,7 @@ func TestSmokeFullPipeline(t *testing.T) {
 	bk := book.NewBook(broker, 1_000_000)
 	riskGate := risk.NewGate(risk.DefaultLimits())
 	beliefGraph := belief.NewGraph()
-	learnWorker := memory.NewLearnWorker(beliefGraph)
+	learnWorker := memory.NewLearnWorker(beliefGraph, nil)
 	scan := scanner.NewEngine(router, 40)
 	researchDesk := research.NewDesk(router, 0.65)
 	prosecutor := research.NewProsecutor(router)

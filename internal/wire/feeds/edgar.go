@@ -17,17 +17,15 @@ type EDGARFeed struct {
 	log      *slog.Logger
 	client   *http.Client
 	interval time.Duration
-	seen     map[string]bool
+	state    *sourceState
 }
 
 func NewEDGARFeed() *EDGARFeed {
 	return &EDGARFeed{
-		log: slog.Default().With("component", "feed-edgar"),
-		client: &http.Client{
-			Timeout: 15 * time.Second,
-		},
+		log:      slog.Default().With("component", "feed-edgar"),
+		client:   newFeedHTTPClient(),
 		interval: 5 * time.Minute,
-		seen:     make(map[string]bool),
+		state:    newSourceState(2048),
 	}
 }
 
@@ -53,56 +51,63 @@ func (f *EDGARFeed) Start(ctx context.Context, out chan<- signal.Signal) error {
 const edgarRecentURL = "https://efts.sec.gov/LATEST/search-index?q=*&dateRange=custom&startdt=%s&enddt=%s&forms=10-K,10-Q,8-K,4,SC 13D,SC 13G,DEF 14A,S-1&from=0&size=20"
 
 func (f *EDGARFeed) poll(ctx context.Context, out chan<- signal.Signal) {
+	if skip, remaining := f.state.ShouldPoll(time.Now()); skip {
+		f.log.Debug("skipping edgar poll during backoff", "retry_in", remaining)
+		return
+	}
+
 	now := time.Now()
 	start := now.Add(-6 * time.Hour).Format("2006-01-02")
 	end := now.Format("2006-01-02")
 
 	url := fmt.Sprintf(edgarRecentURL, start, end)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newFeedRequest(ctx, http.MethodGet, url)
 	if err != nil {
 		f.log.Warn("edgar request build failed", "error", err)
 		return
 	}
-	req.Header.Set("User-Agent", "TradingFloor/1.0 research@brechin.dev")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		f.log.Warn("edgar fetch failed", "error", err)
+		backoff := f.state.RecordFailure(time.Now(), f.interval)
+		f.log.Warn("edgar fetch failed", "error", err, "retry_after", backoff)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		f.log.Warn("edgar non-200", "status", resp.StatusCode)
+		backoff := f.state.RecordFailure(time.Now(), f.interval)
+		f.log.Warn("edgar non-200", "status", resp.StatusCode, "retry_after", backoff)
 		return
 	}
 
 	var result edgarResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		f.log.Warn("edgar decode failed", "error", err)
+		backoff := f.state.RecordFailure(time.Now(), f.interval)
+		f.log.Warn("edgar decode failed", "error", err, "retry_after", backoff)
 		return
 	}
+	f.state.RecordSuccess()
 
 	newCount := 0
 	for _, hit := range result.Hits.Hits {
 		src := hit.Source
 		id := fmt.Sprintf("edgar-%s-%s", src.FileNum, src.FiledAt)
 
-		if f.seen[id] {
+		if f.state.Seen(id) {
 			continue
 		}
-		f.seen[id] = true
 		newCount++
 
 		raw, _ := json.Marshal(map[string]any{
-			"form_type":    src.FormType,
-			"company":      src.EntityName,
-			"ticker":       src.Tickers,
-			"filed_at":     src.FiledAt,
-			"file_num":     src.FileNum,
-			"description":  src.DisplayNames,
+			"form_type":   src.FormType,
+			"company":     src.EntityName,
+			"ticker":      src.Tickers,
+			"filed_at":    src.FiledAt,
+			"file_num":    src.FileNum,
+			"description": src.DisplayNames,
 		})
 
 		urgency := filingUrgency(src.FormType)
@@ -114,14 +119,14 @@ func (f *EDGARFeed) poll(ctx context.Context, out chan<- signal.Signal) {
 		entities = append(entities, signal.Entity{Name: src.EntityName, Type: "company"})
 
 		sig := signal.Signal{
-			ID:        id,
-			Source:    "sec-edgar",
-			Type:      signal.TypeFiling,
-			Category:  "corporate",
-			Timestamp: time.Now(),
-			Urgency:   urgency,
-			Entities:  entities,
-			Raw:       raw,
+			ID:         id,
+			Source:     "sec-edgar",
+			Type:       signal.TypeFiling,
+			Category:   "corporate",
+			Timestamp:  signalTimestamp(src.FiledAt),
+			Urgency:    urgency,
+			Entities:   entities,
+			Raw:        raw,
 			Translated: fmt.Sprintf("SEC %s filing by %s (%v)", src.FormType, src.EntityName, src.Tickers),
 		}
 
@@ -133,12 +138,7 @@ func (f *EDGARFeed) poll(ctx context.Context, out chan<- signal.Signal) {
 	}
 
 	if newCount > 0 {
-		f.log.Info("edgar filings fetched", "new", newCount, "total_seen", len(f.seen))
-	}
-
-	// Prune old seen entries (keep last 1000)
-	if len(f.seen) > 1000 {
-		f.seen = make(map[string]bool)
+		f.log.Info("edgar filings fetched", "new", newCount)
 	}
 }
 

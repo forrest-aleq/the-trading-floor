@@ -28,20 +28,24 @@ const (
 )
 
 type Signal struct {
-	ID         string          `json:"id"`
-	Source     string          `json:"source"`
-	Type       Type            `json:"type"`
-	Category   string          `json:"category"`
-	Timestamp  time.Time       `json:"timestamp"`
-	Urgency    float64         `json:"urgency"`
-	Strength   float64         `json:"strength"`
-	Direction  Direction       `json:"direction,omitempty"`
-	Entities   []Entity        `json:"entities,omitempty"`
-	Languages  []string        `json:"languages,omitempty"`
-	Raw        json.RawMessage `json:"raw,omitempty"`
-	Translated string          `json:"translated,omitempty"`
-	Embedding  []float32       `json:"embedding,omitempty"`
-	ContentHash string         `json:"content_hash,omitempty"`
+	ID                    string          `json:"id"`
+	Source                string          `json:"source"`
+	Type                  Type            `json:"type"`
+	Category              string          `json:"category"`
+	Timestamp             time.Time       `json:"timestamp"`
+	Urgency               float64         `json:"urgency"`
+	Strength              float64         `json:"strength"`
+	Direction             Direction       `json:"direction,omitempty"`
+	Entities              []Entity        `json:"entities,omitempty"`
+	Languages             []string        `json:"languages,omitempty"`
+	Raw                   json.RawMessage `json:"raw,omitempty"`
+	Translated            string          `json:"translated,omitempty"`
+	Embedding             []float32       `json:"embedding,omitempty"`
+	ContentHash           string          `json:"content_hash,omitempty"`
+	ClusterID             string          `json:"cluster_id,omitempty"`
+	RelatedSignalIDs      []string        `json:"related_signal_ids,omitempty"`
+	CorroboratingSources  []string        `json:"corroborating_sources,omitempty"`
+	CorroboratingEntities []string        `json:"corroborating_entities,omitempty"`
 }
 
 type Entity struct {

@@ -2,14 +2,19 @@ package wire
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"log/slog"
-	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/hnic/trading-floor/pkg/signal"
 )
+
+type queuedDelivery struct {
+	sub chan signal.Signal
+	sig signal.Signal
+}
 
 // Manager is the central signal bus. All sources fan in, all desks fan out.
 type Manager struct {
@@ -18,16 +23,27 @@ type Manager struct {
 	subscribers []chan signal.Signal
 	mu          sync.RWMutex
 
-	// Dedup
-	seenHashes sync.Map // content_hash → struct{}
+	overflowMu     sync.Mutex
+	overflow       []queuedDelivery
+	overflowNotify chan struct{}
+
+	deduper         *Deduper
+	clusterer       *Clusterer
+	crossReferencer *CrossReferencer
 
 	// Metrics
-	totalReceived int64
-	totalDeduped  int64
-	totalFanout   int64
+	totalReceived     atomic.Int64
+	totalDeduped      atomic.Int64
+	totalFanout       atomic.Int64
+	totalCorroborated atomic.Int64
+	totalOverflowed   atomic.Int64
+	totalReplayed     atomic.Int64
+	totalDropped      atomic.Int64
 
 	// Config
-	bufferSize int
+	bufferSize    int
+	maxOverflow   int
+	retryInterval time.Duration
 }
 
 // Feed is any signal source
@@ -38,8 +54,14 @@ type Feed interface {
 
 func NewManager() *Manager {
 	return &Manager{
-		log:        slog.Default().With("component", "wire"),
-		bufferSize: 10000,
+		log:             slog.Default().With("component", "wire"),
+		bufferSize:      10000,
+		maxOverflow:     50000,
+		retryInterval:   50 * time.Millisecond,
+		overflowNotify:  make(chan struct{}, 1),
+		deduper:         NewDeduper(2048, 0.92),
+		clusterer:       NewClusterer(1024, 0.88),
+		crossReferencer: NewCrossReferencer(4096, 16),
 	}
 }
 
@@ -69,6 +91,10 @@ func (m *Manager) Start(ctx context.Context) error {
 		go func() {
 			m.log.Info("starting feed", "name", f.Name())
 			if err := f.Start(ctx, ingress); err != nil {
+				if errors.Is(err, context.Canceled) {
+					m.log.Info("feed stopped", "name", f.Name())
+					return
+				}
 				m.log.Error("feed error", "name", f.Name(), "error", err)
 			}
 		}()
@@ -80,16 +106,25 @@ func (m *Manager) Start(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return
-			case sig := <-ingress:
-				m.totalReceived++
-
-				// Dedup: content hash check
-				if sig.ContentHash == "" {
-					sig.ContentHash = hashContent(sig)
+			case sig, ok := <-ingress:
+				if !ok {
+					return
 				}
-				if _, loaded := m.seenHashes.LoadOrStore(sig.ContentHash, struct{}{}); loaded {
-					m.totalDeduped++
+				m.totalReceived.Add(1)
+				sig = NormalizeSignal(sig)
+
+				if m.deduper != nil && m.deduper.IsDuplicate(sig) {
+					m.totalDeduped.Add(1)
 					continue
+				}
+				if m.clusterer != nil {
+					sig = m.clusterer.Assign(sig)
+				}
+				if m.crossReferencer != nil {
+					sig = m.crossReferencer.Enrich(sig)
+				}
+				if len(sig.CorroboratingSources) > 0 {
+					m.totalCorroborated.Add(1)
 				}
 
 				// Fan out to all subscribers
@@ -97,10 +132,17 @@ func (m *Manager) Start(ctx context.Context) error {
 				for _, sub := range m.subscribers {
 					select {
 					case sub <- sig:
-						m.totalFanout++
+						m.totalFanout.Add(1)
 					default:
-						// Subscriber buffer full — signal dropped for this subscriber
-						m.log.Warn("subscriber buffer full, signal dropped",
+						if m.enqueueOverflow(sub, sig) {
+							m.log.Warn("subscriber buffer full, queued for replay",
+								"source", sig.Source,
+								"type", sig.Type,
+							)
+							continue
+						}
+						m.totalDropped.Add(1)
+						m.log.Error("subscriber buffer full, overflow queue exhausted",
 							"source", sig.Source,
 							"type", sig.Type,
 						)
@@ -111,35 +153,102 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}()
 
+	go m.drainOverflow(ctx)
+
 	m.log.Info("wire started", "feeds", len(m.feeds), "subscribers", len(m.subscribers))
 	return nil
 }
 
 // Stats returns current wire metrics
 func (m *Manager) Stats() WireStats {
+	m.overflowMu.Lock()
+	pendingOverflow := len(m.overflow)
+	m.overflowMu.Unlock()
+
 	return WireStats{
-		TotalReceived: m.totalReceived,
-		TotalDeduped:  m.totalDeduped,
-		TotalFanout:   m.totalFanout,
-		ActiveFeeds:   len(m.feeds),
-		Subscribers:   len(m.subscribers),
+		TotalReceived:     m.totalReceived.Load(),
+		TotalDeduped:      m.totalDeduped.Load(),
+		TotalFanout:       m.totalFanout.Load(),
+		TotalCorroborated: m.totalCorroborated.Load(),
+		TotalOverflowed:   m.totalOverflowed.Load(),
+		TotalReplayed:     m.totalReplayed.Load(),
+		TotalDropped:      m.totalDropped.Load(),
+		PendingOverflow:   pendingOverflow,
+		ActiveFeeds:       len(m.feeds),
+		Subscribers:       len(m.subscribers),
 	}
 }
 
 type WireStats struct {
-	TotalReceived int64
-	TotalDeduped  int64
-	TotalFanout   int64
-	ActiveFeeds   int
-	Subscribers   int
+	TotalReceived     int64
+	TotalDeduped      int64
+	TotalFanout       int64
+	TotalCorroborated int64
+	TotalOverflowed   int64
+	TotalReplayed     int64
+	TotalDropped      int64
+	PendingOverflow   int
+	ActiveFeeds       int
+	Subscribers       int
 }
 
-func hashContent(sig signal.Signal) string {
-	h := sha256.New()
-	h.Write([]byte(sig.Source))
-	h.Write([]byte(string(sig.Type)))
-	// Normalize: lowercase, trim whitespace
-	content := strings.ToLower(strings.TrimSpace(string(sig.Raw)))
-	h.Write([]byte(content))
-	return hex.EncodeToString(h.Sum(nil))
+func (m *Manager) enqueueOverflow(sub chan signal.Signal, sig signal.Signal) bool {
+	m.overflowMu.Lock()
+	defer m.overflowMu.Unlock()
+
+	if m.maxOverflow > 0 && len(m.overflow) >= m.maxOverflow {
+		return false
+	}
+
+	m.overflow = append(m.overflow, queuedDelivery{
+		sub: sub,
+		sig: sig,
+	})
+	m.totalOverflowed.Add(1)
+
+	select {
+	case m.overflowNotify <- struct{}{}:
+	default:
+	}
+
+	return true
+}
+
+func (m *Manager) drainOverflow(ctx context.Context) {
+	ticker := time.NewTicker(m.retryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.overflowNotify:
+		case <-ticker.C:
+		}
+
+		m.overflowMu.Lock()
+		if len(m.overflow) == 0 {
+			m.overflowMu.Unlock()
+			continue
+		}
+
+		pending := m.overflow
+		remaining := m.overflow[:0]
+		for _, delivery := range pending {
+			select {
+			case delivery.sub <- delivery.sig:
+				m.totalFanout.Add(1)
+				m.totalReplayed.Add(1)
+			default:
+				remaining = append(remaining, delivery)
+			}
+		}
+
+		if len(remaining) == 0 {
+			m.overflow = nil
+		} else {
+			m.overflow = remaining
+		}
+		m.overflowMu.Unlock()
+	}
 }

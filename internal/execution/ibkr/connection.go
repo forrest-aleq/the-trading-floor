@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 
 // Config for IBKR Gateway connection.
 type Config struct {
-	Host     string
-	Port     int
-	ClientID int
+	Host          string
+	Port          int
+	ClientID      int
+	ClientIDTries int
 }
 
 func DefaultConfig() Config {
@@ -39,7 +41,14 @@ func DefaultConfig() Config {
 		}
 	}
 
-	return Config{Host: host, Port: port, ClientID: clientID}
+	clientIDTries := 5
+	if raw := os.Getenv("IBKR_CLIENT_ID_TRIES"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			clientIDTries = parsed
+		}
+	}
+
+	return Config{Host: host, Port: port, ClientID: clientID, ClientIDTries: clientIDTries}
 }
 
 type Connection struct {
@@ -69,19 +78,37 @@ func (c *Connection) Connect(ctx context.Context) error {
 		"host", c.cfg.Host,
 		"port", c.cfg.Port,
 		"client_id", c.cfg.ClientID,
+		"client_id_tries", c.cfg.ClientIDTries,
 	)
 
-	ib := ibsync.NewIB()
-	cfg := &ibsync.Config{
-		Host:     c.cfg.Host,
-		Port:     c.cfg.Port,
-		ClientID: int64(c.cfg.ClientID),
-		InSync:   true,
-		Timeout:  15 * time.Second,
+	startID := c.cfg.ClientID
+	tries := c.cfg.ClientIDTries
+	if tries <= 0 {
+		tries = 1
 	}
 
-	if err := ib.Connect(cfg); err != nil {
-		return fmt.Errorf("connect gateway: %w", err)
+	var (
+		ib       *ibsync.IB
+		chosenID int
+		lastErr  error
+	)
+	for offset := 0; offset < tries; offset++ {
+		candidateID := startID + offset
+		ib, lastErr = connectIB(ctx, c.cfg.Host, c.cfg.Port, candidateID)
+		if lastErr == nil {
+			chosenID = candidateID
+			break
+		}
+		if !isClientIDConflict(lastErr) {
+			return fmt.Errorf("connect gateway: %w", lastErr)
+		}
+		c.log.Warn("IBKR client id unavailable, trying next id",
+			"client_id", candidateID,
+			"error", lastErr,
+		)
+	}
+	if lastErr != nil && ib == nil {
+		return fmt.Errorf("connect gateway: %w", lastErr)
 	}
 
 	select {
@@ -92,6 +119,7 @@ func (c *Connection) Connect(ctx context.Context) error {
 	}
 
 	c.ib = ib
+	c.cfg.ClientID = chosenID
 	c.log.Info("connected to IBKR Gateway")
 
 	if err := c.validateGateway(); err != nil {
@@ -183,4 +211,27 @@ func (c *Connection) String() string {
 		mode = "PAPER"
 	}
 	return fmt.Sprintf("IBKR[%s:%d %s client=%d]", c.cfg.Host, c.cfg.Port, mode, c.cfg.ClientID)
+}
+
+func connectIB(ctx context.Context, host string, port, clientID int) (*ibsync.IB, error) {
+	ib := ibsync.NewIB()
+	cfg := &ibsync.Config{
+		Host:     host,
+		Port:     port,
+		ClientID: int64(clientID),
+		InSync:   true,
+		Timeout:  15 * time.Second,
+	}
+	if err := ib.Connect(cfg); err != nil {
+		return nil, err
+	}
+	return ib, nil
+}
+
+func isClientIDConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "client id is already in use")
 }

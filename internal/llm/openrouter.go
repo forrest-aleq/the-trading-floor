@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,6 +21,7 @@ type OpenRouterClient struct {
 	baseURL string
 	model   string
 	http    *http.Client
+	limiter chan struct{}
 }
 
 type OpenRouterConfig struct {
@@ -33,6 +37,7 @@ func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://openrouter.ai/api/v1"
 	}
+
 	return &OpenRouterClient{
 		apiKey:  cfg.APIKey,
 		baseURL: cfg.BaseURL,
@@ -40,14 +45,15 @@ func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
 		http: &http.Client{
 			Timeout: 120 * time.Second,
 		},
+		limiter: makeLimiter(cfg.BaseURL),
 	}
 }
 
 type orRequest struct {
-	Model       string      `json:"model"`
-	Messages    []orMessage `json:"messages"`
-	Temperature float64     `json:"temperature,omitempty"`
-	MaxTokens   int         `json:"max_tokens,omitempty"`
+	Model          string            `json:"model"`
+	Messages       []orMessage       `json:"messages"`
+	Temperature    float64           `json:"temperature,omitempty"`
+	MaxTokens      int               `json:"max_tokens,omitempty"`
 	ResponseFormat *orResponseFormat `json:"response_format,omitempty"`
 }
 
@@ -95,7 +101,7 @@ func (c *OpenRouterClient) Complete(ctx context.Context, req Request) (*Response
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
 	}
-	if req.JSONMode {
+	if req.JSONMode && c.supportsStructuredJSON() {
 		orReq.ResponseFormat = &orResponseFormat{Type: "json_object"}
 	}
 
@@ -104,26 +110,18 @@ func (c *OpenRouterClient) Complete(ctx context.Context, req Request) (*Response
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+	if c.limiter != nil {
+		select {
+		case c.limiter <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		defer func() { <-c.limiter }()
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("api error (status %d): %s", resp.StatusCode, string(respBody))
+	respBody, err := c.doChatCompletion(ctx, body)
+	if err != nil {
+		return nil, err
 	}
 
 	var orResp orResponse
@@ -145,6 +143,136 @@ func (c *OpenRouterClient) Complete(ctx context.Context, req Request) (*Response
 		InputTokens:  orResp.Usage.PromptTokens,
 		OutputTokens: orResp.Usage.CompletionTokens,
 	}, nil
+}
+
+func (c *OpenRouterClient) doChatCompletion(ctx context.Context, body []byte) ([]byte, error) {
+	attempts := 1
+	if isLocalLLM(c.baseURL) {
+		attempts = 3
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		respBody, status, err := c.doChatCompletionOnce(ctx, body)
+		if err == nil {
+			return respBody, nil
+		}
+
+		lastErr = err
+		if !shouldRetryLocalLLM(c.baseURL, status, attempt, attempts) {
+			return nil, err
+		}
+
+		delay := retryDelay(attempt)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return nil, lastErr
+}
+
+func (c *OpenRouterClient) doChatCompletionOnce(ctx context.Context, body []byte) ([]byte, int, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, 0, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.StatusCode, fmt.Errorf("api error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	return respBody, resp.StatusCode, nil
+}
+
+func (c *OpenRouterClient) supportsStructuredJSON() bool {
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return true
+	}
+
+	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
+		return false
+	default:
+		return true
+	}
+}
+
+func makeLimiter(baseURL string) chan struct{} {
+	maxConcurrent := 0
+	if raw := strings.TrimSpace(os.Getenv("LLM_MAX_CONCURRENCY")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			maxConcurrent = parsed
+		}
+	}
+	if maxConcurrent == 0 && isLocalLLM(baseURL) {
+		maxConcurrent = 2
+	}
+	if maxConcurrent <= 0 {
+		return nil
+	}
+	return make(chan struct{}, maxConcurrent)
+}
+
+func isLocalLLM(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+
+	host := strings.ToLower(u.Hostname())
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+func shouldRetryLocalLLM(baseURL string, statusCode, attempt, attempts int) bool {
+	if !isLocalLLM(baseURL) {
+		return false
+	}
+	if attempt >= attempts-1 {
+		return false
+	}
+	switch statusCode {
+	case http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func retryDelay(attempt int) time.Duration {
+	switch attempt {
+	case 0:
+		return 200 * time.Millisecond
+	case 1:
+		return 500 * time.Millisecond
+	default:
+		return time.Second
+	}
 }
 
 // DefaultRouter creates a router using OpenRouter for all tiers.

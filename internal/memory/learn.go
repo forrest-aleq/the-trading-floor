@@ -11,14 +11,16 @@ import (
 // LearnWorker processes trade outcomes and updates beliefs.
 // Ported from MARS learn-worker.js
 type LearnWorker struct {
-	log    *slog.Logger
-	graph  *belief.Graph
+	log     *slog.Logger
+	graph   *belief.Graph
+	engrams *EngramStore
 }
 
-func NewLearnWorker(graph *belief.Graph) *LearnWorker {
+func NewLearnWorker(graph *belief.Graph, engrams *EngramStore) *LearnWorker {
 	return &LearnWorker{
-		log:   slog.Default().With("component", "learn-worker"),
-		graph: graph,
+		log:     slog.Default().With("component", "learn-worker"),
+		graph:   graph,
+		engrams: engrams,
 	}
 }
 
@@ -65,6 +67,39 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 		l.graph.ApplySuccess(key, magnitude)
 	} else {
 		l.graph.ApplyFailure(key, magnitude, boundaryViolation)
+	}
+
+	// Record engram for pattern caching
+	if l.engrams != nil {
+		intentKey := thesis.Strategy + "_" + thesis.Instrument.SecType
+		globalContextPattern := thesis.Strategy + "_" + regime.Key()
+		deskContextPattern := thesis.Instrument.Symbol + "_" + regime.Key()
+		returnPct := 0.0
+		if thesis.EntryPrice > 0 {
+			returnPct = outcome.RealizedPnL / (thesis.EntryPrice * thesis.PositionSize) * 100
+		}
+
+		// Layer 1: cross-desk playbook memory.
+		l.engrams.Record(
+			intentKey,
+			globalContextPattern,
+			thesis.Strategy,
+			"",
+			[]string{regime.Volatility, regime.Trend, regime.Risk},
+			outcome.Profitable,
+			returnPct,
+		)
+
+		// Layer 2: desk-specific experience.
+		l.engrams.Record(
+			intentKey,
+			deskContextPattern,
+			thesis.Strategy,
+			thesis.DeskID,
+			[]string{regime.Volatility, regime.Trend, regime.Risk},
+			outcome.Profitable,
+			returnPct,
+		)
 	}
 
 	l.log.Info("outcome processed",

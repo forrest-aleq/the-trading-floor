@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hnic.trading-floor</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PROGRAM_PATH__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_OUT__</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOG_ERR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AUDIT_LOG_PATH</key>
+    <string>__AUDIT_LOG_PATH__</string>
+    <key>IBKR_CLIENT_ID_TRIES</key>
+    <string>20</string>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+</dict>
+</plist>

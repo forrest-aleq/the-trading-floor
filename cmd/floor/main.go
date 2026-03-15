@@ -80,6 +80,7 @@ func main() {
 	execMgr := execution.NewManager(ibkrClient)
 	bk := book.NewBook(ibkrClient, 1_000_000)
 	go bk.StartReconcile(ctx)
+	slog.Info("book and execution initialized")
 
 	// --- Centralized Market Data ---
 	mdMgr := marketdata.NewManager(ibkrClient, pacing, 0)
@@ -95,12 +96,15 @@ func main() {
 		}
 	})
 	go mdMgr.Run(ctx)
+	slog.Info("market data manager initialized", "watchlist", len(feeds.DefaultWatchlist()))
 
 	// --- Shared Services ---
 	riskGate := risk.NewGate(risk.DefaultLimits())
 	beliefGraph := belief.NewGraph()
 	engramStore := memory.NewEngramStore()
+	slog.Info("shared memory services initialized")
 	if db != nil {
+		slog.Info("hydrating persisted competence state")
 		states, err := db.LoadCompetenceStates(ctx)
 		if err != nil {
 			slog.Warn("load competence states failed", "error", err)
@@ -109,6 +113,7 @@ func main() {
 			slog.Info("competence states hydrated", "count", len(states))
 		}
 
+		slog.Info("hydrating persisted engrams")
 		engramRecords, err := db.LoadEngrams(ctx)
 		if err != nil {
 			slog.Warn("load engrams failed", "error", err)
@@ -133,6 +138,7 @@ func main() {
 	researchDesk := research.NewDesk(llmRouter, 0.65)
 	prosecutor := research.NewProsecutor(llmRouter)
 	council := research.NewCouncil(llmRouter)
+	slog.Info("decision services initialized")
 
 	// --- Audit Log ---
 	auditPath := os.Getenv("AUDIT_LOG_PATH")
@@ -140,6 +146,7 @@ func main() {
 		auditPath = filepath.Join("var", "audit", "audit.jsonl")
 	}
 
+	slog.Info("initializing audit log", "path", auditPath)
 	audit, err := observe.NewAuditLog(auditPath)
 	if err != nil {
 		slog.Error("audit log init failed", "error", err)

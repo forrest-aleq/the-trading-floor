@@ -1,4 +1,4 @@
-.PHONY: build run test lint clean ctl backfill migrate
+.PHONY: build run test lint clean ctl backfill migrate service-install service-uninstall service-status service-restart
 
 BINARY=trading-floor
 CMD_DIR=./cmd
@@ -47,3 +47,14 @@ desks:
 
 pnl:
 	./bin/ctl pnl
+
+service-install:
+	./scripts/install-launchd.sh
+
+service-uninstall:
+	./scripts/uninstall-launchd.sh
+
+service-status:
+	./scripts/status-launchd.sh
+
+service-restart: service-install

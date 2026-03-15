@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/google/uuid"
@@ -106,7 +107,12 @@ func main() {
 	council := research.NewCouncil(llmRouter)
 
 	// --- Audit Log ---
-	audit, err := observe.NewAuditLog("audit.jsonl")
+	auditPath := os.Getenv("AUDIT_LOG_PATH")
+	if auditPath == "" {
+		auditPath = filepath.Join("var", "audit", "audit.jsonl")
+	}
+
+	audit, err := observe.NewAuditLog(auditPath)
 	if err != nil {
 		slog.Error("audit log init failed", "error", err)
 		os.Exit(1)

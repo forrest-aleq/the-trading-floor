@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -11,10 +12,10 @@ import (
 // AuditLog records every decision, every trade, every belief update.
 // Append-only. Immutable. The full history of the system.
 type AuditLog struct {
-	mu     sync.Mutex
-	log    *slog.Logger
-	file   *os.File
-	enc    *json.Encoder
+	mu   sync.Mutex
+	log  *slog.Logger
+	file *os.File
+	enc  *json.Encoder
 }
 
 type AuditEntry struct {
@@ -26,6 +27,12 @@ type AuditEntry struct {
 }
 
 func NewAuditLog(path string) (*AuditLog, error) {
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, err

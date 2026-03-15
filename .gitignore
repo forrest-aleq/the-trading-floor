@@ -2,3 +2,4 @@
 bin/
 audit.jsonl
 *.log
+var/

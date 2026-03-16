@@ -13,6 +13,7 @@ import (
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
+	"github.com/hnic/trading-floor/internal/quant"
 	"github.com/hnic/trading-floor/internal/research"
 	"github.com/hnic/trading-floor/internal/risk"
 	"github.com/hnic/trading-floor/internal/scanner"
@@ -33,6 +34,7 @@ type Desk struct {
 	llm         *llm.Router
 	scanner     *scanner.Engine
 	research    *research.Desk
+	quant       *quant.Service
 	prosecutor  *research.Prosecutor
 	council     *research.Council
 	riskGate    *risk.Gate
@@ -63,6 +65,7 @@ type DeskConfig struct {
 	LLM         *llm.Router
 	Scanner     *scanner.Engine
 	Research    *research.Desk
+	Quant       *quant.Service
 	Prosecutor  *research.Prosecutor
 	Council     *research.Council
 	RiskGate    *risk.Gate
@@ -110,6 +113,7 @@ func NewDesk(cfg DeskConfig) *Desk {
 		llm:              cfg.LLM,
 		scanner:          cfg.Scanner,
 		research:         cfg.Research,
+		quant:            cfg.Quant,
 		prosecutor:       cfg.Prosecutor,
 		council:          cfg.Council,
 		riskGate:         cfg.RiskGate,
@@ -189,6 +193,19 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		return
 	}
 	thesis.Domain = d.Domain
+	if d.quant != nil {
+		thesis.QuantMetrics = d.quant.AnalyzeThesis(thesis)
+		if thesis.QuantMetrics != nil {
+			d.log.Info("quant metrics attached",
+				"thesis_id", thesis.ID,
+				"method", thesis.QuantMetrics.Method,
+				"defined_risk", thesis.QuantMetrics.DefinedRisk,
+				"max_loss", thesis.QuantMetrics.MaxLoss,
+				"reward_to_risk", thesis.QuantMetrics.RewardToRisk,
+				"warnings", len(thesis.QuantMetrics.Warnings),
+			)
+		}
+	}
 
 	d.maybeSpawnSubTeam(ctx, thesis)
 

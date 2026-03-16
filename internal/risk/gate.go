@@ -122,6 +122,8 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 		} else {
 			riskExposure = maxLoss
 		}
+	} else if thesis != nil && thesis.QuantMetrics != nil && thesis.QuantMetrics.MarginEstimate > riskExposure {
+		riskExposure = thesis.QuantMetrics.MarginEstimate
 	}
 	positionPct := (riskExposure / deskCapital) * 100
 	if positionPct > g.limits.MaxSinglePositionPct {

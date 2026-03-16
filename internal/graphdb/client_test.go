@@ -36,6 +36,7 @@ func TestSchemaStatementsIncludeCoreConstraints(t *testing.T) {
 		"Attribution",
 		"Desk",
 		"CompetenceState",
+		"QuantQuery",
 		"Entity",
 		"Instrument",
 		"Source",

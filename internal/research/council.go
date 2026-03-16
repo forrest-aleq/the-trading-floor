@@ -91,7 +91,9 @@ Position Size (notional %%): %.2f
 
 Evidence: %s
 Counter Arguments: %s
-Prosecution Verdict: %s`,
+Prosecution Verdict: %s
+Quant Metrics:
+%s`,
 		thesis.Instrument.Symbol, thesis.Instrument.SecType,
 		thesis.Direction, thesis.Strategy,
 		thesis.Conviction,
@@ -101,6 +103,7 @@ Prosecution Verdict: %s`,
 		formatEvidence(thesis.Evidence),
 		formatCounterArgs(thesis.CounterArgs),
 		prosecutionVerdict(thesis.Prosecution),
+		formatQuantMetrics(thesis.QuantMetrics),
 	)
 
 	var mu sync.Mutex

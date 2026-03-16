@@ -25,6 +25,7 @@ import (
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
 	"github.com/hnic/trading-floor/internal/observe"
+	"github.com/hnic/trading-floor/internal/quant"
 	"github.com/hnic/trading-floor/internal/regime"
 	"github.com/hnic/trading-floor/internal/research"
 	"github.com/hnic/trading-floor/internal/risk"
@@ -171,6 +172,7 @@ func main() {
 	scan := scanner.NewEngine(llmRouter, 70)
 	researchDesk := research.NewDesk(llmRouter, 0.65)
 	researchDesk.SetMarketContextService(marketcontext.NewService(mdMgr))
+	quantService := quant.NewService()
 	prosecutor := research.NewProsecutor(llmRouter)
 	council := research.NewCouncil(llmRouter)
 	startBeliefDecay(ctx, beliefGraph)
@@ -221,6 +223,7 @@ func main() {
 			LLM:         llmRouter,
 			Scanner:     scan,
 			Research:    researchDesk,
+			Quant:       quantService,
 			Prosecutor:  prosecutor,
 			Council:     council,
 			RiskGate:    riskGate,

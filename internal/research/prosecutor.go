@@ -70,6 +70,9 @@ Evidence:
 %s
 
 Counter Arguments Already Considered:
+%s
+
+Quant Metrics:
 %s`,
 		thesis.Instrument.Symbol, thesis.Instrument.SecType,
 		thesis.Direction, thesis.Strategy,
@@ -78,6 +81,7 @@ Counter Arguments Already Considered:
 		thesis.TimeHorizon,
 		formatEvidence(thesis.Evidence),
 		formatCounterArgs(thesis.CounterArgs),
+		formatQuantMetrics(thesis.QuantMetrics),
 	)
 
 	resp, err := p.llm.AskJSONWithLimit(ctx, llm.TierCritical, prosecutionPrompt, prompt, prosecutionMaxTokens, 0.2)
@@ -157,6 +161,33 @@ func formatCounterArgs(args []string) string {
 	var s string
 	for i, a := range args {
 		s += fmt.Sprintf("  %d. %s\n", i+1, a)
+	}
+	return s
+}
+
+func formatQuantMetrics(metrics *model.QuantMetrics) string {
+	if metrics == nil {
+		return "  unavailable\n"
+	}
+
+	s := fmt.Sprintf("  Method: %s\n  Defined risk: %t\n", metrics.Method, metrics.DefinedRisk)
+	if metrics.MaxLoss > 0 {
+		s += fmt.Sprintf("  Max loss: %.2f\n", metrics.MaxLoss)
+	}
+	if metrics.MaxGain > 0 {
+		s += fmt.Sprintf("  Max gain: %.2f\n", metrics.MaxGain)
+	}
+	if metrics.Breakeven != 0 {
+		s += fmt.Sprintf("  Breakeven: %.2f\n", metrics.Breakeven)
+	}
+	if metrics.MarginEstimate > 0 {
+		s += fmt.Sprintf("  Margin estimate: %.2f\n", metrics.MarginEstimate)
+	}
+	if metrics.RewardToRisk > 0 {
+		s += fmt.Sprintf("  Reward/risk: %.2f\n", metrics.RewardToRisk)
+	}
+	if len(metrics.Warnings) > 0 {
+		s += fmt.Sprintf("  Warnings: %v\n", metrics.Warnings)
 	}
 	return s
 }

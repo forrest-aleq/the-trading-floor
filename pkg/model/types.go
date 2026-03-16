@@ -189,6 +189,26 @@ type MarketContext struct {
 	Notes                []string   `json:"notes,omitempty"`
 }
 
+type QuantScenario struct {
+	Label             string  `json:"label"`
+	UnderlyingMovePct float64 `json:"underlying_move_pct"`
+	UnderlyingPrice   float64 `json:"underlying_price,omitempty"`
+	EstimatedPnL      float64 `json:"estimated_pnl"`
+}
+
+type QuantMetrics struct {
+	Method         string          `json:"method"`
+	DefinedRisk    bool            `json:"defined_risk"`
+	MaxLoss        float64         `json:"max_loss,omitempty"`
+	MaxGain        float64         `json:"max_gain,omitempty"`
+	Breakeven      float64         `json:"breakeven,omitempty"`
+	MarginEstimate float64         `json:"margin_estimate,omitempty"`
+	RewardToRisk   float64         `json:"reward_to_risk,omitempty"`
+	NetDeltaBias   float64         `json:"net_delta_bias,omitempty"`
+	Scenarios      []QuantScenario `json:"scenarios,omitempty"`
+	Warnings       []string        `json:"warnings,omitempty"`
+}
+
 type SurpriseAssessment struct {
 	TruthScore        float64 `json:"truth_score"`
 	NoveltyScore      float64 `json:"novelty_score"`
@@ -243,6 +263,7 @@ type Thesis struct {
 	CompetenceConfidence float64             `json:"competence_confidence,omitempty"`
 	EvidenceMeta         *evidence.Metadata  `json:"evidence_meta,omitempty"`
 	MarketContext        *MarketContext      `json:"market_context,omitempty"`
+	QuantMetrics         *QuantMetrics       `json:"quant_metrics,omitempty"`
 	SurpriseAssessment   *SurpriseAssessment `json:"surprise_assessment,omitempty"`
 	Prosecution          *Prosecution        `json:"prosecution,omitempty"`
 	CouncilVerdict       *CouncilVerdict     `json:"council_verdict,omitempty"`

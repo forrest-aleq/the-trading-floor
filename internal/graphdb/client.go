@@ -408,6 +408,9 @@ func (c *Client) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 		if err := c.linkThesisMarketContext(ctx, tx, thesis, now); err != nil {
 			return err
 		}
+		if err := c.linkThesisQuantMetrics(ctx, tx, thesis, now); err != nil {
+			return err
+		}
 		return c.linkThesisEvidence(ctx, tx, thesis, now)
 	})
 }
@@ -667,6 +670,73 @@ func (c *Client) linkThesisMarketContext(ctx context.Context, tx neo4j.ManagedTr
 			"updated_at": now,
 		},
 	)
+}
+
+func (c *Client) linkThesisQuantMetrics(ctx context.Context, tx neo4j.ManagedTransaction, thesis *model.Thesis, now time.Time) error {
+	if thesis == nil || thesis.QuantMetrics == nil {
+		return nil
+	}
+
+	queryID := thesis.ID + ":quant"
+	metrics := thesis.QuantMetrics
+	if err := runQuery(ctx, tx, `
+		MERGE (q:QuantQuery {id: $id})
+		SET q.method = $method,
+		    q.defined_risk = $defined_risk,
+		    q.max_loss = $max_loss,
+		    q.max_gain = $max_gain,
+		    q.breakeven = $breakeven,
+		    q.margin_estimate = $margin_estimate,
+		    q.reward_to_risk = $reward_to_risk,
+		    q.net_delta_bias = $net_delta_bias,
+		    q.warnings = $warnings,
+		    q.updated_at = $updated_at`,
+		map[string]any{
+			"id":              queryID,
+			"method":          metrics.Method,
+			"defined_risk":    metrics.DefinedRisk,
+			"max_loss":        metrics.MaxLoss,
+			"max_gain":        metrics.MaxGain,
+			"breakeven":       metrics.Breakeven,
+			"margin_estimate": metrics.MarginEstimate,
+			"reward_to_risk":  metrics.RewardToRisk,
+			"net_delta_bias":  metrics.NetDeltaBias,
+			"warnings":        metrics.Warnings,
+			"updated_at":      now,
+		},
+	); err != nil {
+		return err
+	}
+	if err := runQuery(ctx, tx, `
+		MATCH (t:Thesis {id: $thesis_id})
+		MATCH (q:QuantQuery {id: $query_id})
+		MERGE (t)-[r:USED_TOOL]->(q)
+		SET r.tool = 'quant_toolbox',
+		    r.observed_time = $updated_at,
+		    r.decision_time = $updated_at`,
+		map[string]any{
+			"thesis_id":  thesis.ID,
+			"query_id":   queryID,
+			"updated_at": now,
+		},
+	); err != nil {
+		return err
+	}
+	if thesis.MarketContext != nil {
+		return runQuery(ctx, tx, `
+			MATCH (q:QuantQuery {id: $query_id})
+			MATCH (m:MarketContext {id: $market_context_id})
+			MERGE (q)-[r:RETURNED]->(m)
+			SET r.observed_time = $updated_at,
+			    r.decision_time = $updated_at`,
+			map[string]any{
+				"query_id":          queryID,
+				"market_context_id": thesis.ID + ":market-context",
+				"updated_at":        now,
+			},
+		)
+	}
+	return nil
 }
 
 func (c *Client) linkSurpriseValidation(ctx context.Context, tx neo4j.ManagedTransaction, thesis *model.Thesis, outcomeID string, outcome *model.ThesisOutcome, closedAt time.Time) error {

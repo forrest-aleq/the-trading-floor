@@ -31,6 +31,7 @@ func schemaStatements() []string {
 		"CREATE CONSTRAINT attribution_id IF NOT EXISTS FOR (n:Attribution) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT desk_id IF NOT EXISTS FOR (n:Desk) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT competence_state_key IF NOT EXISTS FOR (n:CompetenceState) REQUIRE n.key IS UNIQUE",
+		"CREATE CONSTRAINT quant_query_id IF NOT EXISTS FOR (n:QuantQuery) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT source_id IF NOT EXISTS FOR (n:Source) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT owner_group_id IF NOT EXISTS FOR (n:OwnerGroup) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT entity_id IF NOT EXISTS FOR (n:Entity) REQUIRE n.id IS UNIQUE",

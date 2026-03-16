@@ -43,6 +43,13 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 			return err
 		}
 	}
+	var quantMetrics []byte
+	if thesis.QuantMetrics != nil {
+		quantMetrics, err = json.Marshal(thesis.QuantMetrics)
+		if err != nil {
+			return err
+		}
+	}
 
 	var prosecution []byte
 	if thesis.Prosecution != nil {
@@ -78,16 +85,16 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 			id, opportunity_id, desk_id, strategy, structure, instrument, legs, direction, conviction, health,
 			evidence, counter_args, entry_price, target_price, stop_loss, position_size,
 			time_horizon, kill_rules, status, autonomy_mode, scan_territory, execution_territory,
-			competence_key, competence_trust, competence_confidence, market_context, surprise_assessment,
+			competence_key, competence_trust, competence_confidence, market_context, surprise_assessment, quant_metrics,
 			prosecution, council_verdict, outcome,
 			created_at, resolved_at, domain
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16,
 			NULLIF($17, '')::interval, $18, $19, $20, $21, $22,
-			$23, $24, $25, $26, $27,
-			$28, $29, $30,
-			$31, $32, $33
+			$23, $24, $25, $26, $27, $28,
+			$29, $30, $31,
+			$32, $33, $34
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			opportunity_id = EXCLUDED.opportunity_id,
@@ -115,6 +122,7 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 			competence_confidence = EXCLUDED.competence_confidence,
 			market_context = EXCLUDED.market_context,
 			surprise_assessment = EXCLUDED.surprise_assessment,
+			quant_metrics = EXCLUDED.quant_metrics,
 			prosecution = EXCLUDED.prosecution,
 			council_verdict = EXCLUDED.council_verdict,
 			outcome = EXCLUDED.outcome,
@@ -147,6 +155,7 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 		thesis.CompetenceConfidence,
 		marketContext,
 		surpriseAssessment,
+		quantMetrics,
 		prosecution,
 		councilVerdict,
 		outcome,
@@ -163,7 +172,7 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 		        structure, legs,
 		        entry_price, target_price, stop_loss, position_size, prosecution, status,
 		        autonomy_mode, scan_territory, execution_territory, competence_key,
-		        competence_trust, competence_confidence, market_context, surprise_assessment, domain
+		        competence_trust, competence_confidence, market_context, surprise_assessment, quant_metrics, domain
 		   FROM theses
 		  WHERE id = $1`,
 		id,
@@ -177,6 +186,7 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	var prosecution []byte
 	var marketContext []byte
 	var surpriseAssessment []byte
+	var quantMetrics []byte
 	var direction string
 	var status string
 	var autonomyMode string
@@ -205,6 +215,7 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 		&thesis.CompetenceConfidence,
 		&marketContext,
 		&surpriseAssessment,
+		&quantMetrics,
 		&thesis.Domain,
 	)
 	if err != nil {
@@ -251,6 +262,11 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	}
 	if len(surpriseAssessment) > 0 {
 		if err := json.Unmarshal(surpriseAssessment, &thesis.SurpriseAssessment); err != nil {
+			return nil, err
+		}
+	}
+	if len(quantMetrics) > 0 {
+		if err := json.Unmarshal(quantMetrics, &thesis.QuantMetrics); err != nil {
 			return nil, err
 		}
 	}

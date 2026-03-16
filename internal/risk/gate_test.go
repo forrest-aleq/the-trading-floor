@@ -142,3 +142,45 @@ func TestGateRejectsStaleEvidence(t *testing.T) {
 		t.Fatalf("expected stale_signal_evidence violation, got %+v", decision.Violations)
 	}
 }
+
+func TestGateUsesQuantMarginEstimateForSingleNameRisk(t *testing.T) {
+	gate := NewGate(DefaultLimits())
+
+	order := model.Order{
+		ID:         "order-short-1",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Direction:  model.Short,
+		Quantity:   10,
+		LimitPrice: 100,
+		Notional:   1000,
+	}
+	thesis := &model.Thesis{
+		Conviction: 0.9,
+		QuantMetrics: &model.QuantMetrics{
+			MarginEstimate: 30000,
+		},
+	}
+	portfolio := PortfolioState{
+		NAV:           100000,
+		Cash:          100000,
+		DeskPositions: map[string]int{},
+		DeskDailyPnL:  map[string]float64{},
+		DeskCapital:   map[string]float64{"desk-a": 25000},
+	}
+
+	decision := gate.Check(order, thesis, portfolio)
+	if decision.Allowed {
+		t.Fatal("expected oversized quant margin estimate to be rejected")
+	}
+	found := false
+	for _, violation := range decision.Violations {
+		if violation.Rule == "max_single_position_pct" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected max_single_position_pct violation, got %+v", decision.Violations)
+	}
+}

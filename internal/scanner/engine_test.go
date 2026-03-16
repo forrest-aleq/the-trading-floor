@@ -181,7 +181,15 @@ func TestFormatSignalIncludesEvidenceContext(t *testing.T) {
 			FreshnessWindowHours:  48,
 			ContradictionCount:    1,
 			ContradictionSeverity: "medium",
-			EvidenceScore:         0.91,
+			ConfidenceVector: &evidence.ConfidenceVector{
+				FactConfidence:          0.94,
+				NoveltyConfidence:       0.72,
+				MarketMappingConfidence: 0.81,
+				ExpressionConfidence:    0.78,
+				ExecutionConfidence:     0.84,
+				CompetenceConfidence:    0.76,
+			},
+			EvidenceScore: 0.91,
 		},
 	})
 
@@ -191,6 +199,7 @@ func TestFormatSignalIncludesEvidenceContext(t *testing.T) {
 		"Freshness: fresh",
 		"Contradictions: 1 (medium)",
 		"Evidence score: 0.91",
+		"Confidence vector: fact=0.94 novelty=0.72 market_map=0.81 expression=0.78 execution=0.84 competence=0.76",
 	} {
 		if !strings.Contains(formatted, want) {
 			t.Fatalf("formatted signal missing %q\n%s", want, formatted)

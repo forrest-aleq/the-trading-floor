@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/hnic/trading-floor/internal/sanitize"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
@@ -20,6 +21,8 @@ func NormalizeSignal(sig signal.Signal) signal.Signal {
 	}
 	if sig.Translated == "" {
 		sig.Translated = EnsureTranslatedText(sig)
+	} else if cleaned, _ := sanitize.ExternalText(sig.Translated); cleaned != "" {
+		sig.Translated = cleaned
 	}
 	if sig.ContentHash == "" {
 		sig.ContentHash = hashSignalContent(sig)
@@ -42,7 +45,8 @@ func canonicalText(sig signal.Signal) string {
 
 	var text string
 	if err := json.Unmarshal(sig.Raw, &text); err == nil {
-		return strings.TrimSpace(text)
+		cleaned, _ := sanitize.ExternalText(text)
+		return strings.TrimSpace(cleaned)
 	}
 
 	var obj map[string]any
@@ -54,9 +58,11 @@ func canonicalText(sig signal.Signal) string {
 			}
 		}
 		if len(parts) > 0 {
-			return strings.Join(parts, " | ")
+			cleaned, _ := sanitize.ExternalText(strings.Join(parts, " | "))
+			return cleaned
 		}
 	}
 
-	return strings.TrimSpace(string(sig.Raw))
+	cleaned, _ := sanitize.ExternalText(string(sig.Raw))
+	return strings.TrimSpace(cleaned)
 }

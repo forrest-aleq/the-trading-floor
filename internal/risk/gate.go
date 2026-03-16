@@ -226,6 +226,16 @@ func evidenceViolation(reason string, thesis *model.Thesis) model.Violation {
 			thesis.EvidenceMeta.FreshnessStatus,
 			thesis.EvidenceMeta.ContradictionCount,
 		)
+		if vector := thesis.EvidenceMeta.ConfidenceVector; vector != nil && vector.Present() {
+			current += fmt.Sprintf(" fact=%.2f novelty=%.2f market_map=%.2f expression=%.2f execution=%.2f competence=%.2f",
+				vector.FactConfidence,
+				vector.NoveltyConfidence,
+				vector.MarketMappingConfidence,
+				vector.ExpressionConfidence,
+				vector.ExecutionConfidence,
+				vector.CompetenceConfidence,
+			)
+		}
 	}
 
 	limit := "deterministic_evidence_gate"
@@ -238,6 +248,16 @@ func evidenceViolation(reason string, thesis *model.Thesis) model.Violation {
 		limit = "independent_owner_group_corroboration"
 	case "low_integrity_evidence":
 		limit = "trust>=0.45_or_independent_corroboration"
+	case "low_fact_confidence":
+		limit = "fact_confidence>=0.30"
+	case "low_market_mapping_confidence":
+		limit = "market_mapping_confidence>=0.25"
+	case "low_expression_confidence":
+		limit = "expression_confidence>=0.22"
+	case "low_execution_confidence":
+		limit = "execution_confidence>=0.20"
+	case "low_competence_confidence":
+		limit = "competence_confidence>=0.20"
 	case "low_evidence_score":
 		limit = "evidence_score>=0.30"
 	}

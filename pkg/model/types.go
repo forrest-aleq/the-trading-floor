@@ -424,6 +424,14 @@ type Position struct {
 	ClosedAt       *time.Time     `json:"closed_at,omitempty"`
 }
 
+type LifecycleAlert struct {
+	Kind       string    `json:"kind"`
+	Severity   string    `json:"severity"`
+	Message    string    `json:"message"`
+	Instrument string    `json:"instrument,omitempty"`
+	ExpiresAt  time.Time `json:"expires_at,omitempty"`
+}
+
 // RiskDecision is the output of the risk gate
 type RiskDecision struct {
 	Allowed       bool        `json:"allowed"`

@@ -184,3 +184,56 @@ func TestGateUsesQuantMarginEstimateForSingleNameRisk(t *testing.T) {
 		t.Fatalf("expected max_single_position_pct violation, got %+v", decision.Violations)
 	}
 }
+
+func TestGateRejectsLowMarketMappingConfidence(t *testing.T) {
+	gate := NewGate(DefaultLimits())
+
+	order := model.Order{
+		ID:         "order-2",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Direction:  model.Long,
+		Quantity:   10,
+		LimitPrice: 100,
+		Notional:   1000,
+	}
+	thesis := &model.Thesis{
+		Conviction: 0.9,
+		EvidenceMeta: &evidence.Metadata{
+			SourceTrust:     0.92,
+			FreshnessStatus: "fresh",
+			EvidenceScore:   0.44,
+			ConfidenceVector: &evidence.ConfidenceVector{
+				FactConfidence:          0.88,
+				NoveltyConfidence:       0.55,
+				MarketMappingConfidence: 0.18,
+				ExpressionConfidence:    0.61,
+				ExecutionConfidence:     0.63,
+				CompetenceConfidence:    0.57,
+			},
+		},
+	}
+	portfolio := PortfolioState{
+		NAV:           100000,
+		Cash:          100000,
+		DeskPositions: map[string]int{},
+		DeskDailyPnL:  map[string]float64{},
+		DeskCapital:   map[string]float64{"desk-a": 25000},
+	}
+
+	decision := gate.Check(order, thesis, portfolio)
+	if decision.Allowed {
+		t.Fatal("expected low market-mapping confidence to be rejected")
+	}
+
+	found := false
+	for _, violation := range decision.Violations {
+		if violation.Rule == "low_market_mapping_confidence" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected low_market_mapping_confidence violation, got %+v", decision.Violations)
+	}
+}

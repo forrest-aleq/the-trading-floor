@@ -18,16 +18,23 @@ const (
 )
 
 func newFeedHTTPClient() *http.Client {
+	timeout := readFeedDuration("WIRE_HTTP_TIMEOUT", 30*time.Second)
+	dialTimeout := readFeedDuration("WIRE_DIAL_TIMEOUT", 10*time.Second)
+	tlsTimeout := readFeedDuration("WIRE_TLS_HANDSHAKE_TIMEOUT", 10*time.Second)
+	responseHeaderTimeout := readFeedDuration("WIRE_RESPONSE_HEADER_TIMEOUT", 15*time.Second)
+
 	return &http.Client{
-		Timeout: 20 * time.Second,
+		Timeout: timeout,
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			DialContext:           (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          64,
+			MaxConnsPerHost:       32,
 			MaxIdleConnsPerHost:   16,
 			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   5 * time.Second,
+			TLSHandshakeTimeout:   tlsTimeout,
+			ResponseHeaderTimeout: responseHeaderTimeout,
 			ExpectContinueTimeout: time.Second,
 		},
 	}

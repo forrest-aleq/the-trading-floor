@@ -43,6 +43,7 @@ func TestSchemaStatementsIncludeCoreConstraints(t *testing.T) {
 		"Instrument",
 		"Source",
 		"Domain",
+		"EvidenceAssessment",
 	}
 	for _, want := range required {
 		found := false
@@ -60,7 +61,7 @@ func TestSchemaStatementsIncludeCoreConstraints(t *testing.T) {
 
 func TestEntityNodeIDNormalizesAliasInput(t *testing.T) {
 	id := entityNodeID(signal.Entity{Name: " 英伟达 ", Type: "company"})
-	if id != "company:英伟达" {
+	if id != "company:NVDA" {
 		t.Fatalf("unexpected entity id: %s", id)
 	}
 }

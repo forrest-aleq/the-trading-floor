@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/hnic/trading-floor/internal/entityresolve"
 	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
@@ -96,7 +97,7 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 	}
 
 	displayNames := entityDisplayNames(sig.Entities)
-	for _, key := range entityKeys(sig.Entities) {
+	for _, key := range entityKeys(sig.Entities, signalLanguage(sig)) {
 		matched := false
 		for _, ref := range c.byEntity[key] {
 			candidateRefs[ref.id] = ref
@@ -137,8 +138,7 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 		refs = append(refs, ref)
 	}
 	meta.ContradictionCount, meta.ContradictionSeverity, meta.ConflictingSignalIDs = detectContradictions(sig, refs)
-	meta.EvidenceScore = roundEvidence(scoreEvidence(meta))
-	sig.EvidenceMeta = meta
+	sig.EvidenceMeta = refreshEvidenceAssessment(sig, meta)
 
 	c.record(sig)
 	return sig
@@ -149,7 +149,7 @@ func (c *CrossReferencer) record(sig signal.Signal) {
 		id:       sig.ID,
 		source:   sig.Source,
 		cluster:  sig.ClusterID,
-		entities: entityKeys(sig.Entities),
+		entities: entityKeys(sig.Entities, signalLanguage(sig)),
 		text:     canonicalText(sig),
 	}
 	if sig.EvidenceMeta != nil {
@@ -207,11 +207,11 @@ func removeSignalRef(refs []signalRef, id string) []signalRef {
 	return refs
 }
 
-func entityKeys(entities []signal.Entity) []string {
+func entityKeys(entities []signal.Entity, language string) []string {
 	seen := make(map[string]struct{}, len(entities))
 	keys := make([]string, 0, len(entities))
 	for _, entity := range entities {
-		key := normalizeEntityKey(entity.Name)
+		key := entityresolve.Resolve(entity, language).CanonicalID
 		if key == "" {
 			continue
 		}
@@ -227,7 +227,7 @@ func entityKeys(entities []signal.Entity) []string {
 func entityDisplayNames(entities []signal.Entity) map[string]string {
 	names := make(map[string]string, len(entities))
 	for _, entity := range entities {
-		key := normalizeEntityKey(entity.Name)
+		key := entityresolve.Resolve(entity, "").CanonicalID
 		if key == "" {
 			continue
 		}
@@ -240,11 +240,14 @@ func entityDisplayNames(entities []signal.Entity) map[string]string {
 }
 
 func normalizeEntityKey(name string) string {
-	name = strings.TrimSpace(strings.ToUpper(name))
-	if name == "" {
-		return ""
+	return entityresolve.NormalizeKey(name)
+}
+
+func signalLanguage(sig signal.Signal) string {
+	if len(sig.Languages) > 0 {
+		return strings.TrimSpace(strings.ToLower(sig.Languages[0]))
 	}
-	return strings.Join(strings.Fields(name), " ")
+	return "und"
 }
 
 type orderedStrings struct {

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hnic/trading-floor/internal/entityresolve"
+	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -43,6 +45,7 @@ func schemaStatements() []string {
 		"CREATE CONSTRAINT language_code IF NOT EXISTS FOR (n:Language) REQUIRE n.code IS UNIQUE",
 		"CREATE CONSTRAINT structure_class_id IF NOT EXISTS FOR (n:StructureClass) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT evidence_id IF NOT EXISTS FOR (n:Evidence) REQUIRE n.id IS UNIQUE",
+		"CREATE CONSTRAINT evidence_assessment_id IF NOT EXISTS FOR (n:EvidenceAssessment) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT antipf_id IF NOT EXISTS FOR (n:AntiPortfolioDecision) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT market_context_id IF NOT EXISTS FOR (n:MarketContext) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT factor_id IF NOT EXISTS FOR (n:Factor) REQUIRE n.id IS UNIQUE",
@@ -167,18 +170,21 @@ func (c *Client) linkSignalEntities(ctx context.Context, tx neo4j.ManagedTransac
 		if name == "" {
 			continue
 		}
-		entityID := entityNodeID(entity)
+		resolved := entityresolve.Resolve(entity, primaryLanguage(sig))
+		entityID := resolved.CanonicalID
 		if err := runQuery(ctx, tx, `
 			MERGE (e:Entity {id: $id})
 			SET e.name = $name,
 			    e.type = $type,
 			    e.external_id = $external_id,
+			    e.language = $language,
 			    e.updated_at = $updated_at`,
 			map[string]any{
 				"id":          entityID,
-				"name":        name,
-				"type":        strings.TrimSpace(entity.Type),
+				"name":        firstNonEmpty(resolved.CanonicalName, name),
+				"type":        firstNonEmpty(resolved.Type, strings.TrimSpace(entity.Type)),
 				"external_id": strings.TrimSpace(entity.ID),
+				"language":    resolved.Language,
 				"updated_at":  now,
 			},
 		); err != nil {
@@ -195,6 +201,49 @@ func (c *Client) linkSignalEntities(ctx context.Context, tx neo4j.ManagedTransac
 				"signal_id":     sig.ID,
 				"entity_id":     entityID,
 				"event_time":    normalizeTime(sig.Timestamp, now),
+				"observed_time": normalizeTime(sig.Timestamp, now),
+				"decision_time": now,
+			},
+		); err != nil {
+			return err
+		}
+		aliasID := entityAliasID(entity, sig)
+		if aliasID == "" {
+			continue
+		}
+		if err := runQuery(ctx, tx, `
+			MERGE (a:EntityAlias {id: $id})
+			SET a.name = $name,
+			    a.language = $language,
+			    a.script = $script,
+			    a.confidence = $confidence,
+			    a.updated_at = $updated_at`,
+			map[string]any{
+				"id":         aliasID,
+				"name":       name,
+				"language":   resolved.Language,
+				"script":     resolved.Script,
+				"confidence": resolved.Confidence,
+				"updated_at": now,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MATCH (e:Entity {id: $entity_id})
+			MATCH (a:EntityAlias {id: $alias_id})
+			MERGE (e)-[r:ALIAS]->(a)
+			SET r.language = $language,
+			    r.script = $script,
+			    r.confidence = $confidence,
+			    r.observed_time = $observed_time,
+			    r.decision_time = $decision_time`,
+			map[string]any{
+				"entity_id":     entityID,
+				"alias_id":      aliasID,
+				"language":      resolved.Language,
+				"script":        resolved.Script,
+				"confidence":    resolved.Confidence,
 				"observed_time": normalizeTime(sig.Timestamp, now),
 				"decision_time": now,
 			},
@@ -275,6 +324,58 @@ func (c *Client) linkSignalRelations(ctx context.Context, tx neo4j.ManagedTransa
 		}
 	}
 	return nil
+}
+
+func (c *Client) linkEvidenceAssessment(ctx context.Context, tx neo4j.ManagedTransaction, nodeLabel, nodeID string, meta *evidence.Metadata, now time.Time) error {
+	if meta == nil {
+		return nil
+	}
+
+	assessmentID := nodeID + ":evidence"
+	if err := runQuery(ctx, tx, `
+		MERGE (e:EvidenceAssessment {id: $id})
+		SET e.evidence_score = $evidence_score,
+		    e.source_trust = $source_trust,
+		    e.fact_confidence = $fact_confidence,
+		    e.novelty_confidence = $novelty_confidence,
+		    e.market_mapping_confidence = $market_mapping_confidence,
+		    e.expression_confidence = $expression_confidence,
+		    e.execution_confidence = $execution_confidence,
+		    e.competence_confidence = $competence_confidence,
+		    e.freshness_status = $freshness_status,
+		    e.contradiction_count = $contradiction_count,
+		    e.contradiction_severity = $contradiction_severity,
+		    e.updated_at = $updated_at`,
+		map[string]any{
+			"id":                        assessmentID,
+			"evidence_score":            meta.EvidenceScore,
+			"source_trust":              meta.SourceTrust,
+			"fact_confidence":           evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.FactConfidence }),
+			"novelty_confidence":        evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.NoveltyConfidence }),
+			"market_mapping_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.MarketMappingConfidence }),
+			"expression_confidence":     evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.ExpressionConfidence }),
+			"execution_confidence":      evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.ExecutionConfidence }),
+			"competence_confidence":     evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.CompetenceConfidence }),
+			"freshness_status":          strings.TrimSpace(meta.FreshnessStatus),
+			"contradiction_count":       meta.ContradictionCount,
+			"contradiction_severity":    strings.TrimSpace(meta.ContradictionSeverity),
+			"updated_at":                now,
+		},
+	); err != nil {
+		return err
+	}
+
+	query := fmt.Sprintf(`
+		MATCH (n:%s {id: $node_id})
+		MATCH (e:EvidenceAssessment {id: $assessment_id})
+		MERGE (n)-[r:HAS_EVIDENCE_ASSESSMENT]->(e)
+		SET r.observed_time = $updated_at,
+		    r.decision_time = $updated_at`, nodeLabel)
+	return runQuery(ctx, tx, query, map[string]any{
+		"node_id":       nodeID,
+		"assessment_id": assessmentID,
+		"updated_at":    now,
+	})
 }
 
 func (c *Client) linkThesisEvidence(ctx context.Context, tx neo4j.ManagedTransaction, thesis *model.Thesis, now time.Time) error {
@@ -438,12 +539,16 @@ func instrumentNodeID(instrument model.Instrument) string {
 }
 
 func entityNodeID(entity signal.Entity) string {
-	typ := strings.ToLower(strings.TrimSpace(entity.Type))
-	name := strings.ToUpper(strings.Join(strings.Fields(strings.TrimSpace(entity.Name)), " "))
-	if typ == "" {
-		typ = "unknown"
+	return entityresolve.Resolve(entity, "").CanonicalID
+}
+
+func entityAliasID(entity signal.Entity, sig signal.Signal) string {
+	name := strings.TrimSpace(entity.Name)
+	if name == "" {
+		return ""
 	}
-	return typ + ":" + name
+	language := primaryLanguage(sig)
+	return language + ":" + entityresolve.NormalizeKey(name)
 }
 
 func primaryLanguage(sig signal.Signal) string {
@@ -482,6 +587,13 @@ func evidenceFloat(meta interface{ Present() bool }, getter func() float64) floa
 		return 0
 	}
 	return getter()
+}
+
+func evidenceConfidence(meta *evidence.Metadata, getter func(*evidence.ConfidenceVector) float64) float64 {
+	if meta == nil || !meta.Present() || meta.ConfidenceVector == nil || !meta.ConfidenceVector.Present() {
+		return 0
+	}
+	return getter(meta.ConfidenceVector)
 }
 
 func evidenceInt(meta interface{ Present() bool }, getter func() int) int {

@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -70,6 +71,13 @@ func TestNormalizeSignalInfersEvidenceMetadata(t *testing.T) {
 	if sig.EvidenceMeta.FreshnessWindowHours != 48 {
 		t.Fatalf("expected 8-K freshness window of 48h, got %.1f", sig.EvidenceMeta.FreshnessWindowHours)
 	}
+	if sig.EvidenceMeta.ConfidenceVector == nil || !sig.EvidenceMeta.ConfidenceVector.Present() {
+		t.Fatalf("expected confidence vector to be computed, got %+v", sig.EvidenceMeta.ConfidenceVector)
+	}
+	if math.Abs(sig.EvidenceMeta.EvidenceScore-sig.EvidenceMeta.ConfidenceVector.Overall()) > 0.02 {
+		t.Fatalf("expected evidence score to derive from confidence vector, got score=%.2f vector=%.2f",
+			sig.EvidenceMeta.EvidenceScore, sig.EvidenceMeta.ConfidenceVector.Overall())
+	}
 }
 
 func TestCrossReferencerDetectsContradictorySignalsAcrossIndependentOwners(t *testing.T) {
@@ -114,5 +122,41 @@ func TestCrossReferencerDetectsContradictorySignalsAcrossIndependentOwners(t *te
 	}
 	if len(second.EvidenceMeta.ConflictingSignalIDs) == 0 || second.EvidenceMeta.ConflictingSignalIDs[0] != "sig-1" {
 		t.Fatalf("expected conflicting signal id, got %+v", second.EvidenceMeta.ConflictingSignalIDs)
+	}
+}
+
+func TestCrossReferencerResolvesMultilingualEntityAliases(t *testing.T) {
+	crossref := NewCrossReferencer(64, 8)
+
+	first := NormalizeSignal(signal.Signal{
+		ID:         "sig-nvda-en",
+		Source:     "reuters",
+		Type:       signal.TypeNews,
+		Category:   "corporate",
+		Timestamp:  time.Now(),
+		Languages:  []string{"en"},
+		Translated: "NVIDIA unveils a new data center roadmap",
+		Entities: []signal.Entity{
+			{Name: "NVIDIA", Type: "company"},
+		},
+	})
+	second := NormalizeSignal(signal.Signal{
+		ID:         "sig-nvda-zh",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "corporate",
+		Timestamp:  time.Now(),
+		Languages:  []string{"zh"},
+		Translated: "英伟达发布新的数据中心路线图",
+		Entities: []signal.Entity{
+			{Name: "英伟达", Type: "company"},
+		},
+	})
+
+	first = crossref.Enrich(first)
+	second = crossref.Enrich(second)
+
+	if len(second.RelatedSignalIDs) == 0 || second.RelatedSignalIDs[0] != "sig-nvda-en" {
+		t.Fatalf("expected multilingual alias to resolve to the same entity, got %+v", second.RelatedSignalIDs)
 	}
 }

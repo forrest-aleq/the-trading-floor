@@ -650,11 +650,28 @@ func (d *Desk) applyAutonomy(thesis *model.Thesis, decision autonomyDecision) {
 	if decision.ExecTerritory.Exact != nil {
 		thesis.CompetenceTrust = decision.ExecTerritory.Exact.Trust
 		thesis.CompetenceConfidence = decision.ExecTerritory.Exact.Confidence
+		enrichThesisCompetenceConfidence(thesis)
 		return
 	}
 	if decision.ScanTerritory.Exact != nil {
 		thesis.CompetenceTrust = decision.ScanTerritory.Exact.Trust
 		thesis.CompetenceConfidence = decision.ScanTerritory.Exact.Confidence
+		enrichThesisCompetenceConfidence(thesis)
+	}
+}
+
+func enrichThesisCompetenceConfidence(thesis *model.Thesis) {
+	if thesis == nil || thesis.EvidenceMeta == nil || thesis.EvidenceMeta.ConfidenceVector == nil {
+		return
+	}
+	baseline := thesis.EvidenceMeta.ConfidenceVector.CompetenceConfidence
+	learned := (thesis.CompetenceTrust + thesis.CompetenceConfidence) / 2
+	if learned <= 0 {
+		return
+	}
+	if learned > baseline {
+		thesis.EvidenceMeta.ConfidenceVector.CompetenceConfidence = learned
+		thesis.EvidenceMeta.EvidenceScore = thesis.EvidenceMeta.ConfidenceVector.Overall()
 	}
 }
 

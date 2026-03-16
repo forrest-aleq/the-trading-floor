@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -310,6 +311,24 @@ func (c *Client) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 				return meta.ContradictionSeverity
 			}),
 			"evidence_score": evidenceFloat(meta, func() float64 { return meta.EvidenceScore }),
+			"fact_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+				return v.FactConfidence
+			}),
+			"novelty_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+				return v.NoveltyConfidence
+			}),
+			"market_mapping_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+				return v.MarketMappingConfidence
+			}),
+			"expression_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+				return v.ExpressionConfidence
+			}),
+			"execution_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+				return v.ExecutionConfidence
+			}),
+			"evidence_competence_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+				return v.CompetenceConfidence
+			}),
 		}
 		if err := runQuery(ctx, tx, `
 			MERGE (s:Signal {id: $id})
@@ -328,7 +347,10 @@ func (c *Client) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 		if err := c.linkSignalEntities(ctx, tx, sig, now); err != nil {
 			return err
 		}
-		return c.linkSignalRelations(ctx, tx, sig, now)
+		if err := c.linkSignalRelations(ctx, tx, sig, now); err != nil {
+			return err
+		}
+		return c.linkEvidenceAssessment(ctx, tx, "Signal", sig.ID, sig.EvidenceMeta, now)
 	})
 }
 
@@ -369,6 +391,12 @@ func (c *Client) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 			    t.created_at = $created_at,
 			    t.resolved_at = $resolved_at,
 			    t.evidence_score = $evidence_score,
+			    t.fact_confidence = $fact_confidence,
+			    t.novelty_confidence = $novelty_confidence,
+			    t.market_mapping_confidence = $market_mapping_confidence,
+			    t.expression_confidence = $expression_confidence,
+			    t.execution_confidence = $execution_confidence,
+			    t.evidence_competence_confidence = $evidence_competence_confidence,
 			    t.source_trust = $source_trust,
 			    t.freshness_status = $freshness_status,
 			    t.contradiction_count = $contradiction_count,
@@ -397,10 +425,28 @@ func (c *Client) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 				"created_at":            normalizeTime(thesis.CreatedAt, now),
 				"resolved_at":           thesis.ResolvedAt,
 				"evidence_score":        evidenceFloat(meta, func() float64 { return meta.EvidenceScore }),
-				"source_trust":          evidenceFloat(meta, func() float64 { return meta.SourceTrust }),
-				"freshness_status":      evidenceString(meta, func() string { return meta.FreshnessStatus }),
-				"contradiction_count":   evidenceInt(meta, func() int { return meta.ContradictionCount }),
-				"updated_at":            now,
+				"fact_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+					return v.FactConfidence
+				}),
+				"novelty_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+					return v.NoveltyConfidence
+				}),
+				"market_mapping_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+					return v.MarketMappingConfidence
+				}),
+				"expression_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+					return v.ExpressionConfidence
+				}),
+				"execution_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+					return v.ExecutionConfidence
+				}),
+				"evidence_competence_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 {
+					return v.CompetenceConfidence
+				}),
+				"source_trust":        evidenceFloat(meta, func() float64 { return meta.SourceTrust }),
+				"freshness_status":    evidenceString(meta, func() string { return meta.FreshnessStatus }),
+				"contradiction_count": evidenceInt(meta, func() int { return meta.ContradictionCount }),
+				"updated_at":          now,
 			},
 		); err != nil {
 			return err
@@ -476,7 +522,10 @@ func (c *Client) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 		if err := c.linkCouncilVerdict(ctx, tx, thesis, now); err != nil {
 			return err
 		}
-		return c.linkThesisEvidence(ctx, tx, thesis, now)
+		if err := c.linkThesisEvidence(ctx, tx, thesis, now); err != nil {
+			return err
+		}
+		return c.linkEvidenceAssessment(ctx, tx, "Thesis", thesis.ID, thesis.EvidenceMeta, now)
 	})
 }
 

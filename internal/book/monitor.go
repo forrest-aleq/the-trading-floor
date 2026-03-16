@@ -3,6 +3,7 @@ package book
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/hnic/trading-floor/pkg/model"
@@ -16,6 +17,7 @@ type Monitor struct {
 	book         *Book
 	thesisLookup ThesisLookup
 	onClose      func(position *model.Position, exitPrice float64, reason string)
+	onLifecycle  func(position *model.Position, alert model.LifecycleAlert)
 	interval     time.Duration
 }
 
@@ -34,6 +36,10 @@ func (m *Monitor) SetInterval(interval time.Duration) {
 		return
 	}
 	m.interval = interval
+}
+
+func (m *Monitor) SetLifecycleHandler(handler func(position *model.Position, alert model.LifecycleAlert)) {
+	m.onLifecycle = handler
 }
 
 func (m *Monitor) Run(ctx context.Context) {
@@ -59,6 +65,23 @@ func (m *Monitor) RunOnce() {
 
 		thesis, _ := m.lookup(pos.ThesisID)
 		if thesis != nil {
+			lifecycleAlerts := detectLifecycleAlerts(pos, time.Now())
+			for _, alert := range lifecycleAlerts {
+				m.log.Warn("position lifecycle alert",
+					"symbol", pos.DisplaySymbol(),
+					"desk", pos.DeskID,
+					"kind", alert.Kind,
+					"severity", alert.Severity,
+					"message", alert.Message,
+				)
+				if m.onLifecycle != nil {
+					m.onLifecycle(pos, alert)
+				}
+			}
+			if reason, closeNow := shouldCloseOnLifecycle(lifecycleAlerts); closeNow {
+				m.requestClose(pos, pos.CurrentPrice, reason)
+				continue
+			}
 			if shouldCloseOnStop(pos, thesis) {
 				m.requestClose(pos, pos.CurrentPrice, "stop_loss")
 				continue
@@ -129,4 +152,90 @@ func emergencyLossHit(pos *model.Position) bool {
 		lossPct = (pos.CurrentPrice - pos.EntryPrice) / pos.EntryPrice
 	}
 	return lossPct > 0.05
+}
+
+func detectLifecycleAlerts(pos *model.Position, now time.Time) []model.LifecycleAlert {
+	instruments := pos.ExecutionInstruments()
+	alerts := make([]model.LifecycleAlert, 0, 2)
+	for i, instrument := range instruments {
+		expiry, ok := parseInstrumentExpiry(instrument.Expiry)
+		if !ok {
+			continue
+		}
+		hoursToExpiry := expiry.Sub(now).Hours()
+		if hoursToExpiry <= 0 {
+			alerts = append(alerts, model.LifecycleAlert{
+				Kind:       "expired_derivative",
+				Severity:   "critical",
+				Message:    "derivative contract has expired or rolled through expiry",
+				Instrument: instrument.Label(),
+				ExpiresAt:  expiry,
+			})
+			continue
+		}
+		if instrument.SecType == "OPT" || instrument.SecType == "FOP" {
+			if isShortOptionLeg(pos, i) && hoursToExpiry <= 24 {
+				alerts = append(alerts, model.LifecycleAlert{
+					Kind:       "assignment_risk",
+					Severity:   "high",
+					Message:    "short option is inside the assignment window",
+					Instrument: instrument.Label(),
+					ExpiresAt:  expiry,
+				})
+			}
+			if pos.IsMultiLeg() && hoursToExpiry <= 48 {
+				alerts = append(alerts, model.LifecycleAlert{
+					Kind:       "pin_risk",
+					Severity:   "high",
+					Message:    "multi-leg option structure is near expiry and may pin across strikes",
+					Instrument: instrument.Label(),
+					ExpiresAt:  expiry,
+				})
+			}
+		}
+		if hoursToExpiry <= 24 {
+			alerts = append(alerts, model.LifecycleAlert{
+				Kind:       "expiry_management",
+				Severity:   "medium",
+				Message:    "position is inside the expiry management window",
+				Instrument: instrument.Label(),
+				ExpiresAt:  expiry,
+			})
+		}
+	}
+	return alerts
+}
+
+func shouldCloseOnLifecycle(alerts []model.LifecycleAlert) (string, bool) {
+	for _, alert := range alerts {
+		switch alert.Kind {
+		case "expired_derivative", "assignment_risk", "pin_risk":
+			return alert.Kind, true
+		}
+	}
+	return "", false
+}
+
+func parseInstrumentExpiry(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{"20060102", "2006-01-02", "200601"} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func isShortOptionLeg(pos *model.Position, idx int) bool {
+	if len(pos.Legs) == 0 {
+		return pos.Direction == model.Short && (pos.Instrument.SecType == "OPT" || pos.Instrument.SecType == "FOP")
+	}
+	if idx < 0 || idx >= len(pos.Legs) {
+		return false
+	}
+	leg := pos.Legs[idx]
+	return leg.Direction == model.Short && (leg.Instrument.SecType == "OPT" || leg.Instrument.SecType == "FOP")
 }

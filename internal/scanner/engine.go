@@ -327,6 +327,17 @@ func formatSignalWithLimit(sig signal.Signal, contentLimit, relatedLimit, entity
 			sb.WriteString(fmt.Sprintf("Contradictions: %d (%s)\n", sig.EvidenceMeta.ContradictionCount, sig.EvidenceMeta.ContradictionSeverity))
 		}
 		sb.WriteString(fmt.Sprintf("Evidence score: %.2f\n", sig.EvidenceMeta.EvidenceScore))
+		if vector := sig.EvidenceMeta.ConfidenceVector; vector != nil && vector.Present() {
+			sb.WriteString(fmt.Sprintf(
+				"Confidence vector: fact=%.2f novelty=%.2f market_map=%.2f expression=%.2f execution=%.2f competence=%.2f\n",
+				vector.FactConfidence,
+				vector.NoveltyConfidence,
+				vector.MarketMappingConfidence,
+				vector.ExpressionConfidence,
+				vector.ExecutionConfidence,
+				vector.CompetenceConfidence,
+			))
+		}
 	}
 	if sig.Translated != "" {
 		sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(sig.Translated, contentLimit)))

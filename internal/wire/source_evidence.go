@@ -89,6 +89,14 @@ func buildEvidenceMeta(sig signal.Signal) *evidence.Metadata {
 		DistinctOwnerGroups:  countNonEmpty(profile.OwnerGroup),
 		HasPrimarySource:     profile.Tier == "primary" || profile.Type == "primary" || profile.Type == "market",
 	}
+	return refreshEvidenceAssessment(sig, meta)
+}
+
+func refreshEvidenceAssessment(sig signal.Signal, meta *evidence.Metadata) *evidence.Metadata {
+	if meta == nil {
+		return nil
+	}
+	meta.ConfidenceVector = scoreConfidenceVector(sig, meta)
 	meta.EvidenceScore = roundEvidence(scoreEvidence(meta))
 	return meta
 }
@@ -340,7 +348,15 @@ func scoreEvidence(meta *evidence.Metadata) float64 {
 	if meta == nil {
 		return 0
 	}
+	if meta.ConfidenceVector != nil && meta.ConfidenceVector.Present() {
+		return clampEvidence(meta.ConfidenceVector.Overall())
+	}
 
+	score := legacyEvidenceScore(meta)
+	return clampEvidence(score)
+}
+
+func legacyEvidenceScore(meta *evidence.Metadata) float64 {
 	score := meta.SourceTrust
 	switch meta.SourceTier {
 	case "primary":
@@ -380,7 +396,168 @@ func scoreEvidence(meta *evidence.Metadata) float64 {
 		score -= 0.07
 	}
 
-	return clampEvidence(score)
+	return score
+}
+
+func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence.ConfidenceVector {
+	if meta == nil {
+		return nil
+	}
+
+	relatedCount := len(sig.RelatedSignalIDs)
+	entityCount := len(sig.Entities)
+	corroborated := meta.DistinctOwnerGroups >= 2 || meta.DistinctSources >= 2
+	directional := sig.Direction != signal.Neutral
+	freshnessBonus := freshnessConfidence(meta)
+
+	fact := meta.SourceTrust
+	if meta.SourceTier == "primary" || meta.SourceType == "market" {
+		fact += 0.08
+	}
+	if meta.HasPrimarySource {
+		fact += 0.08
+	}
+	if corroborated {
+		fact += 0.06
+	}
+	fact -= contradictionPenalty(meta)
+	if strings.HasPrefix(meta.FreshnessStatus, "stale") {
+		fact -= 0.20
+	}
+	fact += freshnessBonus * 0.05
+
+	novelty := 0.22 + (clampEvidence(sig.Urgency) * 0.30)
+	novelty += freshnessBonus * 0.22
+	novelty -= 0.08 * float64(minInt(relatedCount, 4))
+	if meta.DistinctSources > 2 {
+		novelty -= 0.03 * float64(minInt(meta.DistinctSources-2, 3))
+	}
+	if sig.Type == signal.TypeFiling || sig.Type == signal.TypeEconomic || sig.Type == signal.TypeFlow {
+		novelty += 0.08
+	}
+	if meta.SourceType == "social" && !corroborated {
+		novelty -= 0.12
+	}
+
+	marketMapping := 0.18
+	if entityCount > 0 {
+		marketMapping += 0.26
+	}
+	if strings.TrimSpace(sig.Category) != "" {
+		marketMapping += 0.12
+	}
+	if directional {
+		marketMapping += 0.10
+	}
+	if sig.Type == signal.TypePrice || sig.Type == signal.TypeFiling || sig.Type == signal.TypeEconomic || sig.Type == signal.TypeNews {
+		marketMapping += 0.08
+	}
+	if corroborated {
+		marketMapping += 0.08
+	}
+	if meta.SourceType == "social" && !corroborated {
+		marketMapping -= 0.16
+	}
+
+	expression := 0.16
+	if entityCount > 0 {
+		expression += 0.20
+	}
+	if directional {
+		expression += 0.14
+	}
+	if sig.Urgency >= 0.5 {
+		expression += 0.10
+	}
+	if strings.TrimSpace(sig.Category) != "" {
+		expression += 0.08
+	}
+	if sig.Type == signal.TypePrice || sig.Type == signal.TypeFiling || sig.Type == signal.TypeEconomic || sig.Type == signal.TypeNews {
+		expression += 0.08
+	}
+	expression -= contradictionPenalty(meta) * 0.8
+	if strings.HasPrefix(meta.FreshnessStatus, "stale") {
+		expression -= 0.15
+	}
+	if meta.SourceType == "social" && !corroborated {
+		expression -= 0.16
+	}
+
+	execution := 0.18 + (meta.SourceTrust * 0.28)
+	execution += freshnessBonus * 0.15
+	if meta.HasPrimarySource {
+		execution += 0.08
+	}
+	if corroborated {
+		execution += 0.08
+	}
+	execution -= contradictionPenalty(meta) * 0.7
+	if strings.HasPrefix(meta.FreshnessStatus, "stale") {
+		execution -= 0.12
+	}
+	if meta.SourceType == "social" {
+		execution -= 0.10
+	}
+
+	competence := 0.18 + (meta.SourceTrust * 0.22)
+	if meta.HasPrimarySource {
+		competence += 0.10
+	}
+	if corroborated {
+		competence += 0.10
+	}
+	if entityCount > 0 {
+		competence += 0.08
+	}
+	if directional {
+		competence += 0.05
+	}
+	competence -= contradictionPenalty(meta) * 0.7
+	if meta.SourceType == "social" && !corroborated {
+		competence -= 0.10
+	}
+	if strings.HasPrefix(meta.FreshnessStatus, "stale") {
+		competence -= 0.10
+	}
+
+	return &evidence.ConfidenceVector{
+		FactConfidence:          roundEvidence(clampEvidence(fact)),
+		NoveltyConfidence:       roundEvidence(clampEvidence(novelty)),
+		MarketMappingConfidence: roundEvidence(clampEvidence(marketMapping)),
+		ExpressionConfidence:    roundEvidence(clampEvidence(expression)),
+		ExecutionConfidence:     roundEvidence(clampEvidence(execution)),
+		CompetenceConfidence:    roundEvidence(clampEvidence(competence)),
+	}
+}
+
+func freshnessConfidence(meta *evidence.Metadata) float64 {
+	if meta == nil {
+		return 0
+	}
+	switch {
+	case meta.FreshnessStatus == "fresh":
+		return 1
+	case meta.FreshnessStatus == "missing_timestamp":
+		return 0.35
+	case strings.HasPrefix(meta.FreshnessStatus, "stale"):
+		return 0
+	default:
+		return 0.55
+	}
+}
+
+func contradictionPenalty(meta *evidence.Metadata) float64 {
+	if meta == nil {
+		return 0
+	}
+	penalty := 0.10 * float64(meta.ContradictionCount)
+	switch meta.ContradictionSeverity {
+	case "high":
+		penalty += 0.12
+	case "medium":
+		penalty += 0.06
+	}
+	return penalty
 }
 
 func detectContradictions(sig signal.Signal, refs []signalRef) (int, string, []string) {

@@ -120,6 +120,17 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, sig sign
 			opp.EvidenceMeta.ContradictionSeverity,
 			opp.EvidenceMeta.EvidenceScore,
 		)
+		if vector := opp.EvidenceMeta.ConfidenceVector; vector != nil && vector.Present() {
+			prompt += fmt.Sprintf(
+				"\n  Confidence vector: fact=%.2f novelty=%.2f market_map=%.2f expression=%.2f execution=%.2f competence=%.2f",
+				vector.FactConfidence,
+				vector.NoveltyConfidence,
+				vector.MarketMappingConfidence,
+				vector.ExpressionConfidence,
+				vector.ExecutionConfidence,
+				vector.CompetenceConfidence,
+			)
+		}
 	}
 
 	if opp.CascadeInfo != nil {

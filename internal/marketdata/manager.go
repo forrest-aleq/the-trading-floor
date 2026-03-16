@@ -14,6 +14,13 @@ import (
 // Subscriber receives price updates.
 type Subscriber func(prices map[string]float64)
 
+type PricePoint struct {
+	ObservedAt time.Time
+	Price      float64
+}
+
+const maxHistoryPointsPerInstrument = 256
+
 // Manager is a centralized market data subscription manager.
 // Instead of each desk polling IBKR independently, this manager
 // maintains a shared watchlist and distributes updates to subscribers.
@@ -26,6 +33,7 @@ type Manager struct {
 	mu            sync.RWMutex
 	watchlist     map[string]model.Instrument // instrument key -> instrument
 	prices        map[string]float64          // instrument key -> last price
+	history       map[string][]PricePoint     // instrument key/symbol -> rolling history
 	suppressUntil map[string]time.Time
 	subscribers   []Subscriber
 }
@@ -47,6 +55,7 @@ func NewManager(client MarketDataClient, pacing *ibkr.PacingBudget, interval tim
 		interval:      interval,
 		watchlist:     make(map[string]model.Instrument),
 		prices:        make(map[string]float64),
+		history:       make(map[string][]PricePoint),
 		suppressUntil: make(map[string]time.Time),
 	}
 }
@@ -81,6 +90,57 @@ func (m *Manager) LatestPrices() map[string]float64 {
 	return cp
 }
 
+func (m *Manager) LatestPrice(inst model.Instrument) (float64, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if price, ok := m.prices[inst.Key()]; ok && price > 0 {
+		return price, true
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	if price, ok := m.prices[symbol]; ok && price > 0 {
+		return price, true
+	}
+	return 0, false
+}
+
+func (m *Manager) PriceChange(inst model.Instrument, window time.Duration) (float64, bool) {
+	if window <= 0 {
+		return 0, false
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	history := m.lookupHistoryLocked(inst)
+	if len(history) < 2 {
+		return 0, false
+	}
+
+	latest := history[len(history)-1]
+	cutoff := latest.ObservedAt.Add(-window)
+	baseline := PricePoint{}
+	found := false
+	for i := len(history) - 1; i >= 0; i-- {
+		point := history[i]
+		if point.ObservedAt.Before(cutoff) || point.ObservedAt.Equal(cutoff) {
+			baseline = point
+			found = true
+			break
+		}
+	}
+	if !found {
+		baseline = history[0]
+		if latest.ObservedAt.Sub(baseline.ObservedAt) < window/2 {
+			return 0, false
+		}
+	}
+	if baseline.Price <= 0 || latest.Price <= 0 {
+		return 0, false
+	}
+	return ((latest.Price - baseline.Price) / baseline.Price) * 100, true
+}
+
 // Run polls IBKR for market data on the shared watchlist and distributes updates.
 func (m *Manager) Run(ctx context.Context) {
 	ticker := time.NewTicker(m.interval)
@@ -109,6 +169,7 @@ func (m *Manager) poll(ctx context.Context) {
 	}
 
 	prices := make(map[string]float64)
+	timestamp := time.Now().UTC()
 	for _, inst := range instruments {
 		if ctx.Err() != nil {
 			return
@@ -147,6 +208,19 @@ func (m *Manager) poll(ctx context.Context) {
 	m.mu.Lock()
 	for k, v := range prices {
 		m.prices[k] = v
+	}
+	for _, inst := range instruments {
+		key := inst.Key()
+		price, ok := prices[key]
+		if !ok || price <= 0 {
+			continue
+		}
+		m.appendHistoryLocked(key, price, timestamp)
+		symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+		if symbol != "" {
+			m.prices[symbol] = price
+			m.appendHistoryLocked(symbol, price, timestamp)
+		}
 	}
 	subs := make([]Subscriber, len(m.subscribers))
 	copy(subs, m.subscribers)
@@ -201,4 +275,29 @@ func marketDataBackoff(err error, interval time.Duration) time.Duration {
 	default:
 		return interval
 	}
+}
+
+func (m *Manager) appendHistoryLocked(key string, price float64, observedAt time.Time) {
+	if key == "" || price <= 0 {
+		return
+	}
+	history := append(m.history[key], PricePoint{
+		ObservedAt: observedAt,
+		Price:      price,
+	})
+	if len(history) > maxHistoryPointsPerInstrument {
+		history = history[len(history)-maxHistoryPointsPerInstrument:]
+	}
+	m.history[key] = history
+}
+
+func (m *Manager) lookupHistoryLocked(inst model.Instrument) []PricePoint {
+	if history := m.history[inst.Key()]; len(history) > 0 {
+		return history
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	if symbol == "" {
+		return nil
+	}
+	return m.history[symbol]
 }

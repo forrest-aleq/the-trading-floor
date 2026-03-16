@@ -37,6 +37,7 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 	timingKey := belief.CompetenceKey(thesis.DeskID, competenceTimingAssessment, thesis.Strategy, regime.Key())
 	structureKey := belief.CompetenceKey(thesis.DeskID, competenceStructureSelect, capability, regime.Key())
 	executionKey := belief.CompetenceKey(thesis.DeskID, competenceExecutionQuality, capability, regime.Key())
+	surpriseKey := belief.CompetenceKey(thesis.DeskID, competenceSurpriseAssess, thesis.Strategy, regime.Key())
 
 	// Calculate magnitude: realized_return / expected_risk, clamped to [-2, 2]
 	expectedRisk := math.Abs(thesis.EntryPrice - thesis.StopLoss)
@@ -99,6 +100,9 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 	recordUpdate(timingKey, "timing_edge", attribution.TimingEdge, boundaryViolation)
 	recordUpdate(structureKey, "expression_edge", attribution.ExpressionEdge, boundaryViolation)
 	recordUpdate(executionKey, "execution_edge", attribution.ExecutionEdge, boundaryViolation)
+	if surpriseScore, ok := surpriseValidationScore(thesis, outcome); ok {
+		recordUpdate(surpriseKey, "surprise_validation", surpriseScore, false)
+	}
 	attribution.CompetenceUpdates = updates
 
 	// Record engram for pattern caching

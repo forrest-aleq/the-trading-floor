@@ -85,6 +85,13 @@ func TestLearnWorkerUsesAttributionDimensions(t *testing.T) {
 			SecType:  "OPT",
 			Currency: "USD",
 		},
+		SurpriseAssessment: &model.SurpriseAssessment{
+			TruthScore:        0.90,
+			NoveltyScore:      0.85,
+			PricedInScore:     0.20,
+			ReactionGapScore:  0.75,
+			UnmovedAssetScore: 0.60,
+		},
 	}
 	outcome := &model.ThesisOutcome{
 		Profitable:  true,
@@ -122,7 +129,12 @@ func TestLearnWorkerUsesAttributionDimensions(t *testing.T) {
 		t.Fatalf("expected structure competence success, got %+v", structureState)
 	}
 
-	if outcome.Attribution == nil || len(outcome.Attribution.CompetenceUpdates) < 4 {
+	surpriseState, ok := graph.Lookup("desk-a", competenceSurpriseAssess, "event", regime.Key())
+	if !ok || surpriseState.SuccessCount != 1 {
+		t.Fatalf("expected surprise competence success, got %+v", surpriseState)
+	}
+
+	if outcome.Attribution == nil || len(outcome.Attribution.CompetenceUpdates) < 5 {
 		t.Fatalf("expected competence updates on attribution, got %+v", outcome.Attribution)
 	}
 }

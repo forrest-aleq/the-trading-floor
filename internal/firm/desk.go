@@ -178,7 +178,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	stageStart = time.Now()
 	researchCtx, researchCancel := context.WithTimeout(ctx, deskResearchTimeout)
-	thesis, err := d.research.Investigate(researchCtx, opp, d.ID)
+	thesis, err := d.research.Investigate(researchCtx, opp, sig, d.ID)
 	researchCancel()
 	d.logStage("research", stageStart,
 		"signal_id", sig.ID,

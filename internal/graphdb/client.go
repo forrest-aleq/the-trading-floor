@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -404,6 +405,9 @@ func (c *Client) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 		if err := c.linkTradeInstruments(ctx, tx, "Thesis", thesis.ID, thesis.ExecutionInstruments(), "USES_INSTRUMENT", now); err != nil {
 			return err
 		}
+		if err := c.linkThesisMarketContext(ctx, tx, thesis, now); err != nil {
+			return err
+		}
 		return c.linkThesisEvidence(ctx, tx, thesis, now)
 	})
 }
@@ -578,8 +582,182 @@ func (c *Client) RecordOutcome(ctx context.Context, thesis *model.Thesis, pos *m
 				return err
 			}
 		}
-		return c.linkOutcomeAttribution(ctx, tx, outcomeID, outcome, closedAt)
+		if err := c.linkOutcomeAttribution(ctx, tx, outcomeID, outcome, closedAt); err != nil {
+			return err
+		}
+		return c.linkSurpriseValidation(ctx, tx, thesis, outcomeID, outcome, closedAt)
 	})
+}
+
+func (c *Client) linkThesisMarketContext(ctx context.Context, tx neo4j.ManagedTransaction, thesis *model.Thesis, now time.Time) error {
+	if thesis == nil || thesis.MarketContext == nil {
+		return nil
+	}
+
+	marketContextID := thesis.ID + ":market-context"
+	marketCtx := thesis.MarketContext
+	if err := runQuery(ctx, tx, `
+		MERGE (m:MarketContext {id: $id})
+		SET m.symbol = $symbol,
+		    m.sec_type = $sec_type,
+		    m.current_price = $current_price,
+		    m.return_15m_pct = $return_15m_pct,
+		    m.return_1h_pct = $return_1h_pct,
+		    m.return_4h_pct = $return_4h_pct,
+		    m.signal_age_minutes = $signal_age_minutes,
+		    m.consensus_available = $consensus_available,
+		    m.actual_eps = $actual_eps,
+		    m.estimated_eps = $estimated_eps,
+		    m.actual_revenue = $actual_revenue,
+		    m.estimated_revenue = $estimated_revenue,
+		    m.surprise_magnitude = $surprise_magnitude,
+		    m.implied_move_available = $implied_move_available,
+		    m.implied_move_pct = $implied_move_pct,
+		    m.notes = $notes,
+		    m.snapshot_at = $snapshot_at,
+		    m.updated_at = $updated_at`,
+		map[string]any{
+			"id":                     marketContextID,
+			"symbol":                 marketCtx.Instrument.Symbol,
+			"sec_type":               marketCtx.Instrument.SecType,
+			"current_price":          marketCtx.CurrentPrice,
+			"return_15m_pct":         marketCtx.Return15mPct,
+			"return_1h_pct":          marketCtx.Return1hPct,
+			"return_4h_pct":          marketCtx.Return4hPct,
+			"signal_age_minutes":     marketCtx.SignalAgeMinutes,
+			"consensus_available":    marketCtx.ConsensusAvailable,
+			"actual_eps":             marketCtx.ActualEPS,
+			"estimated_eps":          marketCtx.EstimatedEPS,
+			"actual_revenue":         marketCtx.ActualRevenue,
+			"estimated_revenue":      marketCtx.EstimatedRevenue,
+			"surprise_magnitude":     marketCtx.SurpriseMagnitude,
+			"implied_move_available": marketCtx.ImpliedMoveAvailable,
+			"implied_move_pct":       marketCtx.ImpliedMovePct,
+			"notes":                  marketCtx.Notes,
+			"snapshot_at":            normalizeTime(marketCtx.SnapshotAt, now),
+			"updated_at":             now,
+		},
+	); err != nil {
+		return err
+	}
+
+	return runQuery(ctx, tx, `
+		MATCH (t:Thesis {id: $thesis_id})
+		MATCH (m:MarketContext {id: $market_context_id})
+		MERGE (t)-[r:ASSESSED_IN]->(m)
+		SET r.truth_score = $truth_score,
+		    r.novelty_score = $novelty_score,
+		    r.priced_in_score = $priced_in_score,
+		    r.reaction_gap_score = $reaction_gap_score,
+		    r.unmoved_asset_score = $unmoved_asset_score,
+		    r.summary = $summary,
+		    r.observed_time = $updated_at,
+		    r.decision_time = $updated_at`,
+		map[string]any{
+			"thesis_id":          thesis.ID,
+			"market_context_id":  marketContextID,
+			"truth_score":        surpriseScore(thesis.SurpriseAssessment, func(a *model.SurpriseAssessment) float64 { return a.TruthScore }),
+			"novelty_score":      surpriseScore(thesis.SurpriseAssessment, func(a *model.SurpriseAssessment) float64 { return a.NoveltyScore }),
+			"priced_in_score":    surpriseScore(thesis.SurpriseAssessment, func(a *model.SurpriseAssessment) float64 { return a.PricedInScore }),
+			"reaction_gap_score": surpriseScore(thesis.SurpriseAssessment, func(a *model.SurpriseAssessment) float64 { return a.ReactionGapScore }),
+			"unmoved_asset_score": surpriseScore(thesis.SurpriseAssessment, func(a *model.SurpriseAssessment) float64 {
+				return a.UnmovedAssetScore
+			}),
+			"summary":    surpriseSummary(thesis.SurpriseAssessment),
+			"updated_at": now,
+		},
+	)
+}
+
+func (c *Client) linkSurpriseValidation(ctx context.Context, tx neo4j.ManagedTransaction, thesis *model.Thesis, outcomeID string, outcome *model.ThesisOutcome, closedAt time.Time) error {
+	if thesis == nil || !hasGraphSurpriseAssessment(thesis.SurpriseAssessment) || outcome == nil || outcome.Attribution == nil {
+		return nil
+	}
+
+	validationScore := computeSurpriseValidation(thesis.SurpriseAssessment, outcome.Attribution)
+	return runQuery(ctx, tx, `
+		MATCH (t:Thesis {id: $thesis_id})
+		MATCH (o:Outcome {id: $outcome_id})
+		MERGE (t)-[r:SURPRISE_VALIDATED]->(o)
+		SET r.predicted_edge = $predicted_edge,
+		    r.actual_edge = $actual_edge,
+		    r.validation_score = $validation_score,
+		    r.observed_time = $closed_at,
+		    r.decision_time = $closed_at`,
+		map[string]any{
+			"thesis_id":        thesis.ID,
+			"outcome_id":       outcomeID,
+			"predicted_edge":   surprisePredictedEdge(thesis.SurpriseAssessment),
+			"actual_edge":      surpriseActualEdge(outcome.Attribution),
+			"validation_score": validationScore,
+			"closed_at":        closedAt,
+		},
+	)
+}
+
+func surpriseScore(assessment *model.SurpriseAssessment, getter func(*model.SurpriseAssessment) float64) float64 {
+	if !hasGraphSurpriseAssessment(assessment) {
+		return 0
+	}
+	return getter(assessment)
+}
+
+func surpriseSummary(assessment *model.SurpriseAssessment) string {
+	if !hasGraphSurpriseAssessment(assessment) {
+		return ""
+	}
+	return strings.TrimSpace(assessment.Summary)
+}
+
+func surprisePredictedEdge(assessment *model.SurpriseAssessment) float64 {
+	if !hasGraphSurpriseAssessment(assessment) {
+		return 0
+	}
+	raw := (assessment.TruthScore +
+		assessment.NoveltyScore +
+		assessment.ReactionGapScore +
+		assessment.UnmovedAssetScore +
+		(1 - assessment.PricedInScore)) / 5
+	return clampGraphSigned((raw * 2) - 1)
+}
+
+func surpriseActualEdge(attr *model.OutcomeAttribution) float64 {
+	if attr == nil {
+		return 0
+	}
+	return clampGraphSigned((attr.TruthEdge * 0.7) + (attr.TimingEdge * 0.3))
+}
+
+func computeSurpriseValidation(assessment *model.SurpriseAssessment, attr *model.OutcomeAttribution) float64 {
+	predicted := surprisePredictedEdge(assessment)
+	actual := surpriseActualEdge(attr)
+	alignment := 1 - (math.Abs(predicted-actual) / 2)
+	if predicted*actual < 0 {
+		alignment = -alignment
+	}
+	return clampGraphSigned(alignment)
+}
+
+func clampGraphSigned(value float64) float64 {
+	if value > 1 {
+		return 1
+	}
+	if value < -1 {
+		return -1
+	}
+	return value
+}
+
+func hasGraphSurpriseAssessment(assessment *model.SurpriseAssessment) bool {
+	if assessment == nil {
+		return false
+	}
+	return assessment.TruthScore != 0 ||
+		assessment.NoveltyScore != 0 ||
+		assessment.PricedInScore != 0 ||
+		assessment.ReactionGapScore != 0 ||
+		assessment.UnmovedAssetScore != 0 ||
+		strings.TrimSpace(assessment.Summary) != ""
 }
 
 func (c *Client) linkOutcomeAttribution(ctx context.Context, tx neo4j.ManagedTransaction, outcomeID string, outcome *model.ThesisOutcome, closedAt time.Time) error {

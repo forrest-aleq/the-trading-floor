@@ -13,6 +13,7 @@ const (
 	competenceTimingAssessment = "timing_assessment"
 	competenceStructureSelect  = "structure_selection"
 	competenceExecutionQuality = "execution_quality"
+	competenceSurpriseAssess   = "surprise_assessment"
 )
 
 func ensureOutcomeAttribution(thesis *model.Thesis, outcome *model.ThesisOutcome) *model.OutcomeAttribution {
@@ -178,6 +179,55 @@ func overallAttributionScore(attr *model.OutcomeAttribution) float64 {
 		(attr.ExpressionEdge * 0.25) +
 		(attr.ExecutionEdge * 0.15)
 	return clampSigned(score)
+}
+
+func surpriseValidationScore(thesis *model.Thesis, outcome *model.ThesisOutcome) (float64, bool) {
+	if thesis == nil || !hasSurpriseAssessment(thesis.SurpriseAssessment) || outcome == nil || outcome.Attribution == nil {
+		return 0, false
+	}
+
+	predicted := surprisePredictedEdge(thesis.SurpriseAssessment)
+	actual := surpriseActualEdge(outcome.Attribution)
+	if math.Abs(predicted) < 0.05 {
+		return 0, false
+	}
+
+	alignment := 1 - (math.Abs(predicted-actual) / 2)
+	if predicted*actual < 0 {
+		alignment = -alignment
+	}
+	return clampSigned(alignment), true
+}
+
+func surprisePredictedEdge(assessment *model.SurpriseAssessment) float64 {
+	if !hasSurpriseAssessment(assessment) {
+		return 0
+	}
+	raw := (assessment.TruthScore +
+		assessment.NoveltyScore +
+		assessment.ReactionGapScore +
+		assessment.UnmovedAssetScore +
+		(1 - assessment.PricedInScore)) / 5
+	return clampSigned((raw * 2) - 1)
+}
+
+func surpriseActualEdge(attr *model.OutcomeAttribution) float64 {
+	if attr == nil {
+		return 0
+	}
+	return clampSigned((attr.TruthEdge * 0.7) + (attr.TimingEdge * 0.3))
+}
+
+func hasSurpriseAssessment(assessment *model.SurpriseAssessment) bool {
+	if assessment == nil {
+		return false
+	}
+	return assessment.TruthScore != 0 ||
+		assessment.NoveltyScore != 0 ||
+		assessment.PricedInScore != 0 ||
+		assessment.ReactionGapScore != 0 ||
+		assessment.UnmovedAssetScore != 0 ||
+		strings.TrimSpace(assessment.Summary) != ""
 }
 
 func normalizeReason(value string) string {

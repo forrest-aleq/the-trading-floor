@@ -170,6 +170,34 @@ type CascadeInfo struct {
 	TimeWindow   string   `json:"time_window"`
 }
 
+type MarketContext struct {
+	SnapshotAt           time.Time  `json:"snapshot_at"`
+	Instrument           Instrument `json:"instrument"`
+	CurrentPrice         float64    `json:"current_price,omitempty"`
+	Return15mPct         float64    `json:"return_15m_pct,omitempty"`
+	Return1hPct          float64    `json:"return_1h_pct,omitempty"`
+	Return4hPct          float64    `json:"return_4h_pct,omitempty"`
+	SignalAgeMinutes     float64    `json:"signal_age_minutes,omitempty"`
+	ConsensusAvailable   bool       `json:"consensus_available,omitempty"`
+	ActualEPS            float64    `json:"actual_eps,omitempty"`
+	EstimatedEPS         float64    `json:"estimated_eps,omitempty"`
+	ActualRevenue        float64    `json:"actual_revenue,omitempty"`
+	EstimatedRevenue     float64    `json:"estimated_revenue,omitempty"`
+	SurpriseMagnitude    float64    `json:"surprise_magnitude,omitempty"`
+	ImpliedMoveAvailable bool       `json:"implied_move_available,omitempty"`
+	ImpliedMovePct       float64    `json:"implied_move_pct,omitempty"`
+	Notes                []string   `json:"notes,omitempty"`
+}
+
+type SurpriseAssessment struct {
+	TruthScore        float64 `json:"truth_score"`
+	NoveltyScore      float64 `json:"novelty_score"`
+	PricedInScore     float64 `json:"priced_in_score"`
+	ReactionGapScore  float64 `json:"reaction_gap_score"`
+	UnmovedAssetScore float64 `json:"unmoved_asset_score"`
+	Summary           string  `json:"summary,omitempty"`
+}
+
 // ThesisStatus tracks lifecycle
 type ThesisStatus string
 
@@ -207,16 +235,18 @@ type Thesis struct {
 	KillRules []KillRule   `json:"kill_rules"`
 	Status    ThesisStatus `json:"status"`
 
-	AutonomyMode         AutonomyMode       `json:"autonomy_mode,omitempty"`
-	ScanTerritory        string             `json:"scan_territory,omitempty"`
-	ExecutionTerritory   string             `json:"execution_territory,omitempty"`
-	CompetenceKey        string             `json:"competence_key,omitempty"`
-	CompetenceTrust      float64            `json:"competence_trust,omitempty"`
-	CompetenceConfidence float64            `json:"competence_confidence,omitempty"`
-	EvidenceMeta         *evidence.Metadata `json:"evidence_meta,omitempty"`
-	Prosecution          *Prosecution       `json:"prosecution,omitempty"`
-	CouncilVerdict       *CouncilVerdict    `json:"council_verdict,omitempty"`
-	Outcome              *ThesisOutcome     `json:"outcome,omitempty"`
+	AutonomyMode         AutonomyMode        `json:"autonomy_mode,omitempty"`
+	ScanTerritory        string              `json:"scan_territory,omitempty"`
+	ExecutionTerritory   string              `json:"execution_territory,omitempty"`
+	CompetenceKey        string              `json:"competence_key,omitempty"`
+	CompetenceTrust      float64             `json:"competence_trust,omitempty"`
+	CompetenceConfidence float64             `json:"competence_confidence,omitempty"`
+	EvidenceMeta         *evidence.Metadata  `json:"evidence_meta,omitempty"`
+	MarketContext        *MarketContext      `json:"market_context,omitempty"`
+	SurpriseAssessment   *SurpriseAssessment `json:"surprise_assessment,omitempty"`
+	Prosecution          *Prosecution        `json:"prosecution,omitempty"`
+	CouncilVerdict       *CouncilVerdict     `json:"council_verdict,omitempty"`
+	Outcome              *ThesisOutcome      `json:"outcome,omitempty"`
 
 	CreatedAt  time.Time  `json:"created_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`

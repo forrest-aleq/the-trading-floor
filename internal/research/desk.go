@@ -10,7 +10,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hnic/trading-floor/internal/llm"
+	"github.com/hnic/trading-floor/internal/marketcontext"
 	"github.com/hnic/trading-floor/pkg/model"
+	"github.com/hnic/trading-floor/pkg/signal"
 )
 
 // Desk orchestrates thesis formation through the trio conversation
@@ -18,6 +20,7 @@ type Desk struct {
 	log           *slog.Logger
 	llm           *llm.Router
 	minConviction float64
+	marketContext *marketcontext.Service
 }
 
 func NewDesk(llmRouter *llm.Router, minConviction float64) *Desk {
@@ -29,6 +32,10 @@ func NewDesk(llmRouter *llm.Router, minConviction float64) *Desk {
 		llm:           llmRouter,
 		minConviction: minConviction,
 	}
+}
+
+func (d *Desk) SetMarketContextService(service *marketcontext.Service) {
+	d.marketContext = service
 }
 
 const researchPrompt = `You are a trading research desk. Given this opportunity, build a rigorous trading thesis.
@@ -45,6 +52,7 @@ You must determine:
 8. EVIDENCE: What supports this thesis (list 3-5 pieces of evidence)
 9. COUNTER ARGUMENTS: What could go wrong (list 2-3 risks)
 10. KILL RULES: Conditions that would invalidate the thesis
+11. SURPRISE ASSESSMENT: score how novel and underpriced this setup is
 
 Think like Bill Ackman. Deep conviction requires deep analysis. Don't trade unless you have an edge.
 If you choose a spread, it must be a defined-risk debit vertical:
@@ -72,6 +80,14 @@ Respond in JSON:
   "time_horizon_hours": 0,
   "position_size_pct": 0.0,
   "strategy": "scalper|event|macro|fundamental|contrarian|tail",
+  "surprise_assessment": {
+    "truth_score": 0.0,
+    "novelty_score": 0.0,
+    "priced_in_score": 0.0,
+    "reaction_gap_score": 0.0,
+    "unmoved_asset_score": 0.0,
+    "summary": ""
+  },
   "evidence": ["...", "..."],
   "counter_args": ["...", "..."],
   "kill_rules": [{"condition": "...", "threshold": 0.0, "action": "close|reduce|alert"}],
@@ -81,7 +97,7 @@ Respond in JSON:
 const researchMaxTokens = 1024
 
 // Investigate takes an opportunity and produces a thesis
-func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID string) (*model.Thesis, error) {
+func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, sig signal.Signal, deskID string) (*model.Thesis, error) {
 	prompt := fmt.Sprintf("Opportunity (score: %.0f, urgency: %.2f, category: %s):\n\nInstruments: %v\nDirection: %s\nSignal IDs: %v",
 		opp.Score, opp.Urgency, opp.Category,
 		instrumentNames(opp.Instruments), opp.Direction, opp.SignalIDs,
@@ -109,6 +125,14 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 	if opp.CascadeInfo != nil {
 		prompt += fmt.Sprintf("\n\nCascade detected:\n  Source domain: %s\n  Target gaps: %v\n  Confidence: %.2f",
 			opp.CascadeInfo.SourceDomain, opp.CascadeInfo.TargetGaps, opp.CascadeInfo.Confidence)
+	}
+
+	var marketCtx *model.MarketContext
+	if d.marketContext != nil {
+		marketCtx = d.marketContext.BuildOpportunityContext(opp, sig)
+		if marketSummary := marketcontext.FormatForPrompt(marketCtx); marketSummary != "" {
+			prompt += "\n\nMarket context:\n" + marketSummary + "\nUse this snapshot to judge whether the setup is genuinely surprising or already priced in."
+		}
 	}
 
 	resp, err := d.llm.AskJSONWithLimit(ctx, llm.TierAnalysis, researchPrompt, prompt, researchMaxTokens, 0.2)
@@ -167,27 +191,29 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, deskID s
 	}
 
 	thesis := &model.Thesis{
-		ID:            uuid.New().String(),
-		OpportunityID: opp.ID,
-		DeskID:        deskID,
-		Strategy:      normalizeStrategy(result.Strategy),
-		Structure:     structure,
-		Instrument:    primary,
-		Legs:          legs,
-		Direction:     model.TradeDirection(result.Direction),
-		Conviction:    normalizeConviction(result.Conviction),
-		Health:        0.85, // Initial health
-		Evidence:      evidence,
-		CounterArgs:   result.CounterArgs,
-		EntryPrice:    result.EntryPrice,
-		TargetPrice:   result.TargetPrice,
-		StopLoss:      result.StopLoss,
-		PositionSize:  normalizePositionSizePct(result.PositionSizePct),
-		TimeHorizon:   time.Duration(result.TimeHorizonHours) * time.Hour,
-		KillRules:     killRules,
-		Status:        model.ThesisEmbryo,
-		EvidenceMeta:  opp.EvidenceMeta.Clone(),
-		CreatedAt:     time.Now(),
+		ID:                 uuid.New().String(),
+		OpportunityID:      opp.ID,
+		DeskID:             deskID,
+		Strategy:           normalizeStrategy(result.Strategy),
+		Structure:          structure,
+		Instrument:         primary,
+		Legs:               legs,
+		Direction:          model.TradeDirection(result.Direction),
+		Conviction:         normalizeConviction(result.Conviction),
+		Health:             0.85, // Initial health
+		Evidence:           evidence,
+		CounterArgs:        result.CounterArgs,
+		EntryPrice:         result.EntryPrice,
+		TargetPrice:        result.TargetPrice,
+		StopLoss:           result.StopLoss,
+		PositionSize:       normalizePositionSizePct(result.PositionSizePct),
+		TimeHorizon:        time.Duration(result.TimeHorizonHours) * time.Hour,
+		KillRules:          killRules,
+		Status:             model.ThesisEmbryo,
+		EvidenceMeta:       opp.EvidenceMeta.Clone(),
+		MarketContext:      marketCtx,
+		SurpriseAssessment: buildSurpriseAssessment(result),
+		CreatedAt:          time.Now(),
 	}
 
 	d.log.Info("thesis formed",
@@ -228,18 +254,26 @@ type researchResult struct {
 		Ratio      float64 `json:"ratio"`
 		EntryPrice float64 `json:"entry_price"`
 	} `json:"legs"`
-	Direction        string          `json:"direction"`
-	EntryPrice       float64         `json:"entry_price"`
-	TargetPrice      float64         `json:"target_price"`
-	StopLoss         float64         `json:"stop_loss"`
-	Conviction       float64         `json:"conviction"`
-	TimeHorizonHours int             `json:"time_horizon_hours"`
-	PositionSizePct  float64         `json:"position_size_pct"`
-	Strategy         string          `json:"strategy"`
-	Evidence         []string        `json:"evidence"`
-	CounterArgs      []string        `json:"counter_args"`
-	KillRules        json.RawMessage `json:"kill_rules"`
-	Reasoning        string          `json:"reasoning"`
+	Direction          string  `json:"direction"`
+	EntryPrice         float64 `json:"entry_price"`
+	TargetPrice        float64 `json:"target_price"`
+	StopLoss           float64 `json:"stop_loss"`
+	Conviction         float64 `json:"conviction"`
+	TimeHorizonHours   int     `json:"time_horizon_hours"`
+	PositionSizePct    float64 `json:"position_size_pct"`
+	Strategy           string  `json:"strategy"`
+	SurpriseAssessment struct {
+		TruthScore        float64 `json:"truth_score"`
+		NoveltyScore      float64 `json:"novelty_score"`
+		PricedInScore     float64 `json:"priced_in_score"`
+		ReactionGapScore  float64 `json:"reaction_gap_score"`
+		UnmovedAssetScore float64 `json:"unmoved_asset_score"`
+		Summary           string  `json:"summary"`
+	} `json:"surprise_assessment"`
+	Evidence    []string        `json:"evidence"`
+	CounterArgs []string        `json:"counter_args"`
+	KillRules   json.RawMessage `json:"kill_rules"`
+	Reasoning   string          `json:"reasoning"`
 }
 
 func instrumentNames(instruments []model.Instrument) []string {
@@ -396,6 +430,37 @@ func normalizePositionSizePct(value float64) float64 {
 		value = 0
 	}
 	return value
+}
+
+func clampUnit(value float64) float64 {
+	switch {
+	case value < 0:
+		return 0
+	case value > 1:
+		return 1
+	default:
+		return value
+	}
+}
+
+func buildSurpriseAssessment(result researchResult) *model.SurpriseAssessment {
+	assessment := &model.SurpriseAssessment{
+		TruthScore:        clampUnit(result.SurpriseAssessment.TruthScore),
+		NoveltyScore:      clampUnit(result.SurpriseAssessment.NoveltyScore),
+		PricedInScore:     clampUnit(result.SurpriseAssessment.PricedInScore),
+		ReactionGapScore:  clampUnit(result.SurpriseAssessment.ReactionGapScore),
+		UnmovedAssetScore: clampUnit(result.SurpriseAssessment.UnmovedAssetScore),
+		Summary:           strings.TrimSpace(result.SurpriseAssessment.Summary),
+	}
+	if assessment.TruthScore == 0 &&
+		assessment.NoveltyScore == 0 &&
+		assessment.PricedInScore == 0 &&
+		assessment.ReactionGapScore == 0 &&
+		assessment.UnmovedAssetScore == 0 &&
+		assessment.Summary == "" {
+		return nil
+	}
+	return assessment
 }
 
 func normalizeStrategy(value string) string {

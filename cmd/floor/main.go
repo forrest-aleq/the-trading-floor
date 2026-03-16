@@ -20,6 +20,7 @@ import (
 	"github.com/hnic/trading-floor/internal/firm"
 	"github.com/hnic/trading-floor/internal/graphdb"
 	"github.com/hnic/trading-floor/internal/llm"
+	"github.com/hnic/trading-floor/internal/marketcontext"
 	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
@@ -169,6 +170,7 @@ func main() {
 	learnWorker := memory.NewLearnWorker(beliefGraph, engramStore)
 	scan := scanner.NewEngine(llmRouter, 70)
 	researchDesk := research.NewDesk(llmRouter, 0.65)
+	researchDesk.SetMarketContextService(marketcontext.NewService(mdMgr))
 	prosecutor := research.NewProsecutor(llmRouter)
 	council := research.NewCouncil(llmRouter)
 	startBeliefDecay(ctx, beliefGraph)

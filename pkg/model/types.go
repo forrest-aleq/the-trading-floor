@@ -293,11 +293,42 @@ type Prosecution struct {
 	Confidence float64  `json:"confidence"`
 }
 
+type CouncilRecommendation string
+
+const (
+	CouncilApprove CouncilRecommendation = "approve"
+	CouncilReject  CouncilRecommendation = "reject"
+	CouncilAbstain CouncilRecommendation = "abstain"
+)
+
+type CouncilVoiceContribution struct {
+	Name                 string                `json:"name"`
+	Perspective          string                `json:"perspective,omitempty"`
+	Reasoning            string                `json:"reasoning,omitempty"`
+	Recommendation       CouncilRecommendation `json:"recommendation,omitempty"`
+	ConvictionAdjustment float64               `json:"conviction_adjustment,omitempty"`
+	SizeAdjustment       float64               `json:"size_adjustment,omitempty"`
+	Weight               float64               `json:"weight,omitempty"`
+	HistoricalAccuracy   float64               `json:"historical_accuracy,omitempty"`
+	Observations         int                   `json:"observations,omitempty"`
+}
+
+type CouncilVoiceStats struct {
+	Name         string  `json:"name"`
+	Weight       float64 `json:"weight"`
+	Accuracy     float64 `json:"accuracy"`
+	CorrectCalls int     `json:"correct_calls"`
+	TotalCalls   int     `json:"total_calls"`
+}
+
 type CouncilVerdict struct {
-	Approved           bool              `json:"approved"`
-	Perspectives       map[string]string `json:"perspectives"` // archetype → view
-	AdjustedSize       float64           `json:"adjusted_size,omitempty"`
-	AdjustedConviction float64           `json:"adjusted_conviction,omitempty"`
+	Approved           bool                       `json:"approved"`
+	Perspectives       map[string]string          `json:"perspectives"` // archetype → view
+	Voices             []CouncilVoiceContribution `json:"voices,omitempty"`
+	AdjustedSize       float64                    `json:"adjusted_size,omitempty"`
+	AdjustedConviction float64                    `json:"adjusted_conviction,omitempty"`
+	WeightedVoteScore  float64                    `json:"weighted_vote_score,omitempty"`
+	TotalWeight        float64                    `json:"total_weight,omitempty"`
 }
 
 type AttributionUpdate struct {

@@ -175,6 +175,9 @@ func main() {
 	quantService := quant.NewService()
 	prosecutor := research.NewProsecutor(llmRouter)
 	council := research.NewCouncil(llmRouter)
+	if graph != nil {
+		council.SetVoiceTelemetryProvider(graph)
+	}
 	startBeliefDecay(ctx, beliefGraph)
 	slog.Info("decision services initialized")
 

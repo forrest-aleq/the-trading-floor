@@ -158,6 +158,68 @@ func (c *Client) UpsertCompetenceState(ctx context.Context, state *model.Compete
 	})
 }
 
+func (c *Client) CouncilVoiceTelemetry(ctx context.Context, domain string) (map[string]model.CouncilVoiceStats, error) {
+	stats := make(map[string]model.CouncilVoiceStats)
+	if c == nil || c.driver == nil || strings.TrimSpace(domain) == "" {
+		return stats, nil
+	}
+
+	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		rows, err := tx.Run(ctx, `
+			MATCH (v:CouncilVoice)-[r:ACCURACY]->(d:Domain {id: $domain})
+			RETURN v.id AS id,
+			       v.name AS name,
+			       coalesce(r.correct_calls, 0) AS correct_calls,
+			       coalesce(r.total_calls, 0) AS total_calls,
+			       coalesce(r.score_sum, 0.0) AS score_sum`,
+			map[string]any{"domain": strings.TrimSpace(domain)})
+		if err != nil {
+			return nil, err
+		}
+
+		telemetry := make(map[string]model.CouncilVoiceStats)
+		for rows.Next(ctx) {
+			record := rows.Record()
+			id, _ := record.Get("id")
+			name, _ := record.Get("name")
+			correctCalls, _ := record.Get("correct_calls")
+			totalCalls, _ := record.Get("total_calls")
+			scoreSum, _ := record.Get("score_sum")
+
+			voiceID := strings.TrimSpace(toString(id))
+			total := toInt(totalCalls)
+			average := 0.0
+			if total > 0 {
+				average = toFloat(scoreSum) / float64(total)
+			}
+			sampleConfidence := math.Min(float64(total)/10.0, 1.0)
+			blended := average * sampleConfidence
+			telemetry[voiceID] = model.CouncilVoiceStats{
+				Name:         strings.TrimSpace(toString(name)),
+				Weight:       councilVoiceWeight(blended),
+				Accuracy:     clampGraphSigned(average),
+				CorrectCalls: toInt(correctCalls),
+				TotalCalls:   total,
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return telemetry, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	typed, _ := result.(map[string]model.CouncilVoiceStats)
+	if typed == nil {
+		return stats, nil
+	}
+	return typed, nil
+}
+
 func (c *Client) RecordSignalSeen(ctx context.Context, signalID, deskID, domain string, seenAt time.Time) error {
 	if c == nil || c.driver == nil || strings.TrimSpace(signalID) == "" || strings.TrimSpace(deskID) == "" {
 		return nil
@@ -411,6 +473,9 @@ func (c *Client) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 		if err := c.linkThesisQuantMetrics(ctx, tx, thesis, now); err != nil {
 			return err
 		}
+		if err := c.linkCouncilVerdict(ctx, tx, thesis, now); err != nil {
+			return err
+		}
 		return c.linkThesisEvidence(ctx, tx, thesis, now)
 	})
 }
@@ -588,6 +653,9 @@ func (c *Client) RecordOutcome(ctx context.Context, thesis *model.Thesis, pos *m
 		if err := c.linkOutcomeAttribution(ctx, tx, outcomeID, outcome, closedAt); err != nil {
 			return err
 		}
+		if err := c.updateCouncilVoiceAccuracy(ctx, tx, thesis, outcome, closedAt); err != nil {
+			return err
+		}
 		return c.linkSurpriseValidation(ctx, tx, thesis, outcomeID, outcome, closedAt)
 	})
 }
@@ -736,6 +804,102 @@ func (c *Client) linkThesisQuantMetrics(ctx context.Context, tx neo4j.ManagedTra
 			},
 		)
 	}
+	return nil
+}
+
+func (c *Client) linkCouncilVerdict(ctx context.Context, tx neo4j.ManagedTransaction, thesis *model.Thesis, now time.Time) error {
+	if thesis == nil || thesis.CouncilVerdict == nil {
+		return nil
+	}
+
+	verdictID := thesis.ID + ":council"
+	verdict := thesis.CouncilVerdict
+	if err := runQuery(ctx, tx, `
+		MERGE (v:ThesisVerdict {id: $id})
+		SET v.thesis_id = $thesis_id,
+		    v.approved = $approved,
+		    v.adjusted_size = $adjusted_size,
+		    v.adjusted_conviction = $adjusted_conviction,
+		    v.weighted_vote_score = $weighted_vote_score,
+		    v.total_weight = $total_weight,
+		    v.updated_at = $updated_at`,
+		map[string]any{
+			"id":                  verdictID,
+			"thesis_id":           thesis.ID,
+			"approved":            verdict.Approved,
+			"adjusted_size":       verdict.AdjustedSize,
+			"adjusted_conviction": verdict.AdjustedConviction,
+			"weighted_vote_score": verdict.WeightedVoteScore,
+			"total_weight":        verdict.TotalWeight,
+			"updated_at":          now,
+		},
+	); err != nil {
+		return err
+	}
+	if err := runQuery(ctx, tx, `
+		MATCH (t:Thesis {id: $thesis_id})
+		MATCH (v:ThesisVerdict {id: $verdict_id})
+		MERGE (t)-[r:COUNCIL_REVIEWED]->(v)
+		SET r.observed_time = $updated_at,
+		    r.decision_time = $updated_at`,
+		map[string]any{
+			"thesis_id":  thesis.ID,
+			"verdict_id": verdictID,
+			"updated_at": now,
+		},
+	); err != nil {
+		return err
+	}
+
+	for _, voice := range verdict.Voices {
+		voiceID := strings.TrimSpace(voice.Name)
+		if voiceID == "" {
+			continue
+		}
+		if err := runQuery(ctx, tx, `
+			MERGE (cv:CouncilVoice {id: $id})
+			SET cv.name = $name,
+			    cv.updated_at = $updated_at`,
+			map[string]any{
+				"id":         voiceID,
+				"name":       voice.Name,
+				"updated_at": now,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MATCH (cv:CouncilVoice {id: $voice_id})
+			MATCH (v:ThesisVerdict {id: $verdict_id})
+			MERGE (cv)-[r:CONTRIBUTED_TO]->(v)
+			SET r.perspective = $perspective,
+			    r.reasoning = $reasoning,
+			    r.recommendation = $recommendation,
+			    r.conviction_adjustment = $conviction_adjustment,
+			    r.size_adjustment = $size_adjustment,
+			    r.weight = $weight,
+			    r.historical_accuracy = $historical_accuracy,
+			    r.observations = $observations,
+			    r.observed_time = $updated_at,
+			    r.decision_time = $updated_at`,
+			map[string]any{
+				"voice_id":              voiceID,
+				"verdict_id":            verdictID,
+				"perspective":           strings.TrimSpace(voice.Perspective),
+				"reasoning":             strings.TrimSpace(voice.Reasoning),
+				"recommendation":        string(voice.Recommendation),
+				"conviction_adjustment": voice.ConvictionAdjustment,
+				"size_adjustment":       voice.SizeAdjustment,
+				"weight":                voice.Weight,
+				"historical_accuracy":   voice.HistoricalAccuracy,
+				"observations":          voice.Observations,
+				"updated_at":            now,
+			},
+		); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -922,6 +1086,189 @@ func (c *Client) linkOutcomeAttribution(ctx context.Context, tx neo4j.ManagedTra
 	}
 
 	return nil
+}
+
+func (c *Client) updateCouncilVoiceAccuracy(ctx context.Context, tx neo4j.ManagedTransaction, thesis *model.Thesis, outcome *model.ThesisOutcome, closedAt time.Time) error {
+	if thesis == nil || thesis.CouncilVerdict == nil || len(thesis.CouncilVerdict.Voices) == 0 || outcome == nil || outcome.Attribution == nil {
+		return nil
+	}
+
+	domainID := strings.TrimSpace(thesis.Domain)
+	if domainID == "" {
+		domainID = "unknown"
+	}
+	if err := runQuery(ctx, tx, `
+		MERGE (d:Domain {id: $id})
+		SET d.name = $name,
+		    d.updated_at = $updated_at`,
+		map[string]any{
+			"id":         domainID,
+			"name":       domainID,
+			"updated_at": closedAt,
+		},
+	); err != nil {
+		return err
+	}
+
+	for _, voice := range thesis.CouncilVerdict.Voices {
+		voiceID := strings.TrimSpace(voice.Name)
+		if voiceID == "" {
+			continue
+		}
+		if err := runQuery(ctx, tx, `
+			MERGE (cv:CouncilVoice {id: $id})
+			SET cv.name = $name,
+			    cv.updated_at = $updated_at`,
+			map[string]any{
+				"id":         voiceID,
+				"name":       voice.Name,
+				"updated_at": closedAt,
+			},
+		); err != nil {
+			return err
+		}
+
+		score, counted := councilVoiceContributionScore(voice, outcome.Attribution)
+		if !counted {
+			continue
+		}
+		correctIncrement := 0
+		if score > 0 {
+			correctIncrement = 1
+		}
+		if err := runQuery(ctx, tx, `
+			MATCH (cv:CouncilVoice {id: $voice_id})
+			MATCH (d:Domain {id: $domain_id})
+			MERGE (cv)-[r:ACCURACY]->(d)
+			ON CREATE SET r.correct_calls = 0,
+			              r.total_calls = 0,
+			              r.score_sum = 0.0
+			SET r.correct_calls = coalesce(r.correct_calls, 0) + $correct_increment,
+			    r.total_calls = coalesce(r.total_calls, 0) + 1,
+			    r.score_sum = coalesce(r.score_sum, 0.0) + $score,
+			    r.last_score = $score,
+			    r.last_recommendation = $recommendation,
+			    r.last_weight = $weight,
+			    r.last_observed_at = $updated_at,
+			    r.updated_at = $updated_at`,
+			map[string]any{
+				"voice_id":          voiceID,
+				"domain_id":         domainID,
+				"correct_increment": correctIncrement,
+				"score":             score,
+				"recommendation":    string(voice.Recommendation),
+				"weight":            voice.Weight,
+				"updated_at":        closedAt,
+			},
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func councilVoiceContributionScore(voice model.CouncilVoiceContribution, attr *model.OutcomeAttribution) (float64, bool) {
+	if attr == nil {
+		return 0, false
+	}
+
+	orientation := councilVoiceOrientation(voice)
+	if orientation == 0 {
+		return 0, false
+	}
+
+	outcomeScore := clampGraphSigned(
+		(attr.TruthEdge * 0.40) +
+			(attr.TimingEdge * 0.20) +
+			(attr.ExpressionEdge * 0.25) +
+			(attr.ExecutionEdge * 0.15),
+	)
+	if math.Abs(outcomeScore) < 0.05 {
+		return 0, false
+	}
+
+	intensity := math.Max(math.Abs(voice.ConvictionAdjustment), math.Abs(voice.SizeAdjustment-1))
+	if intensity < 0.05 {
+		intensity = 0.05
+	}
+	intensity = math.Min(intensity*4, 1)
+	score := outcomeScore * float64(orientation) * intensity
+	return clampGraphSigned(score), true
+}
+
+func councilVoiceOrientation(voice model.CouncilVoiceContribution) int {
+	switch normalizeCouncilRecommendation(voice.Recommendation) {
+	case model.CouncilApprove:
+		return 1
+	case model.CouncilReject, model.CouncilAbstain:
+		return -1
+	}
+	if voice.ConvictionAdjustment >= 0.05 {
+		return 1
+	}
+	if voice.ConvictionAdjustment <= -0.05 || voice.SizeAdjustment < 0.9 {
+		return -1
+	}
+	return 0
+}
+
+func normalizeCouncilRecommendation(value model.CouncilRecommendation) model.CouncilRecommendation {
+	switch value {
+	case model.CouncilApprove, model.CouncilReject, model.CouncilAbstain:
+		return value
+	default:
+		return model.CouncilAbstain
+	}
+}
+
+func councilVoiceWeight(score float64) float64 {
+	return math.Max(0.75, math.Min(1.35, 1+(score*0.35)))
+}
+
+func toString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return fmt.Sprintf("%v", value)
+	}
+}
+
+func toInt(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case int32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	default:
+		return 0
+	}
+}
+
+func toFloat(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	default:
+		return 0
+	}
 }
 
 func (c *Client) RecordAntiPortfolio(ctx context.Context, thesis *model.Thesis, reason string) error {

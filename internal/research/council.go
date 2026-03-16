@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +20,7 @@ type Council struct {
 	log        *slog.Logger
 	llm        *llm.Router
 	archetypes []Archetype
+	telemetry  VoiceTelemetryProvider
 }
 
 const (
@@ -26,16 +29,25 @@ const (
 )
 
 type perspectiveResult struct {
-	name       string
-	view       string
-	conviction float64
-	size       float64
+	name           string
+	view           string
+	reasoning      string
+	recommendation model.CouncilRecommendation
+	conviction     float64
+	size           float64
+	weight         float64
+	accuracy       float64
+	observations   int
 }
 
 // Archetype represents a strategic perspective for council debate.
 type Archetype struct {
 	Name   string // e.g. "Fundamental", "Contrarian", "Macro", "Tail", "Scalper"
 	Prompt string // System prompt defining this archetype's perspective
+}
+
+type VoiceTelemetryProvider interface {
+	CouncilVoiceTelemetry(ctx context.Context, domain string) (map[string]model.CouncilVoiceStats, error)
 }
 
 func NewCouncil(llmRouter *llm.Router) *Council {
@@ -47,38 +59,67 @@ func NewCouncil(llmRouter *llm.Router) *Council {
 				Name: "Fundamental",
 				Prompt: `You are a fundamental analyst on the trading council. Evaluate this thesis purely on numbers and fundamentals.
 Ask: Do the financials support this? What are the valuation multiples? Is growth priced in? What do margins look like?
-Respond in JSON: {"perspective": "...", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
+Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
 			},
 			{
 				Name: "Contrarian",
 				Prompt: `You are the contrarian voice on the trading council. Your job is to check if this trade is already crowded.
 Ask: Is everyone already positioned this way? Is this the obvious trade? What happens if the crowd reverses? Where is the pain trade?
-Respond in JSON: {"perspective": "...", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
+Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
 			},
 			{
 				Name: "Macro",
 				Prompt: `You are the macro strategist on the trading council. Evaluate whether the macro regime supports this thesis.
 Ask: Does the rate environment help or hurt? What is the vol regime? Is risk appetite expanding or contracting? Does this trade fight the Fed?
-Respond in JSON: {"perspective": "...", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
+Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
 			},
 			{
 				Name: "Tail",
 				Prompt: `You are the tail risk analyst on the trading council. Your job is to find the worst case scenario.
 Ask: What kills this trade? What is the max loss? Is there gap risk? What black swan event invalidates the thesis? Is the risk/reward actually asymmetric?
-Respond in JSON: {"perspective": "...", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
+Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
 			},
 			{
 				Name: "Timing",
 				Prompt: `You are the timing/execution specialist on the trading council. Evaluate whether the entry timing is right.
 Ask: Is the market trending or mean-reverting? Are we chasing? Is there a better entry? What does the order flow look like? Should we wait for a pullback?
-Respond in JSON: {"perspective": "...", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
+Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
+			},
+			{
+				Name: "Market-Implied",
+				Prompt: `You are the market-implied voice on the trading council. Your job is to ask what is already priced in.
+Ask: Does recent price action already reflect the thesis? Does implied move or skew already encode the event? Is the reaction gap actually large enough to trade?
+Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
+			},
+			{
+				Name: "Source-Forensics",
+				Prompt: `You are the source-forensics voice on the trading council. Your job is to challenge the evidence integrity.
+Ask: Is this primary reporting or copy-derived? Are the sources independent? Is there contradiction, manipulation risk, or weak provenance? Is the signal too stale or too social-noise heavy?
+Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
+			},
+			{
+				Name: "Execution-Microstructure",
+				Prompt: `You are the execution and microstructure voice on the trading council. Your job is to challenge whether this expression can actually be entered and exited cleanly.
+Ask: Is the structure liquid enough? Does the quant profile show acceptable max loss and margin? Are we likely to suffer slippage or poor fills? Is there a cleaner structure to express the same view?
+Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
+			},
+			{
+				Name: "Abstain",
+				Prompt: `You are the abstain voice on the trading council. Your job is to defend the null hypothesis and explain why we should do nothing.
+Ask: What is the strongest reason to stay flat? What information is missing? Is there a better waiting point or cleaner setup later? Are we overfitting weak evidence into a trade?
+Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
 			},
 		},
 	}
 }
 
+func (c *Council) SetVoiceTelemetryProvider(provider VoiceTelemetryProvider) {
+	c.telemetry = provider
+}
+
 // Debate convenes all archetypes to evaluate a thesis in parallel.
 func (c *Council) Debate(ctx context.Context, thesis *model.Thesis) *model.CouncilVerdict {
+	telemetry := c.voiceTelemetry(ctx, thesis.Domain)
 	thesisPrompt := fmt.Sprintf(`Thesis under council review:
 
 Symbol: %s (%s)
@@ -137,6 +178,7 @@ Quant Metrics:
 
 			var pr struct {
 				Perspective          string  `json:"perspective"`
+				Recommendation       string  `json:"recommendation"`
 				ConvictionAdjustment float64 `json:"conviction_adjustment"`
 				SizeAdjustment       float64 `json:"size_adjustment"`
 				Reasoning            string  `json:"reasoning"`
@@ -150,12 +192,18 @@ Quant Metrics:
 				return
 			}
 
+			stats := telemetry[a.Name]
 			mu.Lock()
 			results = append(results, perspectiveResult{
-				name:       a.Name,
-				view:       pr.Perspective,
-				conviction: pr.ConvictionAdjustment,
-				size:       pr.SizeAdjustment,
+				name:           a.Name,
+				view:           pr.Perspective,
+				reasoning:      strings.TrimSpace(pr.Reasoning),
+				recommendation: normalizeRecommendation(pr.Recommendation, pr.ConvictionAdjustment, pr.SizeAdjustment),
+				conviction:     clampCouncilAdjustment(pr.ConvictionAdjustment),
+				size:           normalizeSizeAdjustment(pr.SizeAdjustment),
+				weight:         normalizeVoiceWeight(stats.Weight),
+				accuracy:       stats.Accuracy,
+				observations:   stats.TotalCalls,
 			})
 			mu.Unlock()
 		}(arch)
@@ -177,17 +225,37 @@ func (c *Council) synthesize(thesis *model.Thesis, results []perspectiveResult) 
 	}
 
 	perspectives := make(map[string]string, len(results))
+	voices := make([]model.CouncilVoiceContribution, 0, len(results))
 	totalConvAdj := 0.0
 	totalSizeAdj := 0.0
+	totalWeight := 0.0
+	voteScore := 0.0
 
 	for _, r := range results {
 		perspectives[r.name] = r.view
-		totalConvAdj += r.conviction
-		totalSizeAdj += r.size
+		totalConvAdj += r.conviction * r.weight
+		totalSizeAdj += r.size * r.weight
+		totalWeight += r.weight
+		voteScore += councilVoteScore(r)
+		voices = append(voices, model.CouncilVoiceContribution{
+			Name:                 r.name,
+			Perspective:          r.view,
+			Reasoning:            r.reasoning,
+			Recommendation:       r.recommendation,
+			ConvictionAdjustment: r.conviction,
+			SizeAdjustment:       r.size,
+			Weight:               r.weight,
+			HistoricalAccuracy:   r.accuracy,
+			Observations:         r.observations,
+		})
 	}
 
-	avgConvAdj := totalConvAdj / float64(len(results))
-	avgSizeAdj := totalSizeAdj / float64(len(results))
+	if totalWeight <= 0 {
+		totalWeight = float64(len(results))
+	}
+
+	avgConvAdj := totalConvAdj / totalWeight
+	avgSizeAdj := totalSizeAdj / totalWeight
 
 	if avgSizeAdj <= 0 {
 		avgSizeAdj = 1.0
@@ -203,22 +271,26 @@ func (c *Council) synthesize(thesis *model.Thesis, results []perspectiveResult) 
 
 	adjustedSize := thesis.PositionSize * avgSizeAdj
 
-	// Approved if majority didn't strongly oppose (avg conviction adj > -0.1)
-	approved := avgConvAdj > -0.1
+	approved := voteScore > 0 && avgConvAdj > -0.12
 
 	c.log.Info("council verdict",
 		"thesis_id", thesis.ID,
 		"approved", approved,
 		"avg_conviction_adj", avgConvAdj,
 		"avg_size_adj", avgSizeAdj,
+		"vote_score", voteScore,
+		"total_weight", totalWeight,
 		"perspectives", len(results),
 	)
 
 	return &model.CouncilVerdict{
 		Approved:           approved,
 		Perspectives:       perspectives,
+		Voices:             voices,
 		AdjustedSize:       adjustedSize,
 		AdjustedConviction: adjustedConviction,
+		WeightedVoteScore:  voteScore,
+		TotalWeight:        totalWeight,
 	}
 }
 
@@ -227,4 +299,81 @@ func prosecutionVerdict(p *model.Prosecution) string {
 		return "not prosecuted"
 	}
 	return p.Verdict
+}
+
+func (c *Council) voiceTelemetry(ctx context.Context, domain string) map[string]model.CouncilVoiceStats {
+	if c.telemetry == nil {
+		return map[string]model.CouncilVoiceStats{}
+	}
+	stats, err := c.telemetry.CouncilVoiceTelemetry(ctx, domain)
+	if err != nil {
+		c.log.Warn("council telemetry lookup failed", "domain", domain, "error", err)
+		return map[string]model.CouncilVoiceStats{}
+	}
+	return stats
+}
+
+func normalizeRecommendation(raw string, convictionAdj, sizeAdj float64) model.CouncilRecommendation {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "approve", "support", "buy", "go":
+		return model.CouncilApprove
+	case "reject", "oppose", "deny", "block":
+		return model.CouncilReject
+	case "abstain", "wait", "hold", "pass", "flat":
+		return model.CouncilAbstain
+	}
+	if convictionAdj <= -0.05 || sizeAdj < 0.85 {
+		return model.CouncilReject
+	}
+	if convictionAdj >= 0.05 || sizeAdj > 1.05 {
+		return model.CouncilApprove
+	}
+	return model.CouncilAbstain
+}
+
+func normalizeSizeAdjustment(size float64) float64 {
+	if size <= 0 {
+		return 1
+	}
+	if size < 0.5 {
+		return 0.5
+	}
+	if size > 1.5 {
+		return 1.5
+	}
+	return size
+}
+
+func clampCouncilAdjustment(value float64) float64 {
+	if value > 0.2 {
+		return 0.2
+	}
+	if value < -0.2 {
+		return -0.2
+	}
+	return value
+}
+
+func normalizeVoiceWeight(weight float64) float64 {
+	if weight <= 0 {
+		return 1
+	}
+	return math.Max(0.75, math.Min(1.35, weight))
+}
+
+func councilVoteScore(result perspectiveResult) float64 {
+	weight := normalizeVoiceWeight(result.weight)
+	strength := math.Max(math.Abs(result.conviction), math.Abs(result.size-1))
+	if strength < 0.05 {
+		strength = 0.05
+	}
+	score := weight * (1 + strength)
+	switch result.recommendation {
+	case model.CouncilApprove:
+		return score
+	case model.CouncilReject, model.CouncilAbstain:
+		return -score
+	default:
+		return 0
+	}
 }

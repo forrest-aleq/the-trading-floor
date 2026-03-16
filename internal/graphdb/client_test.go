@@ -31,15 +31,18 @@ func TestSchemaStatementsIncludeCoreConstraints(t *testing.T) {
 	required := []string{
 		"Signal",
 		"Thesis",
+		"ThesisVerdict",
 		"Position",
 		"Outcome",
 		"Attribution",
 		"Desk",
+		"CouncilVoice",
 		"CompetenceState",
 		"QuantQuery",
 		"Entity",
 		"Instrument",
 		"Source",
+		"Domain",
 	}
 	for _, want := range required {
 		found := false

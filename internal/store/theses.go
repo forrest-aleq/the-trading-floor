@@ -170,7 +170,7 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	row := db.Pool.QueryRow(ctx,
 		`SELECT instrument, direction, strategy, conviction, health, evidence, counter_args,
 		        structure, legs,
-		        entry_price, target_price, stop_loss, position_size, prosecution, status,
+		        entry_price, target_price, stop_loss, position_size, prosecution, council_verdict, status,
 		        autonomy_mode, scan_territory, execution_territory, competence_key,
 		        competence_trust, competence_confidence, market_context, surprise_assessment, quant_metrics, domain
 		   FROM theses
@@ -184,6 +184,7 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	var evidence []byte
 	var counterArgs []byte
 	var prosecution []byte
+	var councilVerdict []byte
 	var marketContext []byte
 	var surpriseAssessment []byte
 	var quantMetrics []byte
@@ -206,6 +207,7 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 		&thesis.StopLoss,
 		&thesis.PositionSize,
 		&prosecution,
+		&councilVerdict,
 		&status,
 		&autonomyMode,
 		&thesis.ScanTerritory,
@@ -252,6 +254,11 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	}
 	if len(prosecution) > 0 {
 		if err := json.Unmarshal(prosecution, &thesis.Prosecution); err != nil {
+			return nil, err
+		}
+	}
+	if len(councilVerdict) > 0 {
+		if err := json.Unmarshal(councilVerdict, &thesis.CouncilVerdict); err != nil {
 			return nil, err
 		}
 	}

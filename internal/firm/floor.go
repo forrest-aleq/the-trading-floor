@@ -2,6 +2,7 @@ package firm
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"strconv"
@@ -282,6 +283,13 @@ func (f *Floor) persistSignal(ctx context.Context, sig signal.Signal) {
 	}
 	if db != nil {
 		if err := db.UpsertSignal(ctx, sig); err != nil {
+			if errors.Is(err, store.ErrDuplicateSignalContentHash) {
+				f.log.Debug("ingress signal content duplicate",
+					"signal_id", sig.ID,
+					"source", sig.Source,
+				)
+				return
+			}
 			f.log.Warn("persist ingress signal failed",
 				"signal_id", sig.ID,
 				"source", sig.Source,

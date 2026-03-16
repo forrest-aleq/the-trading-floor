@@ -3,11 +3,15 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/hnic/trading-floor/pkg/signal"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+var ErrDuplicateSignalContentHash = errors.New("duplicate signal content hash")
 
 func (db *DB) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 	entities, err := json.Marshal(sig.Entities)
@@ -60,6 +64,19 @@ func (db *DB) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 		sig.ContentHash,
 		sig.Timestamp,
 	)
+	return classifySignalWriteError(err)
+}
+
+func classifySignalWriteError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_signals_content_hash" {
+		return ErrDuplicateSignalContentHash
+	}
+
 	return err
 }
 

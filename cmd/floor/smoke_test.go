@@ -220,12 +220,25 @@ func TestSmokeFullPipeline(t *testing.T) {
 	}
 
 	states := beliefGraph.All()
-	if len(states) != 2 {
-		t.Fatalf("expected 2 belief states, got %d", len(states))
+	if len(states) != 6 {
+		t.Fatalf("expected 6 belief states after dimensional attribution, got %d", len(states))
+	}
+
+	expectedFailures := map[string]int{
+		belief.CompetenceKey("test-desk", "scan", "corporate", regimeKey):          21,
+		belief.CompetenceKey("test-desk", "event", "STK", regimeKey):               21,
+		belief.CompetenceKey("test-desk", "thesis_assessment", "event", regimeKey): 1,
+		belief.CompetenceKey("test-desk", "timing_assessment", "event", regimeKey): 1,
+		belief.CompetenceKey("test-desk", "structure_selection", "STK", regimeKey): 1,
+		belief.CompetenceKey("test-desk", "execution_quality", "STK", regimeKey):   1,
 	}
 	for _, state := range states {
-		if state.FailureCount != 21 {
-			t.Fatalf("expected seeded failure count to increment to 21, got %+v", state)
+		want, ok := expectedFailures[state.Key]
+		if !ok {
+			t.Fatalf("unexpected competence state: %+v", state)
+		}
+		if state.FailureCount != want {
+			t.Fatalf("expected failure count %d for %s, got %+v", want, state.Key, state)
 		}
 	}
 

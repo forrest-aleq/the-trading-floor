@@ -87,6 +87,76 @@ func (c *Client) UpsertDesk(ctx context.Context, deskID, domain, abGroup string)
 	})
 }
 
+func (c *Client) UpsertCompetenceState(ctx context.Context, state *model.CompetenceState) error {
+	if c == nil || c.driver == nil || state == nil || strings.TrimSpace(state.Key) == "" {
+		return nil
+	}
+
+	updatedAt := state.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+
+	return c.executeWrite(ctx, func(tx neo4j.ManagedTransaction) error {
+		if err := runQuery(ctx, tx, `
+			MERGE (c:CompetenceState {key: $key})
+			SET c.desk_id = $desk_id,
+			    c.capability = $capability,
+			    c.context = $context,
+			    c.regime = $regime,
+			    c.trust = $trust,
+			    c.confidence = $confidence,
+			    c.success_count = $success_count,
+			    c.failure_count = $failure_count,
+			    c.total_pnl = $total_pnl,
+			    c.sharpe = $sharpe,
+			    c.autonomy_mode = $autonomy_mode,
+			    c.updated_at = $updated_at`,
+			map[string]any{
+				"key":           state.Key,
+				"desk_id":       strings.TrimSpace(state.DeskID),
+				"capability":    strings.TrimSpace(state.Capability),
+				"context":       strings.TrimSpace(state.Context),
+				"regime":        strings.TrimSpace(state.Regime),
+				"trust":         state.Trust,
+				"confidence":    state.Confidence,
+				"success_count": state.SuccessCount,
+				"failure_count": state.FailureCount,
+				"total_pnl":     state.TotalPnL,
+				"sharpe":        state.Sharpe,
+				"autonomy_mode": string(state.Autonomy),
+				"updated_at":    updatedAt,
+			},
+		); err != nil {
+			return err
+		}
+		if strings.TrimSpace(state.DeskID) == "" {
+			return nil
+		}
+		if err := runQuery(ctx, tx, `
+			MERGE (d:Desk {id: $desk_id})
+			SET d.updated_at = $updated_at`,
+			map[string]any{
+				"desk_id":    strings.TrimSpace(state.DeskID),
+				"updated_at": updatedAt,
+			},
+		); err != nil {
+			return err
+		}
+		return runQuery(ctx, tx, `
+			MATCH (d:Desk {id: $desk_id})
+			MATCH (c:CompetenceState {key: $key})
+			MERGE (d)-[r:HAS_COMPETENCE]->(c)
+			SET r.updated_at = $updated_at`,
+			map[string]any{
+				"desk_id":    strings.TrimSpace(state.DeskID),
+				"key":        state.Key,
+				"updated_at": updatedAt,
+			},
+		)
+	})
+}
+
 func (c *Client) RecordSignalSeen(ctx context.Context, signalID, deskID, domain string, seenAt time.Time) error {
 	if c == nil || c.driver == nil || strings.TrimSpace(signalID) == "" || strings.TrimSpace(deskID) == "" {
 		return nil
@@ -492,7 +562,7 @@ func (c *Client) RecordOutcome(ctx context.Context, thesis *model.Thesis, pos *m
 			}
 		}
 		if pos != nil && pos.ID != "" {
-			return runQuery(ctx, tx, `
+			if err := runQuery(ctx, tx, `
 				MATCH (p:Position {id: $position_id})
 				MATCH (o:Outcome {id: $outcome_id})
 				MERGE (p)-[r:RESOLVED_WITH]->(o)
@@ -504,10 +574,106 @@ func (c *Client) RecordOutcome(ctx context.Context, thesis *model.Thesis, pos *m
 					"outcome_id":  outcomeID,
 					"closed_at":   closedAt,
 				},
-			)
+			); err != nil {
+				return err
+			}
 		}
-		return nil
+		return c.linkOutcomeAttribution(ctx, tx, outcomeID, outcome, closedAt)
 	})
+}
+
+func (c *Client) linkOutcomeAttribution(ctx context.Context, tx neo4j.ManagedTransaction, outcomeID string, outcome *model.ThesisOutcome, closedAt time.Time) error {
+	if outcome == nil || outcome.Attribution == nil {
+		return nil
+	}
+
+	attr := outcome.Attribution
+	attributionID := outcomeID + ":attribution"
+
+	if err := runQuery(ctx, tx, `
+		MERGE (a:Attribution {id: $id})
+		SET a.truth_edge = $truth_edge,
+		    a.timing_edge = $timing_edge,
+		    a.expression_edge = $expression_edge,
+		    a.execution_edge = $execution_edge,
+		    a.luck_estimate = $luck_estimate,
+		    a.method = $method,
+		    a.summary = $summary,
+		    a.updated_at = $updated_at`,
+		map[string]any{
+			"id":              attributionID,
+			"truth_edge":      attr.TruthEdge,
+			"timing_edge":     attr.TimingEdge,
+			"expression_edge": attr.ExpressionEdge,
+			"execution_edge":  attr.ExecutionEdge,
+			"luck_estimate":   attr.LuckEstimate,
+			"method":          strings.TrimSpace(attr.Method),
+			"summary":         strings.TrimSpace(attr.Summary),
+			"updated_at":      closedAt,
+		},
+	); err != nil {
+		return err
+	}
+	if err := runQuery(ctx, tx, `
+		MATCH (o:Outcome {id: $outcome_id})
+		MATCH (a:Attribution {id: $attribution_id})
+		MERGE (o)-[r:ATTRIBUTED]->(a)
+		SET r.truth_edge = $truth_edge,
+		    r.timing_edge = $timing_edge,
+		    r.expression_edge = $expression_edge,
+		    r.execution_edge = $execution_edge,
+		    r.luck_estimate = $luck_estimate,
+		    r.observed_time = $closed_at,
+		    r.decision_time = $closed_at`,
+		map[string]any{
+			"outcome_id":      outcomeID,
+			"attribution_id":  attributionID,
+			"truth_edge":      attr.TruthEdge,
+			"timing_edge":     attr.TimingEdge,
+			"expression_edge": attr.ExpressionEdge,
+			"execution_edge":  attr.ExecutionEdge,
+			"luck_estimate":   attr.LuckEstimate,
+			"closed_at":       closedAt,
+		},
+	); err != nil {
+		return err
+	}
+
+	for _, update := range attr.CompetenceUpdates {
+		if strings.TrimSpace(update.Key) == "" {
+			continue
+		}
+		if err := runQuery(ctx, tx, `
+			MERGE (c:CompetenceState {key: $key})
+			ON CREATE SET c.created_at = $updated_at
+			SET c.updated_at = $updated_at`,
+			map[string]any{
+				"key":        update.Key,
+				"updated_at": closedAt,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MATCH (a:Attribution {id: $attribution_id})
+			MATCH (c:CompetenceState {key: $key})
+			MERGE (a)-[r:UPDATED {dimension: $dimension}]->(c)
+			SET r.score = $score,
+			    r.observed_time = $updated_at,
+			    r.decision_time = $updated_at`,
+			map[string]any{
+				"attribution_id": attributionID,
+				"key":            update.Key,
+				"dimension":      strings.TrimSpace(update.Dimension),
+				"score":          update.Score,
+				"updated_at":     closedAt,
+			},
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (c *Client) RecordAntiPortfolio(ctx context.Context, thesis *model.Thesis, reason string) error {

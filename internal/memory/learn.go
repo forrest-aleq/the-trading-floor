@@ -26,12 +26,17 @@ func NewLearnWorker(graph *belief.Graph, engrams *EngramStore) *LearnWorker {
 
 // ProcessOutcome handles a completed trade
 func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.ThesisOutcome, regime model.Regime) {
+	attribution := ensureOutcomeAttribution(thesis, outcome)
 	capability := thesis.ExecutionCapability()
 	key := belief.CompetenceKey(thesis.DeskID, thesis.Strategy, capability, regime.Key())
 	scanKey := ""
 	if thesis.Domain != "" {
 		scanKey = belief.CompetenceKey(thesis.DeskID, "scan", thesis.Domain, regime.Key())
 	}
+	thesisKey := belief.CompetenceKey(thesis.DeskID, competenceThesisAssessment, thesis.Strategy, regime.Key())
+	timingKey := belief.CompetenceKey(thesis.DeskID, competenceTimingAssessment, thesis.Strategy, regime.Key())
+	structureKey := belief.CompetenceKey(thesis.DeskID, competenceStructureSelect, capability, regime.Key())
+	executionKey := belief.CompetenceKey(thesis.DeskID, competenceExecutionQuality, capability, regime.Key())
 
 	// Calculate magnitude: realized_return / expected_risk, clamped to [-2, 2]
 	expectedRisk := math.Abs(thesis.EntryPrice - thesis.StopLoss)
@@ -68,20 +73,36 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 		}
 	}
 
-	if outcome.Profitable {
-		l.graph.ApplySuccess(key, magnitude)
-		if scanKey != "" {
-			l.graph.ApplySuccess(scanKey, magnitude)
+	updates := make([]model.AttributionUpdate, 0, 6)
+	recordUpdate := func(competenceKey, dimension string, score float64, boundary bool) {
+		if competenceKey == "" {
+			return
 		}
-	} else {
-		l.graph.ApplyFailure(key, magnitude, boundaryViolation)
-		if scanKey != "" {
-			l.graph.ApplyFailure(scanKey, magnitude, boundaryViolation)
+		weightedMagnitude := magnitude * math.Abs(clampSigned(score)) * learningWeight(attribution)
+		if weightedMagnitude < 0.05 {
+			return
 		}
+		if score >= 0 {
+			l.graph.ApplySuccess(competenceKey, weightedMagnitude)
+		} else {
+			l.graph.ApplyFailure(competenceKey, weightedMagnitude, boundary)
+		}
+		updates = append(updates, model.AttributionUpdate{
+			Key:       competenceKey,
+			Dimension: dimension,
+			Score:     clampSigned(score),
+		})
 	}
+	recordUpdate(key, "overall", overallAttributionScore(attribution), boundaryViolation)
+	recordUpdate(scanKey, "truth_edge", attribution.TruthEdge, boundaryViolation)
+	recordUpdate(thesisKey, "truth_edge", attribution.TruthEdge, boundaryViolation)
+	recordUpdate(timingKey, "timing_edge", attribution.TimingEdge, boundaryViolation)
+	recordUpdate(structureKey, "expression_edge", attribution.ExpressionEdge, boundaryViolation)
+	recordUpdate(executionKey, "execution_edge", attribution.ExecutionEdge, boundaryViolation)
+	attribution.CompetenceUpdates = updates
 
 	// Record engram for pattern caching
-	if l.engrams != nil {
+	if l.engrams != nil && learningWeight(attribution) >= 0.25 {
 		intentKey := thesis.Strategy + "_" + capability
 		globalContextPattern := thesis.Strategy + "_" + regime.Key()
 		deskContextPattern := thesis.DisplaySymbol() + "_" + regime.Key()
@@ -89,6 +110,7 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 		if thesis.EntryPrice > 0 {
 			returnPct = outcome.RealizedPnL / (thesis.EntryPrice * thesis.PositionSize) * 100
 		}
+		engramsProfitable := overallAttributionScore(attribution) > 0
 
 		// Layer 1: cross-desk playbook memory.
 		l.engrams.Record(
@@ -97,7 +119,7 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 			thesis.Strategy,
 			"",
 			[]string{regime.Volatility, regime.Trend, regime.Risk},
-			outcome.Profitable,
+			engramsProfitable,
 			returnPct,
 		)
 
@@ -108,7 +130,7 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 			thesis.Strategy,
 			thesis.DeskID,
 			[]string{regime.Volatility, regime.Trend, regime.Risk},
-			outcome.Profitable,
+			engramsProfitable,
 			returnPct,
 		)
 	}
@@ -121,6 +143,8 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 		"pnl", outcome.RealizedPnL,
 		"magnitude", magnitude,
 		"boundary_violation", boundaryViolation,
+		"attribution", attributionSummary(attribution),
+		"learning_weight", learningWeight(attribution),
 		"regime", regime.Key(),
 	)
 }

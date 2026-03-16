@@ -249,14 +249,32 @@ type CouncilVerdict struct {
 	AdjustedConviction float64           `json:"adjusted_conviction,omitempty"`
 }
 
+type AttributionUpdate struct {
+	Key       string  `json:"key"`
+	Dimension string  `json:"dimension"`
+	Score     float64 `json:"score"`
+}
+
+type OutcomeAttribution struct {
+	TruthEdge         float64             `json:"truth_edge"`
+	TimingEdge        float64             `json:"timing_edge"`
+	ExpressionEdge    float64             `json:"expression_edge"`
+	ExecutionEdge     float64             `json:"execution_edge"`
+	LuckEstimate      float64             `json:"luck_estimate"`
+	Method            string              `json:"method,omitempty"`
+	Summary           string              `json:"summary,omitempty"`
+	CompetenceUpdates []AttributionUpdate `json:"competence_updates,omitempty"`
+}
+
 type ThesisOutcome struct {
-	Profitable   bool    `json:"profitable"`
-	RealizedPnL  float64 `json:"realized_pnl"`
-	ReturnPct    float64 `json:"return_pct"`
-	RiskReward   float64 `json:"risk_reward"`
-	HoldingHours float64 `json:"holding_hours"`
-	ExitReason   string  `json:"exit_reason"`
-	ErrorClass   string  `json:"error_class,omitempty"` // thesis_failure, execution_friction, infrastructure_error, policy_block, market_halt
+	Profitable   bool                `json:"profitable"`
+	RealizedPnL  float64             `json:"realized_pnl"`
+	ReturnPct    float64             `json:"return_pct"`
+	RiskReward   float64             `json:"risk_reward"`
+	HoldingHours float64             `json:"holding_hours"`
+	ExitReason   string              `json:"exit_reason"`
+	ErrorClass   string              `json:"error_class,omitempty"` // thesis_failure, execution_friction, infrastructure_error, policy_block, market_halt
+	Attribution  *OutcomeAttribution `json:"attribution,omitempty"`
 }
 
 // Order is what gets sent to the risk gate then to IBKR

@@ -129,6 +129,11 @@ func main() {
 			slog.Warn("load competence states failed", "error", err)
 		} else {
 			beliefGraph.Load(states)
+			for _, state := range states {
+				if err := graph.UpsertCompetenceState(ctx, state); err != nil {
+					slog.Warn("persist hydrated competence state to graph failed", "key", state.Key, "error", err)
+				}
+			}
 			slog.Info("competence states hydrated", "count", len(states))
 		}
 
@@ -145,10 +150,19 @@ func main() {
 			if err := db.UpsertCompetenceState(context.Background(), state); err != nil {
 				slog.Warn("persist competence state failed", "key", state.Key, "error", err)
 			}
+			if err := graph.UpsertCompetenceState(context.Background(), state); err != nil {
+				slog.Warn("persist competence state to graph failed", "key", state.Key, "error", err)
+			}
 		})
 		engramStore.SetChangeHandler(func(engram *memory.Engram) {
 			if err := db.UpsertEngram(context.Background(), engramRecordFromMemory(engram)); err != nil {
 				slog.Warn("persist engram failed", "id", engram.ID, "error", err)
+			}
+		})
+	} else if graph != nil {
+		beliefGraph.SetChangeHandler(func(state *model.CompetenceState) {
+			if err := graph.UpsertCompetenceState(context.Background(), state); err != nil {
+				slog.Warn("persist competence state to graph failed", "key", state.Key, "error", err)
 			}
 		})
 	}

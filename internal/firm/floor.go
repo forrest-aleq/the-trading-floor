@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hnic/trading-floor/internal/graphdb"
 	"github.com/hnic/trading-floor/internal/observe"
 	"github.com/hnic/trading-floor/internal/store"
 	"github.com/hnic/trading-floor/internal/trace"
@@ -28,6 +29,7 @@ type Floor struct {
 	desks     []*Desk
 	sessionID string
 	store     *store.DB
+	graph     *graphdb.Client
 	mu        sync.RWMutex
 	once      sync.Once
 
@@ -80,6 +82,12 @@ func (f *Floor) AddDesk(desk *Desk) {
 func (f *Floor) SetStore(db *store.DB) {
 	f.mu.Lock()
 	f.store = db
+	f.mu.Unlock()
+}
+
+func (f *Floor) SetGraph(graph *graphdb.Client) {
+	f.mu.Lock()
+	f.graph = graph
 	f.mu.Unlock()
 }
 
@@ -266,18 +274,27 @@ func (f *Floor) enqueueTask(ctx context.Context, task deskTask) bool {
 func (f *Floor) persistSignal(ctx context.Context, sig signal.Signal) {
 	f.mu.RLock()
 	db := f.store
+	graph := f.graph
 	f.mu.RUnlock()
 
-	if db == nil {
+	if db == nil && graph == nil {
 		return
 	}
-	if err := db.UpsertSignal(ctx, sig); err != nil {
-		f.log.Warn("persist ingress signal failed",
+	if db != nil {
+		if err := db.UpsertSignal(ctx, sig); err != nil {
+			f.log.Warn("persist ingress signal failed",
+				"signal_id", sig.ID,
+				"source", sig.Source,
+				"error", err,
+			)
+		}
+	}
+	if err := graph.UpsertSignal(ctx, sig); err != nil {
+		f.log.Warn("persist ingress signal to graph failed",
 			"signal_id", sig.ID,
 			"source", sig.Source,
 			"error", err,
 		)
-		return
 	}
 	f.log.Debug("ingress signal persisted", "signal_id", sig.ID, "source", sig.Source)
 }

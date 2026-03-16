@@ -9,6 +9,7 @@ import (
 
 	"github.com/hnic/trading-floor/internal/book"
 	"github.com/hnic/trading-floor/internal/execution"
+	"github.com/hnic/trading-floor/internal/graphdb"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
@@ -41,6 +42,7 @@ type Desk struct {
 	learnWorker *memory.LearnWorker
 	engrams     *memory.EngramStore
 	store       *store.DB
+	graph       *graphdb.Client
 	onTrade     func()
 	watchlist   func([]model.Instrument)
 
@@ -70,6 +72,7 @@ type DeskConfig struct {
 	LearnWorker *memory.LearnWorker
 	Engrams     *memory.EngramStore
 	Store       *store.DB
+	Graph       *graphdb.Client
 	OnTrade     func()
 	Watchlist   func([]model.Instrument)
 
@@ -116,6 +119,7 @@ func NewDesk(cfg DeskConfig) *Desk {
 		learnWorker:      cfg.LearnWorker,
 		engrams:          cfg.Engrams,
 		store:            cfg.Store,
+		graph:            cfg.Graph,
 		onTrade:          cfg.OnTrade,
 		watchlist:        cfg.Watchlist,
 		minConviction:    cfg.MinConviction,
@@ -132,6 +136,10 @@ func NewDesk(cfg DeskConfig) *Desk {
 
 // Process handles a single signal through the full pipeline.
 func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
+	if err := d.graph.RecordSignalSeen(ctx, sig.ID, d.ID, d.Domain, time.Now().UTC()); err != nil {
+		d.log.Warn("graph signal seen failed", "signal_id", sig.ID, "error", err)
+	}
+
 	span := trace.FromContext(ctx).WithStage("scanner")
 	ctx = trace.IntoContext(ctx, span)
 	scanTerritory := d.assessScanTerritory()
@@ -643,29 +651,44 @@ func (d *Desk) persistOpportunity(ctx context.Context, opp *model.Opportunity) {
 }
 
 func (d *Desk) persistThesis(ctx context.Context, thesis *model.Thesis) {
-	if d.store == nil || thesis == nil {
+	if thesis == nil {
 		return
 	}
-	if err := d.store.UpsertThesis(ctx, thesis); err != nil {
-		d.log.Warn("persist thesis failed", "thesis_id", thesis.ID, "error", err)
+	if d.store != nil {
+		if err := d.store.UpsertThesis(ctx, thesis); err != nil {
+			d.log.Warn("persist thesis failed", "thesis_id", thesis.ID, "error", err)
+		}
+	}
+	if err := d.graph.UpsertThesis(ctx, thesis); err != nil {
+		d.log.Warn("persist thesis to graph failed", "thesis_id", thesis.ID, "error", err)
 	}
 }
 
 func (d *Desk) persistPosition(ctx context.Context, pos *model.Position) {
-	if d.store == nil || pos == nil {
+	if pos == nil {
 		return
 	}
-	if err := d.store.UpsertPosition(ctx, pos); err != nil {
-		d.log.Warn("persist position failed", "position_id", pos.ID, "error", err)
+	if d.store != nil {
+		if err := d.store.UpsertPosition(ctx, pos); err != nil {
+			d.log.Warn("persist position failed", "position_id", pos.ID, "error", err)
+		}
+	}
+	if err := d.graph.UpsertPosition(ctx, pos); err != nil {
+		d.log.Warn("persist position to graph failed", "position_id", pos.ID, "error", err)
 	}
 }
 
 func (d *Desk) recordAntiPortfolio(ctx context.Context, thesis *model.Thesis, reason string) {
-	if d.store == nil || thesis == nil {
+	if thesis == nil {
 		return
 	}
-	if err := d.store.InsertAntiPortfolio(ctx, thesis, reason); err != nil {
-		d.log.Warn("persist anti-portfolio failed", "thesis_id", thesis.ID, "error", err)
+	if d.store != nil {
+		if err := d.store.InsertAntiPortfolio(ctx, thesis, reason); err != nil {
+			d.log.Warn("persist anti-portfolio failed", "thesis_id", thesis.ID, "error", err)
+		}
+	}
+	if err := d.graph.RecordAntiPortfolio(ctx, thesis, reason); err != nil {
+		d.log.Warn("persist anti-portfolio to graph failed", "thesis_id", thesis.ID, "error", err)
 	}
 }
 

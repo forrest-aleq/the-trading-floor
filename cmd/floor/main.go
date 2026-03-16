@@ -18,6 +18,7 @@ import (
 	"github.com/hnic/trading-floor/internal/execution"
 	"github.com/hnic/trading-floor/internal/execution/ibkr"
 	"github.com/hnic/trading-floor/internal/firm"
+	"github.com/hnic/trading-floor/internal/graphdb"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/memory"
@@ -64,6 +65,15 @@ func main() {
 	} else {
 		defer db.Close()
 		slog.Info("PostgreSQL connected")
+	}
+
+	// --- Neo4j ---
+	graph, err := graphdb.NewFromEnv(ctx)
+	if err != nil {
+		slog.Warn("Neo4j not available — running without graph brain", "error", err)
+	} else if graph != nil {
+		defer graph.Close(ctx)
+		slog.Info("Neo4j connected")
 	}
 
 	// --- IBKR ---
@@ -168,6 +178,7 @@ func main() {
 		"paper":          ibkrClient.IsPaper(),
 		"capital":        1_000_000,
 		"db_persistence": db != nil,
+		"graph_brain":    graph != nil,
 		"desks":          40,
 	})
 
@@ -178,6 +189,7 @@ func main() {
 	// --- Floor + Desks ---
 	floor := firm.NewFloor(wireMgr, sessionID)
 	floor.SetStore(db)
+	floor.SetGraph(graph)
 	desksByID := map[string]*firm.Desk{}
 
 	// 40 desks: 20 Group A (full MARS beliefs) + 20 Group B (control, no belief updates)
@@ -202,11 +214,15 @@ func main() {
 			LearnWorker: learnWorker,
 			Engrams:     engramStore,
 			Store:       db,
+			Graph:       graph,
 			OnTrade:     floor.RecordTrade,
 			Watchlist:   mdMgr.AddInstruments,
 		})
 		desksByID[d.id] = desk
 		floor.AddDesk(desk)
+		if err := graph.UpsertDesk(ctx, d.id, d.domain, d.group); err != nil {
+			slog.Warn("persist desk to graph failed", "desk_id", d.id, "error", err)
+		}
 	}
 
 	// --- Thesis Lookup ---
@@ -271,12 +287,18 @@ func main() {
 		}
 
 		desk := desksByID[pos.DeskID]
+		var thesis *model.Thesis
 		if desk != nil {
-			if thesis, ok := desk.GetThesis(pos.ThesisID); ok {
+			if loaded, ok := desk.GetThesis(pos.ThesisID); ok {
+				thesis = loaded
 				desk.ProcessOutcome(ctx, thesis, outcome)
-			} else if thesis, ok := thesisLookup(pos.ThesisID); ok {
+			} else if loaded, ok := thesisLookup(pos.ThesisID); ok {
+				thesis = loaded
 				desk.ProcessOutcome(ctx, thesis, outcome)
 			}
+		}
+		if err := graph.RecordOutcome(ctx, thesis, pos, outcome, normalizeClosedAt(pos), reason); err != nil {
+			slog.Warn("persist outcome to graph failed", "position_id", pos.ID, "error", err)
 		}
 
 		audit.Record("position_closed", pos.DeskID, pos.ThesisID, map[string]any{
@@ -380,6 +402,13 @@ func oppositeDirection(direction model.TradeDirection) model.TradeDirection {
 		return model.Long
 	}
 	return model.Short
+}
+
+func normalizeClosedAt(pos *model.Position) time.Time {
+	if pos != nil && pos.ClosedAt != nil {
+		return pos.ClosedAt.UTC()
+	}
+	return time.Now().UTC()
 }
 
 func startBeliefDecay(ctx context.Context, graph *belief.Graph) {

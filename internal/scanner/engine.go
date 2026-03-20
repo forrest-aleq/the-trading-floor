@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,11 @@ type Engine struct {
 	log      *slog.Logger
 	llm      *llm.Router
 	minScore float64 // Minimum score to pass (0-100)
+
+	mu                   sync.Mutex
+	llmUnavailableUntil  time.Time
+	llmUnavailableReason string
+	lastCooldownNoticeAt time.Time
 }
 
 var (
@@ -30,6 +36,7 @@ var (
 	scannerContentLimit      = readIntEnv("SCANNER_CONTENT_LIMIT", 500)
 	scannerCompactContentMax = readIntEnv("SCANNER_COMPACT_CONTENT_LIMIT", 220)
 	scannerStaleSignalAge    = readDurationEnv("SCANNER_STALE_SIGNAL_AGE", 6*time.Hour)
+	scannerLLMCooldown       = readDurationEnv("SCANNER_LLM_UNAVAILABLE_COOLDOWN", 20*time.Second)
 )
 
 func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
@@ -84,6 +91,16 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 		return nil, false
 	}
 
+	if until, reason, shouldLog := e.llmCooldown(time.Now().UTC()); !until.IsZero() {
+		if shouldLog {
+			e.log.Warn("scanner skipping LLM requests during backend cooldown",
+				"retry_at", until,
+				"reason", reason,
+			)
+		}
+		return nil, false
+	}
+
 	prompts := []struct {
 		name      string
 		content   string
@@ -108,7 +125,11 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 		resp, err = e.llm.AskJSONWithLimit(reqCtx, llm.TierSpeed, scannerPrompt, candidate.content, candidate.maxTokens, 0.1)
 		cancel()
 		if err == nil {
+			e.clearLLMCooldown()
 			break
+		}
+		if isUnavailableLLMError(err) {
+			e.tripLLMCooldown(time.Now().UTC(), err)
 		}
 		if i == len(prompts)-1 || !isContextWindowError(err) {
 			e.log.Warn("scanner LLM error",
@@ -192,6 +213,57 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 	)
 
 	return opp, true
+}
+
+func (e *Engine) llmCooldown(now time.Time) (time.Time, string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.llmUnavailableUntil.IsZero() || !now.Before(e.llmUnavailableUntil) {
+		return time.Time{}, "", false
+	}
+
+	shouldLog := e.lastCooldownNoticeAt.IsZero() || now.Sub(e.lastCooldownNoticeAt) >= 5*time.Second
+	if shouldLog {
+		e.lastCooldownNoticeAt = now
+	}
+	return e.llmUnavailableUntil, e.llmUnavailableReason, shouldLog
+}
+
+func (e *Engine) tripLLMCooldown(now time.Time, err error) {
+	if scannerLLMCooldown <= 0 {
+		return
+	}
+
+	reason := strings.TrimSpace(err.Error())
+
+	e.mu.Lock()
+	until := now.Add(scannerLLMCooldown)
+	shouldLog := until.After(e.llmUnavailableUntil)
+	if until.After(e.llmUnavailableUntil) {
+		e.llmUnavailableUntil = until
+		e.llmUnavailableReason = reason
+		e.lastCooldownNoticeAt = now
+	}
+	retryAt := e.llmUnavailableUntil
+	e.mu.Unlock()
+
+	if shouldLog {
+		e.log.Warn("scanner entered LLM backend cooldown",
+			"retry_at", retryAt,
+			"cooldown", scannerLLMCooldown,
+			"reason", reason,
+		)
+	}
+}
+
+func (e *Engine) clearLLMCooldown() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.llmUnavailableUntil = time.Time{}
+	e.llmUnavailableReason = ""
+	e.lastCooldownNoticeAt = time.Time{}
 }
 
 func shouldSkipSignal(sig signal.Signal) (bool, string) {
@@ -434,4 +506,22 @@ func isContextWindowError(err error) bool {
 		strings.Contains(message, "context window") ||
 		strings.Contains(message, "too many tokens") ||
 		strings.Contains(message, "maximum context length")
+}
+
+func isUnavailableLLMError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "dial tcp") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "no such host") ||
+		strings.Contains(message, "temporary failure in name resolution") ||
+		strings.Contains(message, "server misbehaving") ||
+		strings.Contains(message, "status 429") ||
+		strings.Contains(message, "status 500") ||
+		strings.Contains(message, "status 502") ||
+		strings.Contains(message, "status 503") ||
+		strings.Contains(message, "status 504")
 }

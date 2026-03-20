@@ -85,6 +85,16 @@ func (s *scannerStubClient) Complete(_ context.Context, req llm.Request) (*llm.R
 	}
 }
 
+type scannerErrorClient struct {
+	requests int
+	err      error
+}
+
+func (s *scannerErrorClient) Complete(_ context.Context, _ llm.Request) (*llm.Response, error) {
+	s.requests++
+	return nil, s.err
+}
+
 func TestEvaluateRetriesCompactPromptOnContextWindowError(t *testing.T) {
 	client := &scannerStubClient{}
 	engine := NewEngine(llm.NewRouter(client, client, client), 70)
@@ -167,6 +177,31 @@ func TestEvaluateSkipsLowIntegrityEvidenceBeforeLLM(t *testing.T) {
 	}
 	if len(client.requests) != 0 {
 		t.Fatalf("expected no LLM request for evidence-gated reject, got %d", len(client.requests))
+	}
+}
+
+func TestEvaluateTripsCooldownOnUnavailableLLM(t *testing.T) {
+	client := &scannerErrorClient{err: fmt.Errorf("http request: Post \"http://127.0.0.1:1234/v1/chat/completions\": dial tcp 127.0.0.1:1234: connect: connection refused")}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	sig := signal.Signal{
+		ID:         "sig-llm-down",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.9,
+		Translated: "Bank of England surprises markets with emergency statement.",
+	}
+
+	if _, ok := engine.Evaluate(context.Background(), sig, "macro"); ok {
+		t.Fatal("expected unavailable LLM backend to reject signal")
+	}
+	if _, ok := engine.Evaluate(context.Background(), sig, "macro"); ok {
+		t.Fatal("expected cooldown to reject signal without another LLM call")
+	}
+	if client.requests != 1 {
+		t.Fatalf("expected cooldown to suppress follow-up LLM call, got %d requests", client.requests)
 	}
 }
 

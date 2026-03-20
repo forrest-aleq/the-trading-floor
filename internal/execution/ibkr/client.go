@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/scmhub/ibapi"
@@ -17,8 +18,18 @@ import (
 
 // Client is the main IBKR API client wrapping ibsync.
 type Client struct {
-	conn *Connection
-	log  *slog.Logger
+	conn          connectionAPI
+	log           *slog.Logger
+	reconnectOnce sync.Once
+}
+
+type connectionAPI interface {
+	Connect(context.Context) error
+	Disconnect()
+	IB() *ibsync.IB
+	IsConnected() bool
+	IsPaper() bool
+	RunReconnectLoop(context.Context)
 }
 
 type MarketData struct {
@@ -57,11 +68,17 @@ func NewClient(cfg Config) *Client {
 }
 
 func (c *Client) Connect(ctx context.Context) error {
+	c.startReconnectLoop(ctx)
 	if err := c.conn.Connect(ctx); err != nil {
 		return fmt.Errorf("ibkr connect: %w", err)
 	}
-	go c.conn.RunReconnectLoop(ctx)
 	return nil
+}
+
+func (c *Client) startReconnectLoop(ctx context.Context) {
+	c.reconnectOnce.Do(func() {
+		go c.conn.RunReconnectLoop(ctx)
+	})
 }
 
 func (c *Client) IsConnected() bool {

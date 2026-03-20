@@ -87,11 +87,15 @@ func main() {
 	ibkrCfg := ibkr.DefaultConfig()
 	ibkrClient := ibkr.NewClient(ibkrCfg)
 	if err := ibkrClient.Connect(ctx); err != nil {
-		slog.Error("IBKR connection failed", "error", err)
-		os.Exit(1)
+		slog.Warn("IBKR unavailable at startup — continuing in degraded mode while reconnect loop retries",
+			"error", err,
+			"host", ibkrCfg.Host,
+			"port", ibkrCfg.Port,
+		)
+	} else {
+		slog.Info("IBKR connected", "paper", ibkrClient.IsPaper())
 	}
 	defer ibkrClient.Close()
-	slog.Info("IBKR connected", "paper", ibkrClient.IsPaper())
 
 	// --- Book + Execution ---
 	execMgr := execution.NewManager(ibkrClient)

@@ -238,8 +238,8 @@ func (e *Engine) tripLLMCooldown(now time.Time, err error) {
 	reason := strings.TrimSpace(err.Error())
 
 	e.mu.Lock()
+	wasActive := now.Before(e.llmUnavailableUntil)
 	until := now.Add(scannerLLMCooldown)
-	shouldLog := until.After(e.llmUnavailableUntil)
 	if until.After(e.llmUnavailableUntil) {
 		e.llmUnavailableUntil = until
 		e.llmUnavailableReason = reason
@@ -248,7 +248,7 @@ func (e *Engine) tripLLMCooldown(now time.Time, err error) {
 	retryAt := e.llmUnavailableUntil
 	e.mu.Unlock()
 
-	if shouldLog {
+	if !wasActive {
 		e.log.Warn("scanner entered LLM backend cooldown",
 			"retry_at", retryAt,
 			"cooldown", scannerLLMCooldown,

@@ -160,3 +160,53 @@ func TestCrossReferencerResolvesMultilingualEntityAliases(t *testing.T) {
 		t.Fatalf("expected multilingual alias to resolve to the same entity, got %+v", second.RelatedSignalIDs)
 	}
 }
+
+func TestNarrativeCorrelationCrossLinksLanguages(t *testing.T) {
+	crossref := NewCrossReferencer(64, 8)
+	clusterer := NewClusterer(128, 0.88)
+	narratives := NewNarrativeCorrelator(128)
+
+	first := NormalizeSignal(signal.Signal{
+		ID:                    "sig-hormuz-ar",
+		Source:                "telegram/mena",
+		Type:                  signal.TypeNews,
+		Category:              "geopolitical",
+		Timestamp:             time.Now(),
+		Languages:             []string{"ar"},
+		OriginalText:          "اضطراب حركة الملاحة في مضيق هرمز",
+		Translated:            "Shipping traffic disrupted in the Strait of Hormuz",
+		TranslationProvider:   "source_payload",
+		TranslationConfidence: 0.91,
+		Entities: []signal.Entity{
+			{Name: "Hormuz", Type: "region"},
+		},
+	})
+	second := NormalizeSignal(signal.Signal{
+		ID:                    "sig-hormuz-en",
+		Source:                "ft-world",
+		Type:                  signal.TypeNews,
+		Category:              "geopolitical",
+		Timestamp:             time.Now().Add(15 * time.Minute),
+		Languages:             []string{"en"},
+		OriginalText:          "Shipping traffic disrupted in the Strait of Hormuz",
+		Translated:            "Shipping traffic disrupted in the Strait of Hormuz",
+		TranslationProvider:   "identity",
+		TranslationConfidence: 1,
+		Entities: []signal.Entity{
+			{Name: "Hormuz", Type: "region"},
+		},
+	})
+
+	first = crossref.Enrich(narratives.Assign(clusterer.Assign(first)))
+	second = crossref.Enrich(narratives.Assign(clusterer.Assign(second)))
+
+	if second.NarrativeClusterID == "" || first.NarrativeClusterID != second.NarrativeClusterID {
+		t.Fatalf("expected shared narrative cluster, got first=%q second=%q", first.NarrativeClusterID, second.NarrativeClusterID)
+	}
+	if len(second.CorroboratingLanguages) == 0 || second.CorroboratingLanguages[0] != "ar" {
+		t.Fatalf("expected corroborating language from prior foreign-language source, got %+v", second.CorroboratingLanguages)
+	}
+	if second.EvidenceMeta == nil || second.EvidenceMeta.DistinctLanguages < 2 {
+		t.Fatalf("expected multilingual corroboration metadata, got %+v", second.EvidenceMeta)
+	}
+}

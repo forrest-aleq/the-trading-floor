@@ -15,17 +15,22 @@ import (
 
 func TestFormatSignalIncludesCrossReferenceContext(t *testing.T) {
 	formatted := formatSignal(signal.Signal{
-		ID:                    "sig-1",
-		Source:                "ft",
-		Type:                  signal.TypeNews,
-		Category:              "corporate",
-		Timestamp:             time.Now(),
-		Urgency:               0.8,
-		ClusterID:             "cluster-123",
-		RelatedSignalIDs:      []string{"sig-a", "sig-b"},
-		CorroboratingSources:  []string{"reuters", "fed-press"},
-		CorroboratingEntities: []string{"AAPL"},
-		Translated:            "Apple expands India supplier footprint",
+		ID:                     "sig-1",
+		Source:                 "ft",
+		Type:                   signal.TypeNews,
+		Category:               "corporate",
+		Timestamp:              time.Now(),
+		Urgency:                0.8,
+		ClusterID:              "cluster-123",
+		NarrativeClusterID:     "narrative-007",
+		Languages:              []string{"fr"},
+		TranslationProvider:    "source_payload",
+		TranslationConfidence:  0.86,
+		RelatedSignalIDs:       []string{"sig-a", "sig-b"},
+		CorroboratingSources:   []string{"reuters", "fed-press"},
+		CorroboratingEntities:  []string{"AAPL"},
+		CorroboratingLanguages: []string{"en", "ar"},
+		Translated:             "Apple expands India supplier footprint",
 		Entities: []signal.Entity{
 			{Name: "AAPL", Type: "instrument"},
 		},
@@ -33,9 +38,13 @@ func TestFormatSignalIncludesCrossReferenceContext(t *testing.T) {
 
 	for _, want := range []string{
 		"Cluster: cluster-123",
+		"Narrative: narrative-007",
+		"Original language: fr",
+		"Translation: provider=source_payload confidence=0.86",
 		"Related signals: 2",
 		"Corroborating sources: reuters, fed-press",
 		"Corroborating entities: AAPL",
+		"Corroborating languages: en, ar",
 	} {
 		if !strings.Contains(formatted, want) {
 			t.Fatalf("formatted signal missing %q\n%s", want, formatted)
@@ -176,9 +185,13 @@ func TestFormatSignalIncludesEvidenceContext(t *testing.T) {
 			SourceType:            "primary",
 			SourceDomain:          "sec.gov",
 			SourceOwnerGroup:      "sec",
+			OriginalLanguage:      "ar",
+			TranslationProvider:   "source_payload",
+			TranslationConfidence: 0.91,
 			FreshnessStatus:       "fresh",
 			FreshnessAgeHours:     2,
 			FreshnessWindowHours:  48,
+			DistinctLanguages:     2,
 			ContradictionCount:    1,
 			ContradictionSeverity: "medium",
 			ConfidenceVector: &evidence.ConfidenceVector{
@@ -196,6 +209,7 @@ func TestFormatSignalIncludesEvidenceContext(t *testing.T) {
 	for _, want := range []string{
 		"Source trust: 0.95",
 		"Source quality: tier=primary type=primary",
+		"Distinct languages: 2",
 		"Freshness: fresh",
 		"Contradictions: 1 (medium)",
 		"Evidence score: 0.91",

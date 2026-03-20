@@ -300,6 +300,15 @@ func formatSignalWithLimit(sig signal.Signal, contentLimit, relatedLimit, entity
 	if sig.ClusterID != "" {
 		sb.WriteString(fmt.Sprintf("Cluster: %s\n", sig.ClusterID))
 	}
+	if sig.NarrativeClusterID != "" {
+		sb.WriteString(fmt.Sprintf("Narrative: %s\n", sig.NarrativeClusterID))
+	}
+	if len(sig.Languages) > 0 {
+		sb.WriteString(fmt.Sprintf("Original language: %s\n", strings.ToLower(sig.Languages[0])))
+	}
+	if sig.TranslationProvider != "" || sig.TranslationConfidence > 0 {
+		sb.WriteString(fmt.Sprintf("Translation: provider=%s confidence=%.2f\n", sig.TranslationProvider, sig.TranslationConfidence))
+	}
 	if len(sig.RelatedSignalIDs) > 0 {
 		sb.WriteString(fmt.Sprintf("Related signals: %d (%s)\n", len(sig.RelatedSignalIDs), strings.Join(sampleStrings(sig.RelatedSignalIDs, relatedLimit), ", ")))
 	}
@@ -308,6 +317,9 @@ func formatSignalWithLimit(sig signal.Signal, contentLimit, relatedLimit, entity
 	}
 	if len(sig.CorroboratingEntities) > 0 {
 		sb.WriteString(fmt.Sprintf("Corroborating entities: %s\n", strings.Join(sampleStrings(sig.CorroboratingEntities, relatedLimit), ", ")))
+	}
+	if len(sig.CorroboratingLanguages) > 0 {
+		sb.WriteString(fmt.Sprintf("Corroborating languages: %s\n", strings.Join(sampleStrings(sig.CorroboratingLanguages, relatedLimit), ", ")))
 	}
 	if sig.EvidenceMeta != nil {
 		sb.WriteString(fmt.Sprintf("Source trust: %.2f\n", sig.EvidenceMeta.SourceTrust))
@@ -319,6 +331,9 @@ func formatSignalWithLimit(sig signal.Signal, contentLimit, relatedLimit, entity
 		}
 		if len(sig.EvidenceMeta.CorroboratingOwnerGroups) > 0 {
 			sb.WriteString(fmt.Sprintf("Independent owner groups: %s\n", strings.Join(sampleStrings(sig.EvidenceMeta.CorroboratingOwnerGroups, relatedLimit), ", ")))
+		}
+		if sig.EvidenceMeta.DistinctLanguages > 0 {
+			sb.WriteString(fmt.Sprintf("Distinct languages: %d\n", sig.EvidenceMeta.DistinctLanguages))
 		}
 		if sig.EvidenceMeta.FreshnessStatus != "" {
 			sb.WriteString(fmt.Sprintf("Freshness: %s (age %.1fh / window %.1fh)\n", sig.EvidenceMeta.FreshnessStatus, sig.EvidenceMeta.FreshnessAgeHours, sig.EvidenceMeta.FreshnessWindowHours))

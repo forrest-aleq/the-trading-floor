@@ -3,6 +3,7 @@ package wire
 import (
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hnic/trading-floor/internal/entityresolve"
 	"github.com/hnic/trading-floor/pkg/evidence"
@@ -13,8 +14,11 @@ type signalRef struct {
 	id         string
 	source     string
 	cluster    string
+	narrative  string
 	entities   []string
+	language   string
 	text       string
+	timestamp  time.Time
 	ownerGroup string
 	trust      float64
 	primary    bool
@@ -25,9 +29,10 @@ type signalRef struct {
 type CrossReferencer struct {
 	mu sync.Mutex
 
-	byCluster map[string][]signalRef
-	byEntity  map[string][]signalRef
-	history   []signalRef
+	byCluster   map[string][]signalRef
+	byNarrative map[string][]signalRef
+	byEntity    map[string][]signalRef
+	history     []signalRef
 
 	maxHistory int
 	maxPerKey  int
@@ -42,14 +47,14 @@ func NewCrossReferencer(maxHistory, maxPerKey int) *CrossReferencer {
 	if maxPerKey <= 0 {
 		maxPerKey = 16
 	}
-
 	return &CrossReferencer{
-		byCluster:  make(map[string][]signalRef),
-		byEntity:   make(map[string][]signalRef),
-		maxHistory: maxHistory,
-		maxPerKey:  maxPerKey,
-		maxRelated: 12,
-		maxLabels:  8,
+		byCluster:   make(map[string][]signalRef),
+		byNarrative: make(map[string][]signalRef),
+		byEntity:    make(map[string][]signalRef),
+		maxHistory:  maxHistory,
+		maxPerKey:   maxPerKey,
+		maxRelated:  12,
+		maxLabels:   8,
 	}
 }
 
@@ -68,6 +73,7 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 	related := newOrderedStrings(sig.RelatedSignalIDs...)
 	sources := newOrderedStrings()
 	entities := newOrderedStrings()
+	languages := newOrderedStrings()
 	ownerGroups := newOrderedStrings()
 	if meta.SourceOwnerGroup != "" {
 		ownerGroups.Add(meta.SourceOwnerGroup)
@@ -77,22 +83,13 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 
 	if sig.ClusterID != "" {
 		for _, ref := range c.byCluster[sig.ClusterID] {
-			candidateRefs[ref.id] = ref
-			if ref.id != sig.ID {
-				related.Add(ref.id)
-			}
-			if ref.source != "" && ref.source != sig.Source {
-				sources.Add(ref.source)
-			}
-			if ref.ownerGroup != "" {
-				ownerGroups.Add(ref.ownerGroup)
-				if ref.ownerGroup != meta.SourceOwnerGroup {
-					corroboratingOwnerGroups.Add(ref.ownerGroup)
-				}
-			}
-			if ref.primary {
-				meta.HasPrimarySource = true
-			}
+			accumulateReference(sig, meta, ref, &related, &sources, &languages, &ownerGroups, &corroboratingOwnerGroups, candidateRefs)
+		}
+	}
+
+	if sig.NarrativeClusterID != "" {
+		for _, ref := range c.byNarrative[sig.NarrativeClusterID] {
+			accumulateReference(sig, meta, ref, &related, &sources, &languages, &ownerGroups, &corroboratingOwnerGroups, candidateRefs)
 		}
 	}
 
@@ -100,22 +97,7 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 	for _, key := range entityKeys(sig.Entities, signalLanguage(sig)) {
 		matched := false
 		for _, ref := range c.byEntity[key] {
-			candidateRefs[ref.id] = ref
-			if ref.id != sig.ID {
-				related.Add(ref.id)
-			}
-			if ref.source != "" && ref.source != sig.Source {
-				sources.Add(ref.source)
-			}
-			if ref.ownerGroup != "" {
-				ownerGroups.Add(ref.ownerGroup)
-				if ref.ownerGroup != meta.SourceOwnerGroup {
-					corroboratingOwnerGroups.Add(ref.ownerGroup)
-				}
-			}
-			if ref.primary {
-				meta.HasPrimarySource = true
-			}
+			accumulateReference(sig, meta, ref, &related, &sources, &languages, &ownerGroups, &corroboratingOwnerGroups, candidateRefs)
 			matched = true
 		}
 		if matched {
@@ -128,9 +110,11 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 	sig.RelatedSignalIDs = related.Last(c.maxRelated)
 	sig.CorroboratingSources = sources.Last(c.maxLabels)
 	sig.CorroboratingEntities = entities.Last(c.maxLabels)
+	sig.CorroboratingLanguages = languages.Last(c.maxLabels)
 	meta.CorroboratingOwnerGroups = corroboratingOwnerGroups.Last(c.maxLabels)
 	meta.DistinctSources = len(newOrderedStrings(append([]string{sig.Source}, sig.CorroboratingSources...)...).items)
 	meta.DistinctOwnerGroups = len(ownerGroups.items)
+	meta.DistinctLanguages = len(newOrderedStrings(append([]string{signalLanguage(sig)}, sig.CorroboratingLanguages...)...).items)
 	meta.HasPrimarySource = meta.HasPrimarySource || meta.SourceTier == "primary" || meta.SourceType == "primary" || meta.SourceType == "market"
 
 	refs := make([]signalRef, 0, len(candidateRefs))
@@ -146,11 +130,14 @@ func (c *CrossReferencer) Enrich(sig signal.Signal) signal.Signal {
 
 func (c *CrossReferencer) record(sig signal.Signal) {
 	ref := signalRef{
-		id:       sig.ID,
-		source:   sig.Source,
-		cluster:  sig.ClusterID,
-		entities: entityKeys(sig.Entities, signalLanguage(sig)),
-		text:     canonicalText(sig),
+		id:        sig.ID,
+		source:    sig.Source,
+		cluster:   sig.ClusterID,
+		narrative: sig.NarrativeClusterID,
+		entities:  entityKeys(sig.Entities, signalLanguage(sig)),
+		language:  signalLanguage(sig),
+		text:      canonicalText(sig),
+		timestamp: sig.Timestamp,
 	}
 	if sig.EvidenceMeta != nil {
 		ref.ownerGroup = sig.EvidenceMeta.SourceOwnerGroup
@@ -160,6 +147,9 @@ func (c *CrossReferencer) record(sig signal.Signal) {
 
 	if ref.cluster != "" {
 		c.byCluster[ref.cluster] = appendAndTrimRefs(c.byCluster[ref.cluster], ref, c.maxPerKey)
+	}
+	if ref.narrative != "" {
+		c.byNarrative[ref.narrative] = appendAndTrimRefs(c.byNarrative[ref.narrative], ref, c.maxPerKey)
 	}
 	for _, entity := range ref.entities {
 		c.byEntity[entity] = appendAndTrimRefs(c.byEntity[entity], ref, c.maxPerKey)
@@ -180,6 +170,12 @@ func (c *CrossReferencer) removeRef(ref signalRef) {
 		c.byCluster[ref.cluster] = removeSignalRef(c.byCluster[ref.cluster], ref.id)
 		if len(c.byCluster[ref.cluster]) == 0 {
 			delete(c.byCluster, ref.cluster)
+		}
+	}
+	if ref.narrative != "" {
+		c.byNarrative[ref.narrative] = removeSignalRef(c.byNarrative[ref.narrative], ref.id)
+		if len(c.byNarrative[ref.narrative]) == 0 {
+			delete(c.byNarrative, ref.narrative)
 		}
 	}
 	for _, entity := range ref.entities {
@@ -248,6 +244,38 @@ func signalLanguage(sig signal.Signal) string {
 		return strings.TrimSpace(strings.ToLower(sig.Languages[0]))
 	}
 	return "und"
+}
+
+func accumulateReference(
+	sig signal.Signal,
+	meta *evidence.Metadata,
+	ref signalRef,
+	related *orderedStrings,
+	sources *orderedStrings,
+	languages *orderedStrings,
+	ownerGroups *orderedStrings,
+	corroboratingOwnerGroups *orderedStrings,
+	candidateRefs map[string]signalRef,
+) {
+	candidateRefs[ref.id] = ref
+	if ref.id != sig.ID {
+		related.Add(ref.id)
+	}
+	if ref.source != "" && ref.source != sig.Source {
+		sources.Add(ref.source)
+	}
+	if ref.language != "" {
+		languages.Add(ref.language)
+	}
+	if ref.ownerGroup != "" {
+		ownerGroups.Add(ref.ownerGroup)
+		if ref.ownerGroup != meta.SourceOwnerGroup {
+			corroboratingOwnerGroups.Add(ref.ownerGroup)
+		}
+	}
+	if ref.primary {
+		meta.HasPrimarySource = true
+	}
 }
 
 type orderedStrings struct {

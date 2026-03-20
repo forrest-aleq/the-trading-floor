@@ -281,32 +281,40 @@ func (c *Client) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 	meta := sig.EvidenceMeta
 	return c.executeWrite(ctx, func(tx neo4j.ManagedTransaction) error {
 		props := map[string]any{
-			"id":                     sig.ID,
-			"source":                 sig.Source,
-			"type":                   string(sig.Type),
-			"category":               sig.Category,
-			"translated":             sig.Translated,
-			"urgency":                sig.Urgency,
-			"strength":               sig.Strength,
-			"direction":              string(sig.Direction),
-			"cluster_id":             sig.ClusterID,
-			"content_hash":           sig.ContentHash,
-			"timestamp":              normalizeTime(sig.Timestamp, now),
-			"decision_time":          now,
-			"original_language":      primaryLanguage(sig),
-			"source_domain":          evidenceString(meta, func() string { return meta.SourceDomain }),
-			"source_owner_group":     evidenceString(meta, func() string { return meta.SourceOwnerGroup }),
-			"source_tier":            evidenceString(meta, func() string { return meta.SourceTier }),
-			"source_type":            evidenceString(meta, func() string { return meta.SourceType }),
-			"source_trust":           evidenceFloat(meta, func() float64 { return meta.SourceTrust }),
-			"freshness_status":       evidenceString(meta, func() string { return meta.FreshnessStatus }),
-			"freshness_reason":       evidenceString(meta, func() string { return meta.FreshnessReason }),
-			"freshness_age_hours":    evidenceFloat(meta, func() float64 { return meta.FreshnessAgeHours }),
-			"freshness_window_hours": evidenceFloat(meta, func() float64 { return meta.FreshnessWindowHours }),
-			"distinct_sources":       evidenceInt(meta, func() int { return meta.DistinctSources }),
-			"distinct_owner_groups":  evidenceInt(meta, func() int { return meta.DistinctOwnerGroups }),
-			"has_primary_source":     evidenceBool(meta, func() bool { return meta.HasPrimarySource }),
-			"contradiction_count":    evidenceInt(meta, func() int { return meta.ContradictionCount }),
+			"id":                              sig.ID,
+			"source":                          sig.Source,
+			"type":                            string(sig.Type),
+			"category":                        sig.Category,
+			"original_text":                   sig.OriginalText,
+			"translated":                      sig.Translated,
+			"translation_provider":            sig.TranslationProvider,
+			"translation_confidence":          sig.TranslationConfidence,
+			"urgency":                         sig.Urgency,
+			"strength":                        sig.Strength,
+			"direction":                       string(sig.Direction),
+			"cluster_id":                      sig.ClusterID,
+			"narrative_cluster_id":            sig.NarrativeClusterID,
+			"content_hash":                    sig.ContentHash,
+			"timestamp":                       normalizeTime(sig.Timestamp, now),
+			"decision_time":                   now,
+			"original_language":               primaryLanguage(sig),
+			"corroborating_languages":         sig.CorroboratingLanguages,
+			"source_domain":                   evidenceString(meta, func() string { return meta.SourceDomain }),
+			"source_owner_group":              evidenceString(meta, func() string { return meta.SourceOwnerGroup }),
+			"source_tier":                     evidenceString(meta, func() string { return meta.SourceTier }),
+			"source_type":                     evidenceString(meta, func() string { return meta.SourceType }),
+			"source_trust":                    evidenceFloat(meta, func() float64 { return meta.SourceTrust }),
+			"distinct_languages":              evidenceInt(meta, func() int { return meta.DistinctLanguages }),
+			"translation_provider_evidence":   evidenceString(meta, func() string { return meta.TranslationProvider }),
+			"translation_confidence_evidence": evidenceFloat(meta, func() float64 { return meta.TranslationConfidence }),
+			"freshness_status":                evidenceString(meta, func() string { return meta.FreshnessStatus }),
+			"freshness_reason":                evidenceString(meta, func() string { return meta.FreshnessReason }),
+			"freshness_age_hours":             evidenceFloat(meta, func() float64 { return meta.FreshnessAgeHours }),
+			"freshness_window_hours":          evidenceFloat(meta, func() float64 { return meta.FreshnessWindowHours }),
+			"distinct_sources":                evidenceInt(meta, func() int { return meta.DistinctSources }),
+			"distinct_owner_groups":           evidenceInt(meta, func() int { return meta.DistinctOwnerGroups }),
+			"has_primary_source":              evidenceBool(meta, func() bool { return meta.HasPrimarySource }),
+			"contradiction_count":             evidenceInt(meta, func() int { return meta.ContradictionCount }),
 			"contradiction_severity": evidenceString(meta, func() string {
 				return meta.ContradictionSeverity
 			}),
@@ -348,6 +356,9 @@ func (c *Client) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 			return err
 		}
 		if err := c.linkSignalRelations(ctx, tx, sig, now); err != nil {
+			return err
+		}
+		if err := c.linkSignalNarrative(ctx, tx, sig, now); err != nil {
 			return err
 		}
 		return c.linkEvidenceAssessment(ctx, tx, "Signal", sig.ID, sig.EvidenceMeta, now)

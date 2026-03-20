@@ -152,16 +152,21 @@ func (f *TelegramFeed) fetchAndSend(ctx context.Context, src TelegramSource, out
 		})
 
 		sig := signal.Signal{
-			ID:         fmt.Sprintf("telegram-%s-%s", src.Name, guid),
-			Source:     "telegram/" + src.Name,
-			Type:       signal.TypeSocial,
-			Category:   src.Category,
-			Timestamp:  signalTimestamp(item.PubDate),
-			Urgency:    0.75,
-			Entities:   entities,
-			Languages:  []string{src.Language},
-			Raw:        raw,
-			Translated: strings.TrimSpace(fmt.Sprintf("Telegram %s: %s", src.Name, text)),
+			ID:           fmt.Sprintf("telegram-%s-%s", src.Name, guid),
+			Source:       "telegram/" + src.Name,
+			Type:         signal.TypeSocial,
+			Category:     src.Category,
+			Timestamp:    signalTimestamp(item.PubDate),
+			Urgency:      0.75,
+			Entities:     entities,
+			Languages:    []string{src.Language},
+			Raw:          raw,
+			OriginalText: text,
+		}
+		if strings.EqualFold(src.Language, "en") {
+			sig.Translated = text
+			sig.TranslationProvider = "identity"
+			sig.TranslationConfidence = 1
 		}
 
 		select {

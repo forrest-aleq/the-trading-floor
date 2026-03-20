@@ -101,3 +101,21 @@ func TestDefaultNewsSourcesPreferLiveNonDuplicateFeeds(t *testing.T) {
 		}
 	}
 }
+
+func TestExtraNewsSourcesFromEnv(t *testing.T) {
+	t.Setenv("WIRE_NEWS_EXTRA_SOURCES_JSON", `[
+		{"name":"aljazeera-ar","url":"https://example.com/aljazeera-ar.rss","category":"geopolitical","language":"ar","interval_seconds":75},
+		{"name":"asia-brief-zh","url":"https://example.com/asia-zh.rss","category":"macro","language":"zh"}
+	]`)
+
+	sources := extraNewsSourcesFromEnv()
+	if len(sources) != 2 {
+		t.Fatalf("expected 2 extra news sources, got %d", len(sources))
+	}
+	if sources[0].Language != "ar" || sources[0].Interval.Seconds() != 75 {
+		t.Fatalf("unexpected first source metadata: %+v", sources[0])
+	}
+	if sources[1].Language != "zh" || sources[1].Interval <= 0 {
+		t.Fatalf("unexpected second source metadata: %+v", sources[1])
+	}
+}

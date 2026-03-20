@@ -149,7 +149,7 @@ func (c *Client) linkSignalLineage(ctx context.Context, tx neo4j.ManagedTransact
 	); err != nil {
 		return err
 	}
-	return runQuery(ctx, tx, `
+	if err := runQuery(ctx, tx, `
 		MATCH (s:Signal {id: $signal_id})
 		MATCH (l:Language {code: $language})
 		MERGE (s)-[r:ORIGINAL_LANGUAGE]->(l)
@@ -158,6 +158,37 @@ func (c *Client) linkSignalLineage(ctx context.Context, tx neo4j.ManagedTransact
 		map[string]any{
 			"signal_id":     sig.ID,
 			"language":      lang,
+			"observed_time": normalizeTime(sig.Timestamp, now),
+			"decision_time": now,
+		},
+	); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(sig.Translated) == "" {
+		return nil
+	}
+	if err := runQuery(ctx, tx, `
+		MERGE (l:Language {code: 'en'})
+		SET l.updated_at = $updated_at`,
+		map[string]any{
+			"updated_at": now,
+		},
+	); err != nil {
+		return err
+	}
+	return runQuery(ctx, tx, `
+		MATCH (s:Signal {id: $signal_id})
+		MATCH (l:Language {code: 'en'})
+		MERGE (s)-[r:TRANSLATED_TO]->(l)
+		SET r.provider = $provider,
+		    r.confidence = $confidence,
+		    r.observed_time = $observed_time,
+		    r.decision_time = $decision_time`,
+		map[string]any{
+			"signal_id":     sig.ID,
+			"provider":      strings.TrimSpace(sig.TranslationProvider),
+			"confidence":    sig.TranslationConfidence,
 			"observed_time": normalizeTime(sig.Timestamp, now),
 			"decision_time": now,
 		},
@@ -326,6 +357,55 @@ func (c *Client) linkSignalRelations(ctx context.Context, tx neo4j.ManagedTransa
 	return nil
 }
 
+func (c *Client) linkSignalNarrative(ctx context.Context, tx neo4j.ManagedTransaction, sig signal.Signal, now time.Time) error {
+	if strings.TrimSpace(sig.NarrativeClusterID) == "" {
+		return nil
+	}
+
+	languages := append([]string(nil), sig.CorroboratingLanguages...)
+	if lang := primaryLanguage(sig); lang != "" && !containsString(languages, lang) {
+		languages = append(languages, lang)
+	}
+
+	if err := runQuery(ctx, tx, `
+		MERGE (n:NarrativeCluster {id: $id})
+		ON CREATE SET n.created_at = $created_at
+		SET n.category = $category,
+		    n.representative_text = CASE
+		        WHEN coalesce(n.representative_text, '') = '' THEN $representative_text
+		        ELSE n.representative_text
+		    END,
+		    n.languages = $languages,
+		    n.updated_at = $updated_at`,
+		map[string]any{
+			"id":                  sig.NarrativeClusterID,
+			"category":            sig.Category,
+			"representative_text": strings.TrimSpace(sig.Translated),
+			"languages":           languages,
+			"created_at":          normalizeTime(sig.Timestamp, now),
+			"updated_at":          now,
+		},
+	); err != nil {
+		return err
+	}
+
+	return runQuery(ctx, tx, `
+		MATCH (s:Signal {id: $signal_id})
+		MATCH (n:NarrativeCluster {id: $narrative_id})
+		MERGE (s)-[r:BELONGS_TO_NARRATIVE]->(n)
+		SET r.event_time = $event_time,
+		    r.observed_time = $observed_time,
+		    r.decision_time = $decision_time`,
+		map[string]any{
+			"signal_id":     sig.ID,
+			"narrative_id":  sig.NarrativeClusterID,
+			"event_time":    normalizeTime(sig.Timestamp, now),
+			"observed_time": normalizeTime(sig.Timestamp, now),
+			"decision_time": now,
+		},
+	)
+}
+
 func (c *Client) linkEvidenceAssessment(ctx context.Context, tx neo4j.ManagedTransaction, nodeLabel, nodeID string, meta *evidence.Metadata, now time.Time) error {
 	if meta == nil {
 		return nil
@@ -336,12 +416,16 @@ func (c *Client) linkEvidenceAssessment(ctx context.Context, tx neo4j.ManagedTra
 		MERGE (e:EvidenceAssessment {id: $id})
 		SET e.evidence_score = $evidence_score,
 		    e.source_trust = $source_trust,
+		    e.original_language = $original_language,
+		    e.translation_provider = $translation_provider,
+		    e.translation_confidence = $translation_confidence,
 		    e.fact_confidence = $fact_confidence,
 		    e.novelty_confidence = $novelty_confidence,
 		    e.market_mapping_confidence = $market_mapping_confidence,
 		    e.expression_confidence = $expression_confidence,
 		    e.execution_confidence = $execution_confidence,
 		    e.competence_confidence = $competence_confidence,
+		    e.distinct_languages = $distinct_languages,
 		    e.freshness_status = $freshness_status,
 		    e.contradiction_count = $contradiction_count,
 		    e.contradiction_severity = $contradiction_severity,
@@ -350,12 +434,16 @@ func (c *Client) linkEvidenceAssessment(ctx context.Context, tx neo4j.ManagedTra
 			"id":                        assessmentID,
 			"evidence_score":            meta.EvidenceScore,
 			"source_trust":              meta.SourceTrust,
+			"original_language":         strings.TrimSpace(meta.OriginalLanguage),
+			"translation_provider":      strings.TrimSpace(meta.TranslationProvider),
+			"translation_confidence":    meta.TranslationConfidence,
 			"fact_confidence":           evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.FactConfidence }),
 			"novelty_confidence":        evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.NoveltyConfidence }),
 			"market_mapping_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.MarketMappingConfidence }),
 			"expression_confidence":     evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.ExpressionConfidence }),
 			"execution_confidence":      evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.ExecutionConfidence }),
 			"competence_confidence":     evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.CompetenceConfidence }),
+			"distinct_languages":        meta.DistinctLanguages,
 			"freshness_status":          strings.TrimSpace(meta.FreshnessStatus),
 			"contradiction_count":       meta.ContradictionCount,
 			"contradiction_severity":    strings.TrimSpace(meta.ContradictionSeverity),
@@ -573,6 +661,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 func evidenceString(meta interface{ Present() bool }, getter func() string) string {

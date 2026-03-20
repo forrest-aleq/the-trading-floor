@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -26,18 +27,20 @@ type RSSSource struct {
 	Name     string
 	URL      string
 	Category string
+	Language string
 	Interval time.Duration
 }
 
 func DefaultNewsSources() []RSSSource {
-	return []RSSSource{
-		{Name: "ft-markets", URL: "https://www.ft.com/markets?format=rss", Category: "macro", Interval: 60 * time.Second},
-		{Name: "ft-equities", URL: "https://www.ft.com/equities?format=rss", Category: "corporate", Interval: 60 * time.Second},
-		{Name: "ft-companies", URL: "https://www.ft.com/companies?format=rss", Category: "corporate", Interval: 60 * time.Second},
-		{Name: "ft-world", URL: "https://www.ft.com/world?format=rss", Category: "geopolitical", Interval: 120 * time.Second},
-		{Name: "fed-press", URL: "https://www.federalreserve.gov/feeds/press_all.xml", Category: "macro", Interval: 300 * time.Second},
-		{Name: "fed-speeches", URL: "https://www.federalreserve.gov/feeds/speeches.xml", Category: "macro", Interval: 300 * time.Second},
+	sources := []RSSSource{
+		{Name: "ft-markets", URL: "https://www.ft.com/markets?format=rss", Category: "macro", Language: "en", Interval: 60 * time.Second},
+		{Name: "ft-equities", URL: "https://www.ft.com/equities?format=rss", Category: "corporate", Language: "en", Interval: 60 * time.Second},
+		{Name: "ft-companies", URL: "https://www.ft.com/companies?format=rss", Category: "corporate", Language: "en", Interval: 60 * time.Second},
+		{Name: "ft-world", URL: "https://www.ft.com/world?format=rss", Category: "geopolitical", Language: "en", Interval: 120 * time.Second},
+		{Name: "fed-press", URL: "https://www.federalreserve.gov/feeds/press_all.xml", Category: "macro", Language: "en", Interval: 300 * time.Second},
+		{Name: "fed-speeches", URL: "https://www.federalreserve.gov/feeds/speeches.xml", Category: "macro", Language: "en", Interval: 300 * time.Second},
 	}
+	return append(sources, extraNewsSourcesFromEnv()...)
 }
 
 func NewNewsFeed(sources []RSSSource) *NewsFeed {
@@ -135,16 +138,21 @@ func (f *NewsFeed) fetchAndSend(ctx context.Context, src RSSSource, out chan<- s
 		})
 
 		sig := signal.Signal{
-			ID:         fmt.Sprintf("%s-%s", src.Name, guid),
-			Source:     src.Name,
-			Type:       signal.TypeNews,
-			Category:   src.Category,
-			Timestamp:  publishedAt,
-			Urgency:    0.5,
-			Entities:   entities,
-			Raw:        content,
-			Translated: text,
-			Languages:  []string{"en"},
+			ID:           fmt.Sprintf("%s-%s", src.Name, guid),
+			Source:       src.Name,
+			Type:         signal.TypeNews,
+			Category:     src.Category,
+			Timestamp:    publishedAt,
+			Urgency:      0.5,
+			Entities:     entities,
+			Raw:          content,
+			OriginalText: text,
+			Languages:    []string{firstNonEmptyLocal(strings.TrimSpace(src.Language), "en")},
+		}
+		if sig.Languages[0] == "en" {
+			sig.Translated = text
+			sig.TranslationProvider = "identity"
+			sig.TranslationConfidence = 1
 		}
 
 		select {
@@ -162,4 +170,51 @@ func (f *NewsFeed) fetchAndSend(ctx context.Context, src RSSSource, out chan<- s
 	if emitted > 0 {
 		f.log.Info("rss source emitted signals", "source", src.Name, "count", emitted)
 	}
+}
+
+func extraNewsSourcesFromEnv() []RSSSource {
+	raw := strings.TrimSpace(os.Getenv("WIRE_NEWS_EXTRA_SOURCES_JSON"))
+	if raw == "" {
+		return nil
+	}
+
+	var payload []struct {
+		Name            string `json:"name"`
+		URL             string `json:"url"`
+		Category        string `json:"category"`
+		Language        string `json:"language"`
+		IntervalSeconds int    `json:"interval_seconds"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		slog.Default().With("component", "feed-news").Warn("invalid WIRE_NEWS_EXTRA_SOURCES_JSON", "error", err)
+		return nil
+	}
+
+	sources := make([]RSSSource, 0, len(payload))
+	for _, item := range payload {
+		if strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.URL) == "" {
+			continue
+		}
+		interval := time.Duration(item.IntervalSeconds) * time.Second
+		if interval <= 0 {
+			interval = 90 * time.Second
+		}
+		sources = append(sources, RSSSource{
+			Name:     strings.TrimSpace(item.Name),
+			URL:      strings.TrimSpace(item.URL),
+			Category: firstNonEmptyLocal(strings.TrimSpace(item.Category), "geopolitical"),
+			Language: firstNonEmptyLocal(strings.TrimSpace(item.Language), "en"),
+			Interval: interval,
+		})
+	}
+	return sources
+}
+
+func firstNonEmptyLocal(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

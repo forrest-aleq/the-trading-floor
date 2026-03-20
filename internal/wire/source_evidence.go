@@ -76,18 +76,22 @@ func buildEvidenceMeta(sig signal.Signal) *evidence.Metadata {
 
 	status, reason, ageHours, windowHours := evaluateFreshness(sig)
 	meta := &evidence.Metadata{
-		SourceDomain:         profile.Domain,
-		SourceOwnerGroup:     profile.OwnerGroup,
-		SourceTier:           profile.Tier,
-		SourceType:           profile.Type,
-		SourceTrust:          profile.Trust,
-		FreshnessStatus:      status,
-		FreshnessReason:      reason,
-		FreshnessAgeHours:    roundEvidence(ageHours),
-		FreshnessWindowHours: roundEvidence(windowHours),
-		DistinctSources:      countNonEmpty(sig.Source),
-		DistinctOwnerGroups:  countNonEmpty(profile.OwnerGroup),
-		HasPrimarySource:     profile.Tier == "primary" || profile.Type == "primary" || profile.Type == "market",
+		SourceDomain:          profile.Domain,
+		SourceOwnerGroup:      profile.OwnerGroup,
+		SourceTier:            profile.Tier,
+		SourceType:            profile.Type,
+		SourceTrust:           profile.Trust,
+		OriginalLanguage:      signalLanguage(sig),
+		TranslationProvider:   strings.TrimSpace(sig.TranslationProvider),
+		TranslationConfidence: roundEvidence(sig.TranslationConfidence),
+		FreshnessStatus:       status,
+		FreshnessReason:       reason,
+		FreshnessAgeHours:     roundEvidence(ageHours),
+		FreshnessWindowHours:  roundEvidence(windowHours),
+		DistinctSources:       countNonEmpty(sig.Source),
+		DistinctOwnerGroups:   countNonEmpty(profile.OwnerGroup),
+		DistinctLanguages:     countNonEmpty(signalLanguage(sig)),
+		HasPrimarySource:      profile.Tier == "primary" || profile.Type == "primary" || profile.Type == "market",
 	}
 	return refreshEvidenceAssessment(sig, meta)
 }
@@ -407,6 +411,7 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	relatedCount := len(sig.RelatedSignalIDs)
 	entityCount := len(sig.Entities)
 	corroborated := meta.DistinctOwnerGroups >= 2 || meta.DistinctSources >= 2
+	crossLingual := meta.DistinctLanguages >= 2
 	directional := sig.Direction != signal.Neutral
 	freshnessBonus := freshnessConfidence(meta)
 
@@ -419,6 +424,12 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	}
 	if corroborated {
 		fact += 0.06
+	}
+	if crossLingual {
+		fact += 0.05
+	}
+	if meta.TranslationConfidence > 0 && meta.OriginalLanguage != "en" {
+		fact += (meta.TranslationConfidence - 0.5) * 0.18
 	}
 	fact -= contradictionPenalty(meta)
 	if strings.HasPrefix(meta.FreshnessStatus, "stale") {
@@ -434,6 +445,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	}
 	if sig.Type == signal.TypeFiling || sig.Type == signal.TypeEconomic || sig.Type == signal.TypeFlow {
 		novelty += 0.08
+	}
+	if crossLingual {
+		novelty += 0.06
 	}
 	if meta.SourceType == "social" && !corroborated {
 		novelty -= 0.12
@@ -455,6 +469,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	if corroborated {
 		marketMapping += 0.08
 	}
+	if crossLingual {
+		marketMapping += 0.04
+	}
 	if meta.SourceType == "social" && !corroborated {
 		marketMapping -= 0.16
 	}
@@ -475,6 +492,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	if sig.Type == signal.TypePrice || sig.Type == signal.TypeFiling || sig.Type == signal.TypeEconomic || sig.Type == signal.TypeNews {
 		expression += 0.08
 	}
+	if crossLingual {
+		expression += 0.04
+	}
 	expression -= contradictionPenalty(meta) * 0.8
 	if strings.HasPrefix(meta.FreshnessStatus, "stale") {
 		expression -= 0.15
@@ -490,6 +510,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	}
 	if corroborated {
 		execution += 0.08
+	}
+	if crossLingual {
+		execution += 0.03
 	}
 	execution -= contradictionPenalty(meta) * 0.7
 	if strings.HasPrefix(meta.FreshnessStatus, "stale") {
@@ -511,6 +534,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	}
 	if directional {
 		competence += 0.05
+	}
+	if crossLingual {
+		competence += 0.06
 	}
 	competence -= contradictionPenalty(meta) * 0.7
 	if meta.SourceType == "social" && !corroborated {

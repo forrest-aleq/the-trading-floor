@@ -31,6 +31,7 @@ type Manager struct {
 
 	deduper         *Deduper
 	clusterer       *Clusterer
+	narratives      *NarrativeCorrelator
 	crossReferencer *CrossReferencer
 
 	// Metrics
@@ -68,6 +69,7 @@ func NewManager() *Manager {
 		overflowNotify:   make(chan struct{}, 1),
 		deduper:          NewDeduper(2048, 0.92),
 		clusterer:        NewClusterer(1024, 0.88),
+		narratives:       NewNarrativeCorrelator(1024),
 		crossReferencer:  NewCrossReferencer(4096, 16),
 		receivedBySource: make(map[string]int64),
 		dedupedBySource:  make(map[string]int64),
@@ -137,6 +139,9 @@ func (m *Manager) Start(ctx context.Context) error {
 				}
 				if m.clusterer != nil {
 					sig = m.clusterer.Assign(sig)
+				}
+				if m.narratives != nil {
+					sig = m.narratives.Assign(sig)
 				}
 				if m.crossReferencer != nil {
 					sig = m.crossReferencer.Enrich(sig)

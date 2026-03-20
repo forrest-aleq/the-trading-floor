@@ -19,11 +19,10 @@ func NormalizeSignal(sig signal.Signal) signal.Signal {
 	if len(sig.Languages) == 0 {
 		sig.Languages = []string{"en"}
 	}
-	if sig.Translated == "" {
-		sig.Translated = EnsureTranslatedText(sig)
-	} else if cleaned, _ := sanitize.ExternalText(sig.Translated); cleaned != "" {
-		sig.Translated = cleaned
+	if cleaned, _ := sanitize.ExternalText(sig.OriginalText); cleaned != "" {
+		sig.OriginalText = cleaned
 	}
+	sig = applyTranslation(sig)
 	if sig.ContentHash == "" {
 		sig.ContentHash = hashSignalContent(sig)
 	}
@@ -37,6 +36,18 @@ func NormalizeSignal(sig signal.Signal) signal.Signal {
 func canonicalText(sig signal.Signal) string {
 	if sig.Translated != "" {
 		return strings.TrimSpace(sig.Translated)
+	}
+
+	if sig.OriginalText != "" {
+		return strings.TrimSpace(sig.OriginalText)
+	}
+
+	return sourceText(sig)
+}
+
+func sourceText(sig signal.Signal) string {
+	if sig.OriginalText != "" {
+		return strings.TrimSpace(sig.OriginalText)
 	}
 
 	if len(sig.Raw) == 0 {

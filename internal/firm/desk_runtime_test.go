@@ -3,6 +3,7 @@ package firm_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -84,7 +85,7 @@ func TestDeskSkipsCouncilForSmallPctAndSpawnsSubTeam(t *testing.T) {
 	router := llm.NewRouter(
 		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"AAPL","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.9,"category":"corporate","reasoning":"earnings surprise"}`},
 		scriptedLLM{fn: func(req llm.Request) string {
-			if req.JSONMode {
+			if req.JSONMode || strings.Contains(strings.ToLower(req.Messages[0].Content), "trading research desk") {
 				return string(researchResp)
 			}
 			return "sub-team analysis with concrete supporting detail"
@@ -348,7 +349,7 @@ func TestDeskPublishesInternalSignalForStrongApprovedThesis(t *testing.T) {
 	router := llm.NewRouter(
 		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"XLE","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.9,"category":"geopolitical","reasoning":"shipping shock"}`},
 		scriptedLLM{fn: func(req llm.Request) string {
-			if req.JSONMode {
+			if req.JSONMode || strings.Contains(strings.ToLower(req.Messages[0].Content), "trading research desk") {
 				return string(researchResp)
 			}
 			return "sub-team analysis with concrete supporting detail"

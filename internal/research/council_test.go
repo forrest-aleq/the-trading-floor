@@ -1,10 +1,44 @@
 package research
 
 import (
+	"context"
 	"testing"
 
+	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/pkg/model"
 )
+
+type councilStubClient struct {
+	requests []llm.Request
+}
+
+func (s *councilStubClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: validCouncilPerspectiveJSON(),
+		Model:   "stub",
+	}, nil
+}
+
+type councilCompilerFallbackClient struct {
+	requests []llm.Request
+}
+
+func (s *councilCompilerFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	switch len(s.requests) {
+	case 1:
+		return &llm.Response{
+			Content: "Thinking Process:\n1. Timing is acceptable.\n2. Liquidity is fine.\n3. The model forgot to emit JSON.",
+			Model:   "critical",
+		}, nil
+	default:
+		return &llm.Response{
+			Content: validCouncilPerspectiveJSON(),
+			Model:   "compiler",
+		}, nil
+	}
+}
 
 func TestNewCouncilIncludesExtendedVoices(t *testing.T) {
 	council := NewCouncil(nil)
@@ -82,4 +116,63 @@ func TestCouncilSynthesizeHonorsWeightsAndRecommendations(t *testing.T) {
 	if verdict.TotalWeight <= 0 {
 		t.Fatalf("expected total weight to be tracked")
 	}
+}
+
+func TestCouncilPerspectiveUsesThoughtModeForQwen(t *testing.T) {
+	t.Setenv("COUNCIL_MODEL", "qwen/qwen3.5-35b-a3b")
+
+	client := &councilStubClient{}
+	council := NewCouncil(llm.NewRouter(client, client, client))
+
+	cleaned, err := council.requestPerspectiveJSON(context.Background(), "Macro", "macro system prompt", "thesis prompt")
+	if err != nil {
+		t.Fatalf("expected structured perspective, got %v", err)
+	}
+	if cleaned == "" {
+		t.Fatal("expected cleaned JSON")
+	}
+	if len(client.requests) == 0 {
+		t.Fatal("expected council request")
+	}
+	if client.requests[0].JSONMode {
+		t.Fatal("expected Qwen council request to avoid strict JSON mode")
+	}
+}
+
+func TestCouncilPerspectiveCompilerFallbackRecoversStructuredJSON(t *testing.T) {
+	t.Setenv("COUNCIL_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("COUNCIL_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
+
+	client := &councilCompilerFallbackClient{}
+	council := NewCouncil(llm.NewRouter(client, client, client))
+
+	cleaned, err := council.requestPerspectiveJSON(context.Background(), "Macro", "macro system prompt", "thesis prompt")
+	if err != nil {
+		t.Fatalf("expected compiler fallback to recover perspective, got %v", err)
+	}
+	if cleaned == "" {
+		t.Fatal("expected cleaned JSON from compiler fallback")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected council call plus compiler call, got %d", got)
+	}
+	if client.requests[0].JSONMode {
+		t.Fatal("expected initial council call to avoid strict JSON mode")
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected council compiler request to use strict JSON mode")
+	}
+	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
+		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	}
+}
+
+func validCouncilPerspectiveJSON() string {
+	return `{
+  "perspective": "timing and liquidity are acceptable",
+  "recommendation": "approve",
+  "conviction_adjustment": 0.05,
+  "size_adjustment": 1.05,
+  "reasoning": "the structure is executable with manageable slippage"
+}`
 }

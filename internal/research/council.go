@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -17,16 +18,32 @@ import (
 // Council convenes multiple strategy archetypes to debate large positions (>2% of portfolio).
 // Each archetype evaluates independently, then the council synthesizes.
 type Council struct {
-	log        *slog.Logger
-	llm        *llm.Router
-	archetypes []Archetype
-	telemetry  VoiceTelemetryProvider
+	log           *slog.Logger
+	llm           *llm.Router
+	archetypes    []Archetype
+	telemetry     VoiceTelemetryProvider
+	selectedModel string
+	responseMode  structuredResponseMode
+	compilerModel string
 }
 
 const (
 	councilPerspectiveMaxTokens = 384
 	councilPerspectiveTimeout   = 25 * time.Second
+	councilCompilerTimeout      = 15 * time.Second
+	councilCompilerMaxTokens    = 600
 )
+
+const councilThoughtPrefix = `Do not restate the request or schema.
+Think if useful, but keep it concise.
+You must end with exactly one JSON object matching the requested schema.`
+
+const councilCompilerPrompt = `You are a council-perspective compiler.
+You will receive the original council task and a freeform reasoning transcript from one council voice.
+Return one final JSON object only. No prose, no markdown, no thinking.
+
+JSON schema:
+{"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": 0.0, "size_adjustment": 1.0, "reasoning": "..."}`
 
 type perspectiveResult struct {
 	name           string
@@ -51,9 +68,13 @@ type VoiceTelemetryProvider interface {
 }
 
 func NewCouncil(llmRouter *llm.Router) *Council {
+	selectedModel := criticalSelectedModel()
 	return &Council{
-		log: slog.Default().With("component", "council"),
-		llm: llmRouter,
+		log:           slog.Default().With("component", "council"),
+		llm:           llmRouter,
+		selectedModel: selectedModel,
+		responseMode:  detectStructuredResponseMode(os.Getenv("COUNCIL_RESPONSE_MODE"), selectedModel),
+		compilerModel: structuredCompilerModel("COUNCIL_COMPILER_MODEL"),
 		archetypes: []Archetype{
 			{
 				Name: "Fundamental",
@@ -159,20 +180,9 @@ Quant Metrics:
 			callCtx, cancel := context.WithTimeout(ctx, councilPerspectiveTimeout)
 			defer cancel()
 
-			resp, err := c.llm.AskJSONWithLimit(callCtx, llm.TierCritical, a.Prompt, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
+			cleaned, err := c.requestPerspectiveJSON(callCtx, a.Name, a.Prompt, thesisPrompt)
 			if err != nil {
 				c.log.Warn("council archetype failed", "archetype", a.Name, "error", err)
-				return
-			}
-
-			cleaned, err := llm.ExtractJSON(resp)
-			if err != nil {
-				c.log.Warn("council JSON extraction failed",
-					"archetype", a.Name,
-					"error", err,
-					"response_len", len(resp),
-					"response_excerpt", truncateForLog(resp, 320),
-				)
 				return
 			}
 
@@ -212,6 +222,74 @@ Quant Metrics:
 	wg.Wait()
 
 	return c.synthesize(thesis, results)
+}
+
+func (c *Council) requestPerspectiveJSON(ctx context.Context, archetype, systemPrompt, thesisPrompt string) (string, error) {
+	resp, err := c.askPerspectiveWithFallbackMode(ctx, systemPrompt, thesisPrompt)
+	if err != nil {
+		return "", err
+	}
+
+	cleaned, extractErr := llm.ExtractJSON(resp)
+	if extractErr != nil {
+		if c.compilerModel != "" {
+			if compiled, compileErr := c.compilePerspectiveJSON(ctx, archetype, systemPrompt, thesisPrompt, resp); compileErr == nil {
+				if compiledJSON, recoverErr := llm.ExtractJSON(compiled); recoverErr == nil {
+					c.log.Info("council compiler recovered structured perspective",
+						"archetype", archetype,
+						"compiler_model", c.compilerModel,
+					)
+					return compiledJSON, nil
+				}
+			} else {
+				c.log.Warn("council compiler fallback failed",
+					"archetype", archetype,
+					"compiler_model", c.compilerModel,
+					"error", compileErr,
+				)
+			}
+		}
+		c.log.Warn("council JSON extraction failed",
+			"archetype", archetype,
+			"error", extractErr,
+			"response_len", len(resp),
+			"response_excerpt", truncateForLog(resp, 320),
+		)
+		return "", extractErr
+	}
+
+	return cleaned, nil
+}
+
+func (c *Council) askPerspectiveWithFallbackMode(ctx context.Context, systemPrompt, thesisPrompt string) (string, error) {
+	if c.responseMode == structuredResponseModeThought {
+		systemPrompt = councilThoughtPrefix + "\n\n" + systemPrompt
+		return c.llm.AskWithLimit(ctx, llm.TierCritical, systemPrompt, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
+	}
+	return c.llm.AskJSONWithLimit(ctx, llm.TierCritical, systemPrompt, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
+}
+
+func (c *Council) compilePerspectiveJSON(ctx context.Context, archetype, systemPrompt, thesisPrompt, rawResponse string) (string, error) {
+	compileCtx, cancel := context.WithTimeout(ctx, councilCompilerTimeout)
+	defer cancel()
+
+	req := llm.Request{
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: councilCompilerPrompt},
+			{Role: llm.RoleUser, Content: fmt.Sprintf("Council voice: %s\n\nOriginal council system prompt:\n%s\n\nThesis under review:\n%s\n\nCouncil reasoning transcript:\n%s", archetype, systemPrompt, thesisPrompt, rawResponse)},
+		},
+		Model:       c.compilerModel,
+		Tier:        llm.TierSpeed,
+		MaxTokens:   councilCompilerMaxTokens,
+		Temperature: 0.0,
+		JSONMode:    true,
+	}
+
+	resp, err := c.llm.Complete(compileCtx, req)
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
 }
 
 func (c *Council) synthesize(thesis *model.Thesis, results []perspectiveResult) *model.CouncilVerdict {

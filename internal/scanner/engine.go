@@ -87,6 +87,21 @@ Respond in JSON:
   "reasoning": "brief explanation, 12 words max"
 }`
 
+const scannerStructuredFastPrompt = `Return one final JSON object only.
+Default to tradeable=false.
+Only set tradeable=true if there is a specific catalyst, exact instruments, confirmed evidence, and enough expected move.
+
+JSON:
+{
+  "tradeable": true/false,
+  "score": 0-100,
+  "instruments": [{"symbol": "AAPL", "sec_type": "STK", "currency": "USD"}],
+  "direction": "long|short|none",
+  "urgency": 0.0-1.0,
+  "category": "geopolitical|macro|corporate|flows|tail|volatility|sector|systematic",
+  "reasoning": "brief explanation, 12 words max"
+}`
+
 const scannerThoughtPrompt = `You are a trading signal scanner. Most signals are noise.
 Do not restate the request, rubric, or output schema.
 Think briefly if useful, but keep it to at most 3 short bullets.
@@ -200,7 +215,49 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 		if isUnavailableLLMError(err) {
 			e.tripLLMCooldown(time.Now().UTC(), err)
 		}
+		if requestCfg.allowStructuredFallback && isScannerTimeoutError(err) {
+			fallbackResp, fallbackPrompt, fallbackErr := e.retryStructuredFallback(ctx, domain, sig)
+			if fallbackErr == nil {
+				e.log.Info("scanner structured fallback recovered decision",
+					"signal_id", sig.ID,
+					"prompt_chars", len(fallbackPrompt),
+					"max_tokens", scannerCompactMaxTokens,
+				)
+				resp = fallbackResp
+				usedPrompt = fallbackPrompt
+				e.clearLLMCooldown()
+				err = nil
+				break
+			}
+			e.log.Warn("scanner structured fallback failed",
+				"signal_id", sig.ID,
+				"error", fallbackErr,
+				"prompt_chars", len(candidate.content),
+				"max_tokens", candidate.maxTokens,
+			)
+		}
 		if i == len(prompts)-1 || !isScannerCompactRetryError(err) {
+			if requestCfg.allowStructuredFallback && !isUnavailableLLMError(err) {
+				fallbackResp, fallbackPrompt, fallbackErr := e.retryStructuredFallback(ctx, domain, sig)
+				if fallbackErr == nil {
+					e.log.Info("scanner structured fallback recovered decision",
+						"signal_id", sig.ID,
+						"prompt_chars", len(fallbackPrompt),
+						"max_tokens", scannerCompactMaxTokens,
+					)
+					resp = fallbackResp
+					usedPrompt = fallbackPrompt
+					e.clearLLMCooldown()
+					err = nil
+					break
+				}
+				e.log.Warn("scanner structured fallback failed",
+					"signal_id", sig.ID,
+					"error", fallbackErr,
+					"prompt_chars", len(candidate.content),
+					"max_tokens", candidate.maxTokens,
+				)
+			}
 			e.log.Warn("scanner LLM error",
 				"error", err,
 				"signal_id", sig.ID,
@@ -298,6 +355,18 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 	return opp, true
 }
 
+func (e *Engine) retryStructuredFallback(ctx context.Context, domain string, sig signal.Signal) (string, string, error) {
+	prompt := buildCompactPrompt(domain, sig)
+	reqCtx, cancel := context.WithTimeout(ctx, scannerRequestTimeout)
+	defer cancel()
+
+	resp, err := e.askScannerWithLimit(reqCtx, scannerStructuredFastPrompt, prompt, scannerCompactMaxTokens, 0.0, true)
+	if err != nil {
+		return "", prompt, err
+	}
+	return resp, prompt, nil
+}
+
 func (e *Engine) askScannerWithLimit(ctx context.Context, system, prompt string, maxTokens int, temperature float64, jsonMode bool) (string, error) {
 	req := llm.Request{
 		Messages: []llm.Message{
@@ -344,23 +413,25 @@ func (e *Engine) compileScannerDecision(ctx context.Context, signalPrompt, rawRe
 }
 
 type scannerRequestConfig struct {
-	systemPrompt          string
-	jsonMode              bool
-	timeout               time.Duration
-	maxTokens             int
-	compactMaxTokens      int
-	allowCompilerFallback bool
+	systemPrompt            string
+	jsonMode                bool
+	timeout                 time.Duration
+	maxTokens               int
+	compactMaxTokens        int
+	allowCompilerFallback   bool
+	allowStructuredFallback bool
 }
 
 func (e *Engine) requestConfig() scannerRequestConfig {
 	if e.responseMode == scannerResponseModeThought {
 		return scannerRequestConfig{
-			systemPrompt:          scannerThoughtPrompt,
-			jsonMode:              false,
-			timeout:               scannerThinkingRequestTimeout,
-			maxTokens:             scannerThinkingMaxTokens,
-			compactMaxTokens:      scannerThinkingCompactTokens,
-			allowCompilerFallback: e.compilerModel != "",
+			systemPrompt:            scannerThoughtPrompt,
+			jsonMode:                false,
+			timeout:                 scannerThinkingRequestTimeout,
+			maxTokens:               scannerThinkingMaxTokens,
+			compactMaxTokens:        scannerThinkingCompactTokens,
+			allowCompilerFallback:   e.compilerModel != "",
+			allowStructuredFallback: true,
 		}
 	}
 
@@ -389,6 +460,10 @@ func buildScannerCompilerPrompt(signalPrompt, rawResponse string) string {
 
 func isScannerCompactRetryError(err error) bool {
 	return isContextWindowError(err) || strings.Contains(strings.ToLower(err.Error()), "context deadline exceeded")
+}
+
+func isScannerTimeoutError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "context deadline exceeded")
 }
 
 func detectScannerResponseMode(model string) scannerResponseMode {
@@ -913,6 +988,42 @@ func buildPrompt(domain, content string) string {
 	}
 	prompt += fmt.Sprintf("\nSignal:\n%s", content)
 	return prompt
+}
+
+func buildCompactPrompt(domain string, sig signal.Signal) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Domain: %s\n", domain))
+	sb.WriteString(fmt.Sprintf("Source: %s\n", sig.Source))
+	sb.WriteString(fmt.Sprintf("Type: %s\n", sig.Type))
+	sb.WriteString(fmt.Sprintf("Urgency: %.2f\n", sig.Urgency))
+	if len(sig.CorroboratingSources) > 0 {
+		sb.WriteString(fmt.Sprintf("Corroborating sources: %s\n", strings.Join(sampleStrings(sig.CorroboratingSources, 2), ", ")))
+	}
+	if sig.EvidenceMeta != nil {
+		sb.WriteString(fmt.Sprintf("Source trust: %.2f\n", sig.EvidenceMeta.SourceTrust))
+		sb.WriteString(fmt.Sprintf("Evidence score: %.2f\n", sig.EvidenceMeta.EvidenceScore))
+	}
+	if len(sig.Entities) > 0 {
+		names := make([]string, 0, 4)
+		for _, entity := range sig.Entities {
+			if entity.Name == "" {
+				continue
+			}
+			names = append(names, entity.Name)
+			if len(names) == 4 {
+				break
+			}
+		}
+		if len(names) > 0 {
+			sb.WriteString(fmt.Sprintf("Entities: %s\n", strings.Join(names, ", ")))
+		}
+	}
+	content := sig.Translated
+	if content == "" && len(sig.Raw) > 0 {
+		content = string(sig.Raw)
+	}
+	sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(content, 180)))
+	return sb.String()
 }
 
 func isContextWindowError(err error) bool {

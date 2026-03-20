@@ -130,6 +130,21 @@ func (s *scannerCompilerFallbackClient) Complete(_ context.Context, req llm.Requ
 	}
 }
 
+type scannerThoughtTimeoutThenStructuredFallbackClient struct {
+	requests []llm.Request
+}
+
+func (s *scannerThoughtTimeoutThenStructuredFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if !req.JSONMode {
+		return nil, fmt.Errorf("http request: Post \"http://127.0.0.1:1234/v1/chat/completions\": context deadline exceeded")
+	}
+	return &llm.Response{
+		Content: `{"tradeable":true,"score":83,"instruments":[{"symbol":"NVDA","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.9,"category":"corporate","reasoning":"earnings beat and guidance raise with clean confirmation"}`,
+		Model:   "stub",
+	}, nil
+}
+
 func TestEvaluateRetriesCompactPromptOnContextWindowError(t *testing.T) {
 	t.Setenv("SCANNER_RESPONSE_MODE", "json")
 
@@ -283,6 +298,38 @@ func TestEvaluateFallsBackToCompilerWhenThoughtModeMissesFinalBlock(t *testing.T
 	}
 	if opp.Direction != model.Short || len(opp.Instruments) != 1 || opp.Instruments[0].Symbol != "TLT" {
 		t.Fatalf("unexpected compiler fallback opportunity: %+v", opp)
+	}
+}
+
+func TestEvaluateFallsBackToStructuredJSONAfterThoughtTimeouts(t *testing.T) {
+	t.Setenv("SCANNER_MODEL", "qwen/qwen3.5-9b")
+
+	client := &scannerThoughtTimeoutThenStructuredFallbackClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	opp, ok := engine.Evaluate(context.Background(), signal.Signal{
+		ID:         "sig-thought-timeout",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "corporate",
+		Timestamp:  time.Now(),
+		Urgency:    0.95,
+		Translated: "NVIDIA beats earnings, raises guidance, and says AI backlog expanded materially into next quarter.",
+	}, "corporate")
+	if !ok || opp == nil {
+		t.Fatal("expected structured fallback to recover an opportunity")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected one thought attempt plus one structured fallback, got %d", got)
+	}
+	if client.requests[0].JSONMode {
+		t.Fatal("expected initial Qwen attempt to stay in thought mode")
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected final scanner fallback to force structured JSON mode")
+	}
+	if opp.Instruments[0].Symbol != "NVDA" {
+		t.Fatalf("unexpected structured fallback opportunity: %+v", opp)
 	}
 }
 

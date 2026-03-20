@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"time"
 
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/pkg/model"
@@ -13,14 +15,21 @@ import (
 // Prosecutor tries to kill every thesis before it can trade.
 // Uses the critical-tier LLM (Claude Sonnet) for maximum reasoning depth.
 type Prosecutor struct {
-	log *slog.Logger
-	llm *llm.Router
+	log           *slog.Logger
+	llm           *llm.Router
+	selectedModel string
+	responseMode  structuredResponseMode
+	compilerModel string
 }
 
 func NewProsecutor(llmRouter *llm.Router) *Prosecutor {
+	selectedModel := criticalSelectedModel()
 	return &Prosecutor{
-		log: slog.Default().With("component", "prosecutor"),
-		llm: llmRouter,
+		log:           slog.Default().With("component", "prosecutor"),
+		llm:           llmRouter,
+		selectedModel: selectedModel,
+		responseMode:  detectStructuredResponseMode(os.Getenv("PROSECUTION_RESPONSE_MODE"), selectedModel),
+		compilerModel: structuredCompilerModel("PROSECUTION_COMPILER_MODEL"),
 	}
 }
 
@@ -54,6 +63,27 @@ Respond in JSON:
 }`
 
 const prosecutionMaxTokens = 768
+const prosecutionCompilerTimeout = 15 * time.Second
+const prosecutionCompilerMaxTokens = 900
+
+const prosecutionThoughtPrefix = `Do not restate the request or schema.
+Think if useful, but keep it concise.
+You must end with exactly one JSON object matching the requested schema.`
+
+const prosecutionCompilerPrompt = `You are a prosecution-result compiler.
+You will receive the original prosecution task and a freeform reasoning transcript from a trading prosecutor.
+Return one final JSON object only. No prose, no markdown, no thinking.
+
+JSON schema:
+{
+  "verdict": "killed|weakened|survived|strengthened",
+  "bear_args": ["...", "..."],
+  "missing_data": ["...", "..."],
+  "historical_analogues": ["...", "..."],
+  "crowded_score": 0.0,
+  "confidence_adjustment": 0.0,
+  "reasoning": "..."
+}`
 
 // Challenge attempts to kill a thesis
 func (p *Prosecutor) Challenge(ctx context.Context, thesis *model.Thesis) *model.Prosecution {
@@ -84,7 +114,7 @@ Quant Metrics:
 		formatQuantMetrics(thesis.QuantMetrics),
 	)
 
-	resp, err := p.llm.AskJSONWithLimit(ctx, llm.TierCritical, prosecutionPrompt, prompt, prosecutionMaxTokens, 0.2)
+	resp, err := p.askProsecutionWithFallbackMode(ctx, prompt)
 	if err != nil {
 		p.log.Error("prosecution LLM error", "error", err, "thesis_id", thesis.ID)
 		// On LLM error, default to weakened (conservative)
@@ -96,6 +126,27 @@ Quant Metrics:
 	}
 
 	cleaned, cleanErr := llm.ExtractJSON(resp)
+	if cleanErr != nil {
+		if p.compilerModel != "" {
+			if compiled, compileErr := p.compileProsecutionJSON(ctx, prompt, resp); compileErr == nil {
+				if compiledJSON, extractErr := llm.ExtractJSON(compiled); extractErr == nil {
+					cleaned = compiledJSON
+					cleanErr = nil
+					p.log.Info("prosecution compiler recovered structured verdict",
+						"thesis_id", thesis.ID,
+						"compiler_model", p.compilerModel,
+					)
+				}
+			} else {
+				p.log.Warn("prosecution compiler fallback failed",
+					"thesis_id", thesis.ID,
+					"compiler_model", p.compilerModel,
+					"error", compileErr,
+				)
+			}
+		}
+	}
+
 	if cleanErr != nil {
 		p.log.Error("prosecution JSON extraction failed",
 			"error", cleanErr,
@@ -137,6 +188,38 @@ Quant Metrics:
 	)
 
 	return prosecution
+}
+
+func (p *Prosecutor) askProsecutionWithFallbackMode(ctx context.Context, prompt string) (string, error) {
+	systemPrompt := prosecutionPrompt
+	if p.responseMode == structuredResponseModeThought {
+		systemPrompt = prosecutionThoughtPrefix + "\n\n" + prosecutionPrompt
+		return p.llm.AskWithLimit(ctx, llm.TierCritical, systemPrompt, prompt, prosecutionMaxTokens, 0.2)
+	}
+	return p.llm.AskJSONWithLimit(ctx, llm.TierCritical, systemPrompt, prompt, prosecutionMaxTokens, 0.2)
+}
+
+func (p *Prosecutor) compileProsecutionJSON(ctx context.Context, originalPrompt, rawResponse string) (string, error) {
+	compileCtx, cancel := context.WithTimeout(ctx, prosecutionCompilerTimeout)
+	defer cancel()
+
+	req := llm.Request{
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: prosecutionCompilerPrompt},
+			{Role: llm.RoleUser, Content: fmt.Sprintf("Original prosecution task:\n%s\n\nProsecution reasoning transcript:\n%s", originalPrompt, rawResponse)},
+		},
+		Model:       p.compilerModel,
+		Tier:        llm.TierSpeed,
+		MaxTokens:   prosecutionCompilerMaxTokens,
+		Temperature: 0.0,
+		JSONMode:    true,
+	}
+
+	resp, err := p.llm.Complete(compileCtx, req)
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
 }
 
 type prosecutionResult struct {

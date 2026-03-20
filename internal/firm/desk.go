@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,13 +87,13 @@ type DeskConfig struct {
 	CouncilThreshold float64
 }
 
-const (
-	deskScannerTimeout    = 20 * time.Second
-	deskResearchTimeout   = 45 * time.Second
-	deskProsecutionTimout = 35 * time.Second
-	deskCouncilTimeout    = 45 * time.Second
-	deskExecutionTimeout  = 30 * time.Second
-	deskSlowStageWarnAt   = 10 * time.Second
+var (
+	deskScannerTimeout    = readDeskDurationEnv("DESK_SCANNER_TIMEOUT", 20*time.Second)
+	deskResearchTimeout   = readDeskDurationEnv("DESK_RESEARCH_TIMEOUT", 45*time.Second)
+	deskProsecutionTimout = readDeskDurationEnv("DESK_PROSECUTION_TIMEOUT", 35*time.Second)
+	deskCouncilTimeout    = readDeskDurationEnv("DESK_COUNCIL_TIMEOUT", 45*time.Second)
+	deskExecutionTimeout  = readDeskDurationEnv("DESK_EXECUTION_TIMEOUT", 30*time.Second)
+	deskSlowStageWarnAt   = readDeskDurationEnv("DESK_SLOW_STAGE_WARN_AT", 10*time.Second)
 )
 
 func NewDesk(cfg DeskConfig) *Desk {
@@ -450,6 +452,18 @@ func evidenceScoreValue(meta *evidence.Metadata) float64 {
 		return 0
 	}
 	return meta.EvidenceScore
+}
+
+func readDeskDurationEnv(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func (d *Desk) ProcessOutcome(ctx context.Context, thesis *model.Thesis, outcome *model.ThesisOutcome) {

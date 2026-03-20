@@ -95,7 +95,44 @@ func (s *scannerErrorClient) Complete(_ context.Context, _ llm.Request) (*llm.Re
 	return nil, s.err
 }
 
+type scannerTimeoutThenSuccessClient struct {
+	requests []llm.Request
+}
+
+func (s *scannerTimeoutThenSuccessClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if len(s.requests) == 1 {
+		return nil, fmt.Errorf("http request: Post \"http://127.0.0.1:1234/v1/chat/completions\": context deadline exceeded")
+	}
+	return &llm.Response{
+		Content: `{"tradeable":true,"score":81,"instruments":[{"symbol":"AAPL","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.6,"category":"corporate","reasoning":"earnings catalyst with clean setup"}`,
+		Model:   "stub",
+	}, nil
+}
+
+type scannerCompilerFallbackClient struct {
+	requests []llm.Request
+}
+
+func (s *scannerCompilerFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	switch len(s.requests) {
+	case 1:
+		return &llm.Response{
+			Content: "Thinking Process:\n1. This looks actionable but the model forgot the final block.",
+			Model:   "scanner",
+		}, nil
+	default:
+		return &llm.Response{
+			Content: `{"tradeable":true,"score":84,"instruments":[{"symbol":"TLT","sec_type":"STK","currency":"USD"}],"direction":"short","urgency":0.7,"category":"macro","reasoning":"rates repricing after hawkish surprise"}`,
+			Model:   "compiler",
+		}, nil
+	}
+}
+
 func TestEvaluateRetriesCompactPromptOnContextWindowError(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+
 	client := &scannerStubClient{}
 	engine := NewEngine(llm.NewRouter(client, client, client), 70)
 
@@ -130,6 +167,122 @@ func TestEvaluateRetriesCompactPromptOnContextWindowError(t *testing.T) {
 	}
 	if opp.Direction != model.Long {
 		t.Fatalf("expected long opportunity, got %s", opp.Direction)
+	}
+}
+
+func TestEvaluateUsesThoughtModeForQwenScanner(t *testing.T) {
+	t.Setenv("SCANNER_MODEL", "qwen/qwen3.5-9b")
+
+	client := &scannerStubClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	_, _ = engine.Evaluate(context.Background(), signal.Signal{
+		ID:         "sig-thought",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: "Central bank communication shifted meaningfully toward renewed tightening.",
+	}, "macro")
+
+	if len(client.requests) == 0 {
+		t.Fatal("expected scanner request")
+	}
+	if client.requests[0].JSONMode {
+		t.Fatal("expected Qwen scanner to avoid strict JSON mode")
+	}
+	if got := client.requests[0].Messages[0].Content; !strings.Contains(got, "FINAL_DECISION") {
+		t.Fatalf("expected thought-mode scanner prompt, got %q", got)
+	}
+}
+
+func TestEvaluateUsesStructuredJSONForNonQwenScanner(t *testing.T) {
+	t.Setenv("SCANNER_MODEL", "google/gemma-3-27b")
+
+	client := &scannerStubClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	_, _ = engine.Evaluate(context.Background(), signal.Signal{
+		ID:         "sig-json",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: "Central bank communication shifted meaningfully toward renewed tightening.",
+	}, "macro")
+
+	if len(client.requests) == 0 {
+		t.Fatal("expected scanner request")
+	}
+	if !client.requests[0].JSONMode {
+		t.Fatal("expected non-Qwen scanner to stay in strict JSON mode")
+	}
+	if got := client.requests[0].Messages[0].Content; !strings.Contains(got, "Output one final JSON object only") {
+		t.Fatalf("expected structured scanner prompt, got %q", got)
+	}
+}
+
+func TestEvaluateRetriesCompactPromptOnTimeout(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+
+	client := &scannerTimeoutThenSuccessClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	opp, ok := engine.Evaluate(context.Background(), signal.Signal{
+		ID:         "sig-timeout",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "corporate",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: strings.Repeat("Earnings guidance revision. ", 60),
+	}, "corporate")
+	if !ok || opp == nil {
+		t.Fatal("expected compact retry after timeout to recover an opportunity")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected 2 scanner requests, got %d", got)
+	}
+	if len(client.requests[1].Messages[1].Content) >= len(client.requests[0].Messages[1].Content) {
+		t.Fatalf("expected compact retry prompt to be smaller, got first=%d second=%d", len(client.requests[0].Messages[1].Content), len(client.requests[1].Messages[1].Content))
+	}
+}
+
+func TestEvaluateFallsBackToCompilerWhenThoughtModeMissesFinalBlock(t *testing.T) {
+	t.Setenv("SCANNER_MODEL", "qwen/qwen3.5-9b")
+	t.Setenv("SCANNER_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
+
+	client := &scannerCompilerFallbackClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	opp, ok := engine.Evaluate(context.Background(), signal.Signal{
+		ID:         "sig-compiler",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: "Markets reprice after hawkish central bank surprise.",
+	}, "macro")
+	if !ok || opp == nil {
+		t.Fatal("expected compiler fallback to recover a structured decision")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected thought pass plus compiler pass, got %d requests", got)
+	}
+	if client.requests[0].JSONMode {
+		t.Fatal("expected initial Qwen thought pass to avoid strict JSON mode")
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected compiler pass to force strict JSON mode")
+	}
+	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
+		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	}
+	if opp.Direction != model.Short || len(opp.Instruments) != 1 || opp.Instruments[0].Symbol != "TLT" {
+		t.Fatalf("unexpected compiler fallback opportunity: %+v", opp)
 	}
 }
 
@@ -202,6 +355,93 @@ func TestEvaluateTripsCooldownOnUnavailableLLM(t *testing.T) {
 	}
 	if client.requests != 1 {
 		t.Fatalf("expected cooldown to suppress follow-up LLM call, got %d requests", client.requests)
+	}
+}
+
+func TestEvaluateParsesThoughtfulTerminalDecisionBlock(t *testing.T) {
+	result, err := parseScanResponse(`Thinking Process:
+
+1. This is meaningful macro news.
+2. It still lacks a precise directional setup.
+
+FINAL_DECISION
+tradeable: true
+score: 82
+instruments: TLT:ETF:USD, XLF:STK:USD
+direction: short
+urgency: 0.67
+category: macro
+reasoning: tighter liquidity pressures long duration risk assets
+END_FINAL_DECISION`)
+	if err != nil {
+		t.Fatalf("expected structured decision block to parse, got %v", err)
+	}
+	if !result.Tradeable || result.Score != 82 {
+		t.Fatalf("unexpected parsed decision: %+v", result)
+	}
+	if result.Direction != "short" || result.Category != "macro" {
+		t.Fatalf("unexpected parsed direction/category: %+v", result)
+	}
+	if len(result.Instruments) != 2 {
+		t.Fatalf("expected 2 parsed instruments, got %+v", result.Instruments)
+	}
+}
+
+func TestEvaluateParsesCaseInsensitiveDecisionBlock(t *testing.T) {
+	result, err := parseScanResponse(`thinking process
+
+Final_Decision
+tradeable: false
+score: 18
+instruments: none
+direction: none
+urgency: 0.10
+category: macro
+reasoning: low signal
+End_Final_Decision`)
+	if err != nil {
+		t.Fatalf("expected mixed-case decision block to parse, got %v", err)
+	}
+	if result.Tradeable {
+		t.Fatalf("expected non-tradeable decision, got %+v", result)
+	}
+	if result.Direction != "none" || len(result.Instruments) != 0 {
+		t.Fatalf("unexpected parsed decision: %+v", result)
+	}
+}
+
+func TestParseScanResponseRecoversConservativeRejectFromIncompleteThought(t *testing.T) {
+	result, err := parseScanResponse(`Thinking Process:
+
+1. Analyze the signal.
+2. It does not meet the criteria because there is no clear catalyst.
+3. No exact instrument is justified from the text.
+
+Domain filter: macro
+`)
+	if err != nil {
+		t.Fatalf("expected conservative reject recovery, got %v", err)
+	}
+	if result.Tradeable {
+		t.Fatalf("expected recovered reject, got %+v", result)
+	}
+	if result.Category != "macro" {
+		t.Fatalf("expected inferred macro category, got %+v", result)
+	}
+	if !strings.Contains(result.Reasoning, "no clear catalyst") {
+		t.Fatalf("expected recovered reasoning, got %+v", result)
+	}
+}
+
+func TestParseScanResponseDoesNotSilentlyRejectPositiveThoughtTrace(t *testing.T) {
+	_, err := parseScanResponse(`Thinking Process:
+
+1. This signal is tradeable.
+2. There is a clear actionable trade and it meets all criteria.
+3. The model forgot to emit the final block.
+`)
+	if err == nil {
+		t.Fatal("expected positive incomplete thought trace to remain a parse error")
 	}
 }
 

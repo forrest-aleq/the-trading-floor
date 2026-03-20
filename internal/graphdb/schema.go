@@ -135,6 +135,54 @@ func (c *Client) linkSignalLineage(ctx context.Context, tx neo4j.ManagedTransact
 		}
 	}
 
+	originRegion := evidenceString(meta, func() string { return meta.OriginRegion })
+	if originRegion != "" {
+		if err := runQuery(ctx, tx, `
+			MERGE (r:Region {id: $id})
+			SET r.name = $name,
+			    r.updated_at = $updated_at`,
+			map[string]any{
+				"id":         originRegion,
+				"name":       originRegion,
+				"updated_at": now,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MATCH (s:Signal {id: $signal_id})
+			MATCH (r:Region {id: $region})
+			MERGE (s)-[rel:ORIGINATED_IN]->(r)
+			SET rel.event_time = $event_time,
+			    rel.observed_time = $observed_time,
+			    rel.decision_time = $decision_time`,
+			map[string]any{
+				"signal_id":     sig.ID,
+				"region":        originRegion,
+				"event_time":    normalizeTime(sig.Timestamp, now),
+				"observed_time": normalizeTime(sig.Timestamp, now),
+				"decision_time": now,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MATCH (src:Source {id: $source_id})
+			MATCH (r:Region {id: $region})
+			MERGE (src)-[rel:OPERATES_IN]->(r)
+			SET rel.observed_time = $observed_time,
+			    rel.decision_time = $decision_time`,
+			map[string]any{
+				"source_id":     sourceID,
+				"region":        originRegion,
+				"observed_time": normalizeTime(sig.Timestamp, now),
+				"decision_time": now,
+			},
+		); err != nil {
+			return err
+		}
+	}
+
 	lang := primaryLanguage(sig)
 	if lang == "" {
 		return nil
@@ -417,8 +465,12 @@ func (c *Client) linkEvidenceAssessment(ctx context.Context, tx neo4j.ManagedTra
 		SET e.evidence_score = $evidence_score,
 		    e.source_trust = $source_trust,
 		    e.original_language = $original_language,
+		    e.origin_region = $origin_region,
 		    e.translation_provider = $translation_provider,
 		    e.translation_confidence = $translation_confidence,
+		    e.lead_time_average_hours = $lead_time_average_hours,
+		    e.lead_time_observations = $lead_time_observations,
+		    e.lead_time_score = $lead_time_score,
 		    e.fact_confidence = $fact_confidence,
 		    e.novelty_confidence = $novelty_confidence,
 		    e.market_mapping_confidence = $market_mapping_confidence,
@@ -435,8 +487,12 @@ func (c *Client) linkEvidenceAssessment(ctx context.Context, tx neo4j.ManagedTra
 			"evidence_score":            meta.EvidenceScore,
 			"source_trust":              meta.SourceTrust,
 			"original_language":         strings.TrimSpace(meta.OriginalLanguage),
+			"origin_region":             strings.TrimSpace(meta.OriginRegion),
 			"translation_provider":      strings.TrimSpace(meta.TranslationProvider),
 			"translation_confidence":    meta.TranslationConfidence,
+			"lead_time_average_hours":   meta.LeadTimeAverageHours,
+			"lead_time_observations":    meta.LeadTimeObservations,
+			"lead_time_score":           meta.LeadTimeScore,
 			"fact_confidence":           evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.FactConfidence }),
 			"novelty_confidence":        evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.NoveltyConfidence }),
 			"market_mapping_confidence": evidenceConfidence(meta, func(v *evidence.ConfidenceVector) float64 { return v.MarketMappingConfidence }),

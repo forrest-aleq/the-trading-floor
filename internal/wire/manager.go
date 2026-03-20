@@ -22,6 +22,7 @@ type Manager struct {
 	log         *slog.Logger
 	feeds       []Feed
 	subscribers []chan signal.Signal
+	ingress     chan signal.Signal
 	mu          sync.RWMutex
 	statsMu     sync.RWMutex
 
@@ -33,6 +34,7 @@ type Manager struct {
 	clusterer       *Clusterer
 	narratives      *NarrativeCorrelator
 	crossReferencer *CrossReferencer
+	leadTracker     *LeadTimeTracker
 
 	// Metrics
 	totalReceived     atomic.Int64
@@ -49,9 +51,10 @@ type Manager struct {
 	lastSignalAt      time.Time
 
 	// Config
-	bufferSize    int
-	maxOverflow   int
-	retryInterval time.Duration
+	bufferSize     int
+	maxOverflow    int
+	retryInterval  time.Duration
+	publishTimeout time.Duration
 }
 
 // Feed is any signal source
@@ -66,11 +69,14 @@ func NewManager() *Manager {
 		bufferSize:       10000,
 		maxOverflow:      50000,
 		retryInterval:    50 * time.Millisecond,
+		publishTimeout:   250 * time.Millisecond,
+		ingress:          make(chan signal.Signal, 10000),
 		overflowNotify:   make(chan struct{}, 1),
 		deduper:          NewDeduper(2048, 0.92),
 		clusterer:        NewClusterer(1024, 0.88),
 		narratives:       NewNarrativeCorrelator(1024),
 		crossReferencer:  NewCrossReferencer(4096, 16),
+		leadTracker:      NewLeadTimeTracker(2048, 16),
 		receivedBySource: make(map[string]int64),
 		dedupedBySource:  make(map[string]int64),
 	}
@@ -91,17 +97,28 @@ func (m *Manager) Subscribe() <-chan signal.Signal {
 	return ch
 }
 
+func (m *Manager) Publish(ctx context.Context, sig signal.Signal) error {
+	timer := time.NewTimer(m.publishTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case m.ingress <- sig:
+		return nil
+	case <-timer.C:
+		return errors.New("wire publish timed out waiting for ingress capacity")
+	}
+}
+
 // Start begins all feeds and fans out signals to subscribers
 func (m *Manager) Start(ctx context.Context) error {
-	// Central channel all feeds write to
-	ingress := make(chan signal.Signal, m.bufferSize)
-
 	// Start all feeds
 	for _, feed := range m.feeds {
 		f := feed
 		observe.SafeGo(m.log, "feed panic", func() {
 			m.log.Info("starting feed", "name", f.Name())
-			if err := f.Start(ctx, ingress); err != nil {
+			if err := f.Start(ctx, m.ingress); err != nil {
 				if errors.Is(err, context.Canceled) {
 					m.log.Info("feed stopped", "name", f.Name())
 					return
@@ -117,7 +134,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return
-			case sig, ok := <-ingress:
+			case sig, ok := <-m.ingress:
 				if !ok {
 					return
 				}
@@ -145,6 +162,9 @@ func (m *Manager) Start(ctx context.Context) error {
 				}
 				if m.crossReferencer != nil {
 					sig = m.crossReferencer.Enrich(sig)
+				}
+				if m.leadTracker != nil {
+					sig = m.leadTracker.Enrich(sig)
 				}
 				if len(sig.CorroboratingSources) > 0 {
 					m.totalCorroborated.Add(1)

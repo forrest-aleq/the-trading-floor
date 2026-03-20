@@ -2,10 +2,12 @@ package risk
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -63,11 +65,35 @@ func DefaultLimits() Limits {
 }
 
 func NewGate(limits Limits) *Gate {
+	log := slog.Default().With("component", "risk")
 	return &Gate{
-		log:    slog.Default().With("component", "risk"),
+		log:    log,
 		limits: limits,
-		secret: []byte("trading-floor-token-secret"), // TODO: from env
+		secret: loadTokenSecret(log),
 	}
+}
+
+func loadTokenSecret(log *slog.Logger) []byte {
+	if secret := strings.TrimSpace(os.Getenv("RISK_TOKEN_SECRET")); secret != "" {
+		if len(secret) < 32 {
+			log.Error("RISK_TOKEN_SECRET is too short; refusing startup with invalid configured secret",
+				"configured_length", len(secret),
+				"minimum_length", 32,
+			)
+			panic("RISK_TOKEN_SECRET must be at least 32 characters")
+		} else {
+			return []byte(secret)
+		}
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err == nil {
+		log.Warn("RISK_TOKEN_SECRET not set; using ephemeral session secret")
+		return []byte(hex.EncodeToString(buf))
+	}
+
+	log.Error("RISK_TOKEN_SECRET not set and random secret generation failed; refusing insecure startup")
+	panic("crypto/rand unavailable: cannot generate secure token signing secret")
 }
 
 // PortfolioState is the current state needed for risk checks

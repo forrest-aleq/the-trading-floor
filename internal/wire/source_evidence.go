@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hnic/trading-floor/internal/entityresolve"
 	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
@@ -20,6 +21,7 @@ type sourceProfile struct {
 	Tier       string
 	Type       string
 	Trust      float64
+	Region     string
 }
 
 var (
@@ -27,35 +29,35 @@ var (
 		match   string
 		profile sourceProfile
 	}{
-		{match: "sec-edgar", profile: sourceProfile{Domain: "sec.gov", OwnerGroup: "sec", Tier: "primary", Type: "primary", Trust: 0.95}},
-		{match: "fed-", profile: sourceProfile{Domain: "federalreserve.gov", OwnerGroup: "federal_reserve", Tier: "primary", Type: "primary", Trust: 0.93}},
-		{match: "fred", profile: sourceProfile{Domain: "fred.stlouisfed.org", OwnerGroup: "federal_reserve", Tier: "primary", Type: "primary", Trust: 0.92}},
-		{match: "reuters", profile: sourceProfile{Domain: "reuters.com", OwnerGroup: "thomson_reuters", Tier: "major_press", Type: "secondary", Trust: 0.90}},
-		{match: "ft", profile: sourceProfile{Domain: "ft.com", OwnerGroup: "nikkei", Tier: "major_press", Type: "secondary", Trust: 0.86}},
-		{match: "cnbc", profile: sourceProfile{Domain: "cnbc.com", OwnerGroup: "nbcuniversal", Tier: "major_press", Type: "secondary", Trust: 0.84}},
-		{match: "apnews", profile: sourceProfile{Domain: "apnews.com", OwnerGroup: "associated_press", Tier: "major_press", Type: "secondary", Trust: 0.89}},
-		{match: "stocktwits", profile: sourceProfile{Domain: "stocktwits.com", OwnerGroup: "stocktwits", Tier: "social", Type: "social", Trust: 0.38}},
-		{match: "reddit/", profile: sourceProfile{Domain: "reddit.com", OwnerGroup: "reddit", Tier: "social", Type: "social", Trust: 0.32}},
-		{match: "telegram/", profile: sourceProfile{Domain: "telegram.org", OwnerGroup: "telegram", Tier: "social", Type: "social", Trust: 0.34}},
-		{match: "ibkr-market", profile: sourceProfile{Domain: "interactivebrokers.com", OwnerGroup: "interactive_brokers", Tier: "primary", Type: "market", Trust: 0.97}},
-		{match: "earnings-calendar", profile: sourceProfile{Domain: "", OwnerGroup: "earnings_provider", Tier: "aggregator", Type: "secondary", Trust: 0.68}},
-		{match: "alternative/", profile: sourceProfile{Domain: "", OwnerGroup: "alternative_data", Tier: "industry", Type: "alternative", Trust: 0.60}},
+		{match: "sec-edgar", profile: sourceProfile{Domain: "sec.gov", OwnerGroup: "sec", Tier: "primary", Type: "primary", Trust: 0.95, Region: "us"}},
+		{match: "fed-", profile: sourceProfile{Domain: "federalreserve.gov", OwnerGroup: "federal_reserve", Tier: "primary", Type: "primary", Trust: 0.93, Region: "us"}},
+		{match: "fred", profile: sourceProfile{Domain: "fred.stlouisfed.org", OwnerGroup: "federal_reserve", Tier: "primary", Type: "primary", Trust: 0.92, Region: "us"}},
+		{match: "reuters", profile: sourceProfile{Domain: "reuters.com", OwnerGroup: "thomson_reuters", Tier: "major_press", Type: "secondary", Trust: 0.90, Region: "global"}},
+		{match: "ft", profile: sourceProfile{Domain: "ft.com", OwnerGroup: "nikkei", Tier: "major_press", Type: "secondary", Trust: 0.86, Region: "europe"}},
+		{match: "cnbc", profile: sourceProfile{Domain: "cnbc.com", OwnerGroup: "nbcuniversal", Tier: "major_press", Type: "secondary", Trust: 0.84, Region: "us"}},
+		{match: "apnews", profile: sourceProfile{Domain: "apnews.com", OwnerGroup: "associated_press", Tier: "major_press", Type: "secondary", Trust: 0.89, Region: "us"}},
+		{match: "stocktwits", profile: sourceProfile{Domain: "stocktwits.com", OwnerGroup: "stocktwits", Tier: "social", Type: "social", Trust: 0.38, Region: "us"}},
+		{match: "reddit/", profile: sourceProfile{Domain: "reddit.com", OwnerGroup: "reddit", Tier: "social", Type: "social", Trust: 0.32, Region: "global"}},
+		{match: "telegram/", profile: sourceProfile{Domain: "telegram.org", OwnerGroup: "telegram", Tier: "social", Type: "social", Trust: 0.34, Region: "global"}},
+		{match: "ibkr-market", profile: sourceProfile{Domain: "interactivebrokers.com", OwnerGroup: "interactive_brokers", Tier: "primary", Type: "market", Trust: 0.97, Region: "global"}},
+		{match: "earnings-calendar", profile: sourceProfile{Domain: "", OwnerGroup: "earnings_provider", Tier: "aggregator", Type: "secondary", Trust: 0.68, Region: "us"}},
+		{match: "alternative/", profile: sourceProfile{Domain: "", OwnerGroup: "alternative_data", Tier: "industry", Type: "alternative", Trust: 0.60, Region: "global"}},
 	}
 	domainProfiles = []struct {
 		suffix  string
 		profile sourceProfile
 	}{
-		{suffix: "sec.gov", profile: sourceProfile{Domain: "sec.gov", OwnerGroup: "sec", Tier: "primary", Type: "primary", Trust: 0.95}},
-		{suffix: "federalreserve.gov", profile: sourceProfile{Domain: "federalreserve.gov", OwnerGroup: "federal_reserve", Tier: "primary", Type: "primary", Trust: 0.93}},
-		{suffix: "stlouisfed.org", profile: sourceProfile{Domain: "fred.stlouisfed.org", OwnerGroup: "federal_reserve", Tier: "primary", Type: "primary", Trust: 0.92}},
-		{suffix: "ft.com", profile: sourceProfile{Domain: "ft.com", OwnerGroup: "nikkei", Tier: "major_press", Type: "secondary", Trust: 0.86}},
-		{suffix: "reuters.com", profile: sourceProfile{Domain: "reuters.com", OwnerGroup: "thomson_reuters", Tier: "major_press", Type: "secondary", Trust: 0.90}},
-		{suffix: "apnews.com", profile: sourceProfile{Domain: "apnews.com", OwnerGroup: "associated_press", Tier: "major_press", Type: "secondary", Trust: 0.89}},
-		{suffix: "cnbc.com", profile: sourceProfile{Domain: "cnbc.com", OwnerGroup: "nbcuniversal", Tier: "major_press", Type: "secondary", Trust: 0.84}},
-		{suffix: "reddit.com", profile: sourceProfile{Domain: "reddit.com", OwnerGroup: "reddit", Tier: "social", Type: "social", Trust: 0.32}},
-		{suffix: "stocktwits.com", profile: sourceProfile{Domain: "stocktwits.com", OwnerGroup: "stocktwits", Tier: "social", Type: "social", Trust: 0.38}},
-		{suffix: "interactivebrokers.com", profile: sourceProfile{Domain: "interactivebrokers.com", OwnerGroup: "interactive_brokers", Tier: "primary", Type: "market", Trust: 0.97}},
-		{suffix: "telegram.org", profile: sourceProfile{Domain: "telegram.org", OwnerGroup: "telegram", Tier: "social", Type: "social", Trust: 0.34}},
+		{suffix: "sec.gov", profile: sourceProfile{Domain: "sec.gov", OwnerGroup: "sec", Tier: "primary", Type: "primary", Trust: 0.95, Region: "us"}},
+		{suffix: "federalreserve.gov", profile: sourceProfile{Domain: "federalreserve.gov", OwnerGroup: "federal_reserve", Tier: "primary", Type: "primary", Trust: 0.93, Region: "us"}},
+		{suffix: "stlouisfed.org", profile: sourceProfile{Domain: "fred.stlouisfed.org", OwnerGroup: "federal_reserve", Tier: "primary", Type: "primary", Trust: 0.92, Region: "us"}},
+		{suffix: "ft.com", profile: sourceProfile{Domain: "ft.com", OwnerGroup: "nikkei", Tier: "major_press", Type: "secondary", Trust: 0.86, Region: "europe"}},
+		{suffix: "reuters.com", profile: sourceProfile{Domain: "reuters.com", OwnerGroup: "thomson_reuters", Tier: "major_press", Type: "secondary", Trust: 0.90, Region: "global"}},
+		{suffix: "apnews.com", profile: sourceProfile{Domain: "apnews.com", OwnerGroup: "associated_press", Tier: "major_press", Type: "secondary", Trust: 0.89, Region: "us"}},
+		{suffix: "cnbc.com", profile: sourceProfile{Domain: "cnbc.com", OwnerGroup: "nbcuniversal", Tier: "major_press", Type: "secondary", Trust: 0.84, Region: "us"}},
+		{suffix: "reddit.com", profile: sourceProfile{Domain: "reddit.com", OwnerGroup: "reddit", Tier: "social", Type: "social", Trust: 0.32, Region: "global"}},
+		{suffix: "stocktwits.com", profile: sourceProfile{Domain: "stocktwits.com", OwnerGroup: "stocktwits", Tier: "social", Type: "social", Trust: 0.38, Region: "us"}},
+		{suffix: "interactivebrokers.com", profile: sourceProfile{Domain: "interactivebrokers.com", OwnerGroup: "interactive_brokers", Tier: "primary", Type: "market", Trust: 0.97, Region: "global"}},
+		{suffix: "telegram.org", profile: sourceProfile{Domain: "telegram.org", OwnerGroup: "telegram", Tier: "social", Type: "social", Trust: 0.34, Region: "global"}},
 	}
 	metricTerms = []string{
 		"revenue", "earnings", "guidance", "margin", "cash flow", "burn", "valuation", "headcount",
@@ -82,6 +84,7 @@ func buildEvidenceMeta(sig signal.Signal) *evidence.Metadata {
 		SourceType:            profile.Type,
 		SourceTrust:           profile.Trust,
 		OriginalLanguage:      signalLanguage(sig),
+		OriginRegion:          inferOriginRegion(sig, profile),
 		TranslationProvider:   strings.TrimSpace(sig.TranslationProvider),
 		TranslationConfidence: roundEvidence(sig.TranslationConfidence),
 		FreshnessStatus:       status,
@@ -137,6 +140,9 @@ func applyProfileDefaults(profile sourceProfile, sig signal.Signal) sourceProfil
 	}
 	if profile.Trust == 0 {
 		profile.Trust = fallbackTrust(sig.Type)
+	}
+	if profile.Region == "" {
+		profile.Region = inferRegionFromLanguage(signalLanguage(sig))
 	}
 	return profile
 }
@@ -428,6 +434,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	if crossLingual {
 		fact += 0.05
 	}
+	if meta.LeadTimeScore > 0 {
+		fact += meta.LeadTimeScore * 0.06
+	}
 	if meta.TranslationConfidence > 0 && meta.OriginalLanguage != "en" {
 		fact += (meta.TranslationConfidence - 0.5) * 0.18
 	}
@@ -448,6 +457,12 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	}
 	if crossLingual {
 		novelty += 0.06
+	}
+	if meta.LeadTimeScore > 0 {
+		novelty += meta.LeadTimeScore * 0.18
+	}
+	if meta.OriginRegion != "" && meta.OriginRegion != "global" {
+		novelty += 0.03
 	}
 	if meta.SourceType == "social" && !corroborated {
 		novelty -= 0.12
@@ -472,6 +487,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	if crossLingual {
 		marketMapping += 0.04
 	}
+	if meta.LeadTimeScore > 0 {
+		marketMapping += meta.LeadTimeScore * 0.12
+	}
 	if meta.SourceType == "social" && !corroborated {
 		marketMapping -= 0.16
 	}
@@ -495,6 +513,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	if crossLingual {
 		expression += 0.04
 	}
+	if meta.LeadTimeScore > 0 {
+		expression += meta.LeadTimeScore * 0.06
+	}
 	expression -= contradictionPenalty(meta) * 0.8
 	if strings.HasPrefix(meta.FreshnessStatus, "stale") {
 		expression -= 0.15
@@ -513,6 +534,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	}
 	if crossLingual {
 		execution += 0.03
+	}
+	if meta.LeadTimeScore > 0 {
+		execution += meta.LeadTimeScore * 0.05
 	}
 	execution -= contradictionPenalty(meta) * 0.7
 	if strings.HasPrefix(meta.FreshnessStatus, "stale") {
@@ -538,6 +562,9 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 	if crossLingual {
 		competence += 0.06
 	}
+	if meta.LeadTimeScore > 0 {
+		competence += meta.LeadTimeScore * 0.08
+	}
 	competence -= contradictionPenalty(meta) * 0.7
 	if meta.SourceType == "social" && !corroborated {
 		competence -= 0.10
@@ -554,6 +581,133 @@ func scoreConfidenceVector(sig signal.Signal, meta *evidence.Metadata) *evidence
 		ExecutionConfidence:     roundEvidence(clampEvidence(execution)),
 		CompetenceConfidence:    roundEvidence(clampEvidence(competence)),
 	}
+}
+
+func inferOriginRegion(sig signal.Signal, profile sourceProfile) string {
+	for _, key := range []string{"region", "country", "location"} {
+		if value := extractRawString(sig.Raw, key); value != "" {
+			if normalized := normalizeRegionLabel(value); normalized != "" {
+				return normalized
+			}
+		}
+	}
+
+	for _, entity := range sig.Entities {
+		if region := entityRegion(entity, signalLanguage(sig)); region != "" {
+			return region
+		}
+	}
+
+	if region := inferRegionFromLanguage(signalLanguage(sig)); region != "" && region != "global" {
+		return region
+	}
+	if profile.Region != "" {
+		return profile.Region
+	}
+	return "global"
+}
+
+func entityRegion(entity signal.Entity, language string) string {
+	resolved := entityresolve.Resolve(entity, language)
+	switch resolved.CanonicalID {
+	case "country:IRAN", "country:SAUDI_ARABIA":
+		return "mena"
+	case "country:RUSSIA":
+		return "russia_cis"
+	case "country:CHINA":
+		return "greater_china"
+	default:
+		return ""
+	}
+}
+
+func inferRegionFromLanguage(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "ar":
+		return "mena"
+	case "fa":
+		return "iran"
+	case "he":
+		return "israel"
+	case "ru":
+		return "russia_cis"
+	case "uk", "pl":
+		return "cee"
+	case "zh":
+		return "greater_china"
+	case "ja":
+		return "japan"
+	case "ko":
+		return "korea"
+	case "fr", "de", "it", "nl":
+		return "europe"
+	case "es", "pt":
+		return "latam"
+	case "hi":
+		return "india"
+	case "id", "vi", "th":
+		return "southeast_asia"
+	case "tr":
+		return "turkey"
+	case "en":
+		return "global"
+	default:
+		return ""
+	}
+}
+
+func normalizeRegionLabel(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer("-", "_", " ", "_")
+	value = replacer.Replace(value)
+	switch value {
+	case "mena", "middle_east", "middle_east_and_north_africa", "gulf":
+		return "mena"
+	case "iran":
+		return "iran"
+	case "greater_china", "china", "hong_kong", "taiwan":
+		return "greater_china"
+	case "russia", "cis", "russia_cis":
+		return "russia_cis"
+	case "us", "usa", "united_states", "north_america":
+		return "us"
+	case "europe", "eu", "eurozone":
+		return "europe"
+	case "latam", "latin_america":
+		return "latam"
+	case "india":
+		return "india"
+	case "japan":
+		return "japan"
+	case "korea", "south_korea":
+		return "korea"
+	case "southeast_asia", "sea", "asean":
+		return "southeast_asia"
+	case "turkey":
+		return "turkey"
+	case "israel":
+		return "israel"
+	case "cee", "central_eastern_europe":
+		return "cee"
+	case "global":
+		return "global"
+	default:
+		return value
+	}
+}
+
+func normalizeLanguageCode(language string) string {
+	language = strings.TrimSpace(strings.ToLower(language))
+	if language == "" {
+		return "und"
+	}
+	if idx := strings.IndexAny(language, "-_"); idx > 0 {
+		language = language[:idx]
+	}
+	return language
 }
 
 func freshnessConfidence(meta *evidence.Metadata) float64 {

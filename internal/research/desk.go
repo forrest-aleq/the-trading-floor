@@ -104,15 +104,19 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, sig sign
 	)
 	if opp.EvidenceMeta != nil {
 		prompt += fmt.Sprintf(
-			"\n\nEvidence quality:\n  Source trust: %.2f\n  Source tier/type: %s / %s\n  Source lineage: %s / %s\n  Original language: %s\n  Translation: provider=%s confidence=%.2f\n  Freshness: %s (age %.1fh, window %.1fh)\n  Distinct sources: %d\n  Distinct owner groups: %d\n  Distinct languages: %d\n  Has primary source: %t\n  Contradictions: %d (%s)\n  Evidence score: %.2f\nUse this to calibrate conviction. Contradictory or weak evidence should reduce confidence materially.",
+			"\n\nEvidence quality:\n  Source trust: %.2f\n  Source tier/type: %s / %s\n  Source lineage: %s / %s\n  Original language: %s\n  Origin region: %s\n  Translation: provider=%s confidence=%.2f\n  Historical lead time: avg %.2fh across %d narratives (score %.2f)\n  Freshness: %s (age %.1fh, window %.1fh)\n  Distinct sources: %d\n  Distinct owner groups: %d\n  Distinct languages: %d\n  Has primary source: %t\n  Contradictions: %d (%s)\n  Evidence score: %.2f\nUse this to calibrate conviction. Contradictory or weak evidence should reduce confidence materially.",
 			opp.EvidenceMeta.SourceTrust,
 			opp.EvidenceMeta.SourceTier,
 			opp.EvidenceMeta.SourceType,
 			opp.EvidenceMeta.SourceDomain,
 			opp.EvidenceMeta.SourceOwnerGroup,
 			opp.EvidenceMeta.OriginalLanguage,
+			opp.EvidenceMeta.OriginRegion,
 			opp.EvidenceMeta.TranslationProvider,
 			opp.EvidenceMeta.TranslationConfidence,
+			opp.EvidenceMeta.LeadTimeAverageHours,
+			opp.EvidenceMeta.LeadTimeObservations,
+			opp.EvidenceMeta.LeadTimeScore,
 			opp.EvidenceMeta.FreshnessStatus,
 			opp.EvidenceMeta.FreshnessAgeHours,
 			opp.EvidenceMeta.FreshnessWindowHours,

@@ -53,12 +53,16 @@ type Metadata struct {
 	SourceType               string            `json:"source_type,omitempty"`
 	SourceTrust              float64           `json:"source_trust,omitempty"`
 	OriginalLanguage         string            `json:"original_language,omitempty"`
+	OriginRegion             string            `json:"origin_region,omitempty"`
 	TranslationProvider      string            `json:"translation_provider,omitempty"`
 	TranslationConfidence    float64           `json:"translation_confidence,omitempty"`
 	FreshnessStatus          string            `json:"freshness_status,omitempty"`
 	FreshnessReason          string            `json:"freshness_reason,omitempty"`
 	FreshnessAgeHours        float64           `json:"freshness_age_hours,omitempty"`
 	FreshnessWindowHours     float64           `json:"freshness_window_hours,omitempty"`
+	LeadTimeAverageHours     float64           `json:"lead_time_average_hours,omitempty"`
+	LeadTimeObservations     int               `json:"lead_time_observations,omitempty"`
+	LeadTimeScore            float64           `json:"lead_time_score,omitempty"`
 	CorroboratingOwnerGroups []string          `json:"corroborating_owner_groups,omitempty"`
 	DistinctSources          int               `json:"distinct_sources,omitempty"`
 	DistinctOwnerGroups      int               `json:"distinct_owner_groups,omitempty"`
@@ -94,11 +98,15 @@ func (m *Metadata) Present() bool {
 		strings.TrimSpace(m.SourceType) != "" ||
 		m.SourceTrust > 0 ||
 		strings.TrimSpace(m.OriginalLanguage) != "" ||
+		strings.TrimSpace(m.OriginRegion) != "" ||
 		strings.TrimSpace(m.TranslationProvider) != "" ||
 		m.TranslationConfidence > 0 ||
 		strings.TrimSpace(m.FreshnessStatus) != "" ||
 		m.FreshnessAgeHours > 0 ||
 		m.FreshnessWindowHours > 0 ||
+		m.LeadTimeAverageHours > 0 ||
+		m.LeadTimeObservations > 0 ||
+		m.LeadTimeScore > 0 ||
 		m.DistinctSources > 0 ||
 		m.DistinctOwnerGroups > 0 ||
 		m.DistinctLanguages > 0 ||

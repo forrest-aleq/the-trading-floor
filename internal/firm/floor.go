@@ -206,6 +206,10 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 	dropped := 0
 
 	for _, desk := range desks {
+		if originDesk := internalOriginDesk(sig); originDesk != "" && originDesk == desk.ID {
+			skipped++
+			continue
+		}
 		if !domainShouldReviewSignal(desk.Domain, sig) {
 			skipped++
 			continue

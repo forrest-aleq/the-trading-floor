@@ -24,6 +24,11 @@ func domainShouldReviewSignal(domain string, sig signal.Signal) bool {
 func relevantDomainsForSignal(sig signal.Signal) []string {
 	set := newDomainSet()
 
+	if targets := internalTargetDomains(sig); len(targets) > 0 {
+		set.add(targets...)
+		return set.values()
+	}
+
 	switch strings.TrimSpace(strings.ToLower(sig.Category)) {
 	case "geopolitical":
 		set.add("geopolitical", "tail")

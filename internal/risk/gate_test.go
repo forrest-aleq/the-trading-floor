@@ -1,11 +1,33 @@
 package risk
 
 import (
+	"log/slog"
 	"testing"
 
 	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
 )
+
+func TestLoadTokenSecretRejectsShortConfiguredSecret(t *testing.T) {
+	t.Setenv("RISK_TOKEN_SECRET", "too-short")
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected short configured secret to panic")
+		}
+	}()
+
+	_ = loadTokenSecret(slog.Default())
+}
+
+func TestLoadTokenSecretGeneratesEphemeralSecretWhenUnset(t *testing.T) {
+	t.Setenv("RISK_TOKEN_SECRET", "")
+
+	secret := loadTokenSecret(slog.Default())
+	if len(secret) < 32 {
+		t.Fatalf("expected generated secret to be at least 32 bytes, got %d", len(secret))
+	}
+}
 
 func TestGateAllowsDefinedRiskBullCallSpreadUsingMaxLoss(t *testing.T) {
 	gate := NewGate(DefaultLimits())

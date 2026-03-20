@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/hnic/trading-floor/internal/execution/ibkr"
 	"github.com/hnic/trading-floor/pkg/model"
+	"golang.org/x/sync/singleflight"
 )
 
 type Broker interface {
@@ -22,93 +25,198 @@ type Broker interface {
 type Manager struct {
 	ibkr Broker
 	log  *slog.Logger
+
+	mu               sync.Mutex
+	submitted        map[string]cachedFill
+	group            singleflight.Group
+	submittedTTL     time.Duration
+	cleanupInterval  time.Duration
+	lastCacheCleanup time.Time
 }
 
 func NewManager(ibkrClient Broker) *Manager {
 	return &Manager{
-		ibkr: ibkrClient,
-		log:  slog.Default().With("component", "execution"),
+		ibkr:            ibkrClient,
+		log:             slog.Default().With("component", "execution"),
+		submitted:       make(map[string]cachedFill),
+		submittedTTL:    24 * time.Hour,
+		cleanupInterval: 15 * time.Minute,
 	}
+}
+
+type cachedFill struct {
+	fill *model.Fill
+	at   time.Time
 }
 
 // Submit places an order through IBKR
 func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model.Order) (*model.Fill, error) {
-	// Validate capability token
-	if token == nil {
-		return nil, fmt.Errorf("missing capability token")
-	}
+	return m.submitOnce(ctx, order.ID, func() (*model.Fill, error) {
+		// Validate capability token
+		if token == nil {
+			return nil, fmt.Errorf("missing capability token")
+		}
 
-	// Validate connection
-	if !m.ibkr.IsConnected() {
-		return nil, fmt.Errorf("IBKR not connected")
-	}
+		// Validate connection
+		if !m.ibkr.IsConnected() {
+			return nil, fmt.Errorf("IBKR not connected")
+		}
 
-	m.log.Info("submitting order",
-		"thesis_id", order.ThesisID,
-		"desk_id", order.DeskID,
-		"symbol", order.DisplaySymbol(),
-		"direction", order.Direction,
-		"quantity", order.Quantity,
-		"type", order.OrderType,
-		"structure", order.Structure,
-		"paper", m.ibkr.IsPaper(),
-	)
-
-	// Place via IBKR
-	fill, err := m.ibkr.PlaceOrder(ctx, order)
-	if err != nil {
-		m.log.Error("order failed",
+		m.log.Info("submitting order",
 			"thesis_id", order.ThesisID,
-			"error", err,
+			"desk_id", order.DeskID,
+			"symbol", order.DisplaySymbol(),
+			"direction", order.Direction,
+			"quantity", order.Quantity,
+			"type", order.OrderType,
+			"structure", order.Structure,
+			"paper", m.ibkr.IsPaper(),
 		)
-		return nil, fmt.Errorf("place order: %w", err)
-	}
 
-	m.log.Info("order filled",
-		"thesis_id", order.ThesisID,
-		"symbol", fill.DisplaySymbol(),
-		"price", fill.AvgPrice,
-		"quantity", fill.Quantity,
-	)
+		fill, err := m.ibkr.PlaceOrder(ctx, order)
+		if err != nil {
+			m.log.Error("order failed",
+				"thesis_id", order.ThesisID,
+				"error", err,
+			)
+			return nil, fmt.Errorf("place order: %w", err)
+		}
 
-	return fill, nil
+		m.log.Info("order filled",
+			"thesis_id", order.ThesisID,
+			"symbol", fill.DisplaySymbol(),
+			"price", fill.AvgPrice,
+			"quantity", fill.Quantity,
+		)
+
+		return fill, nil
+	})
 }
 
 // SubmitExit closes an existing position. Exits intentionally bypass capability tokens:
 // risk should never block flattening exposure.
 func (m *Manager) SubmitExit(ctx context.Context, order model.Order) (*model.Fill, error) {
-	if !m.ibkr.IsConnected() {
-		return nil, fmt.Errorf("IBKR not connected")
-	}
+	return m.submitOnce(ctx, order.ID, func() (*model.Fill, error) {
+		if !m.ibkr.IsConnected() {
+			return nil, fmt.Errorf("IBKR not connected")
+		}
 
-	m.log.Info("submitting exit order",
-		"thesis_id", order.ThesisID,
-		"desk_id", order.DeskID,
-		"symbol", order.DisplaySymbol(),
-		"direction", order.Direction,
-		"quantity", order.Quantity,
-		"type", order.OrderType,
-		"structure", order.Structure,
-		"paper", m.ibkr.IsPaper(),
-	)
-
-	fill, err := m.ibkr.PlaceOrder(ctx, order)
-	if err != nil {
-		m.log.Error("exit order failed",
+		m.log.Info("submitting exit order",
 			"thesis_id", order.ThesisID,
-			"error", err,
+			"desk_id", order.DeskID,
+			"symbol", order.DisplaySymbol(),
+			"direction", order.Direction,
+			"quantity", order.Quantity,
+			"type", order.OrderType,
+			"structure", order.Structure,
+			"paper", m.ibkr.IsPaper(),
 		)
-		return nil, fmt.Errorf("place exit order: %w", err)
+
+		fill, err := m.ibkr.PlaceOrder(ctx, order)
+		if err != nil {
+			m.log.Error("exit order failed",
+				"thesis_id", order.ThesisID,
+				"error", err,
+			)
+			return nil, fmt.Errorf("place exit order: %w", err)
+		}
+
+		m.log.Info("exit order filled",
+			"thesis_id", order.ThesisID,
+			"symbol", fill.DisplaySymbol(),
+			"price", fill.AvgPrice,
+			"quantity", fill.Quantity,
+		)
+
+		return fill, nil
+	})
+}
+
+func (m *Manager) submitOnce(ctx context.Context, orderID string, fn func() (*model.Fill, error)) (*model.Fill, error) {
+	if orderID == "" {
+		return fn()
 	}
 
-	m.log.Info("exit order filled",
-		"thesis_id", order.ThesisID,
-		"symbol", fill.DisplaySymbol(),
-		"price", fill.AvgPrice,
-		"quantity", fill.Quantity,
-	)
+	if fill, ok := m.lookupSubmitted(orderID); ok {
+		m.log.Warn("duplicate order submission suppressed", "order_id", orderID)
+		return fill, nil
+	}
 
-	return fill, nil
+	resultCh := m.group.DoChan(orderID, func() (any, error) {
+		if fill, ok := m.lookupSubmitted(orderID); ok {
+			return fill, nil
+		}
+		fill, err := fn()
+		if err != nil || fill == nil {
+			return fill, err
+		}
+		m.storeSubmitted(orderID, fill)
+		return cloneFill(fill), nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		fill, _ := result.Val.(*model.Fill)
+		return cloneFill(fill), nil
+	}
+}
+
+func cloneFill(fill *model.Fill) *model.Fill {
+	if fill == nil {
+		return nil
+	}
+	cloned := *fill
+	cloned.Legs = append([]model.TradeLeg(nil), fill.Legs...)
+	return &cloned
+}
+
+func (m *Manager) lookupSubmitted(orderID string) (*model.Fill, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.pruneExpiredLocked(time.Now().UTC())
+	cached, ok := m.submitted[orderID]
+	if !ok || cached.fill == nil {
+		return nil, false
+	}
+	return cloneFill(cached.fill), true
+}
+
+func (m *Manager) storeSubmitted(orderID string, fill *model.Fill) {
+	if fill == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.pruneExpiredLocked(now)
+	m.submitted[orderID] = cachedFill{
+		fill: cloneFill(fill),
+		at:   now,
+	}
+}
+
+func (m *Manager) pruneExpiredLocked(now time.Time) {
+	if m.submittedTTL <= 0 {
+		return
+	}
+	if !m.lastCacheCleanup.IsZero() && now.Sub(m.lastCacheCleanup) < m.cleanupInterval {
+		return
+	}
+	for orderID, cached := range m.submitted {
+		if cached.at.IsZero() || now.Sub(cached.at) <= m.submittedTTL {
+			continue
+		}
+		delete(m.submitted, orderID)
+	}
+	m.lastCacheCleanup = now
 }
 
 // Cancel cancels a pending order

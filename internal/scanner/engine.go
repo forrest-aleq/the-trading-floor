@@ -329,8 +329,18 @@ func formatSignalWithLimit(sig signal.Signal, contentLimit, relatedLimit, entity
 		if sig.EvidenceMeta.SourceDomain != "" || sig.EvidenceMeta.SourceOwnerGroup != "" {
 			sb.WriteString(fmt.Sprintf("Source lineage: domain=%s owner_group=%s\n", sig.EvidenceMeta.SourceDomain, sig.EvidenceMeta.SourceOwnerGroup))
 		}
+		if sig.EvidenceMeta.OriginRegion != "" {
+			sb.WriteString(fmt.Sprintf("Origin region: %s\n", sig.EvidenceMeta.OriginRegion))
+		}
 		if len(sig.EvidenceMeta.CorroboratingOwnerGroups) > 0 {
 			sb.WriteString(fmt.Sprintf("Independent owner groups: %s\n", strings.Join(sampleStrings(sig.EvidenceMeta.CorroboratingOwnerGroups, relatedLimit), ", ")))
+		}
+		if sig.EvidenceMeta.LeadTimeObservations > 0 {
+			sb.WriteString(fmt.Sprintf("Historical lead time: avg %.2fh across %d narratives (score %.2f)\n",
+				sig.EvidenceMeta.LeadTimeAverageHours,
+				sig.EvidenceMeta.LeadTimeObservations,
+				sig.EvidenceMeta.LeadTimeScore,
+			))
 		}
 		if sig.EvidenceMeta.DistinctLanguages > 0 {
 			sb.WriteString(fmt.Sprintf("Distinct languages: %d\n", sig.EvidenceMeta.DistinctLanguages))

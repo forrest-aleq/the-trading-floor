@@ -47,6 +47,7 @@ type Desk struct {
 	graph       *graphdb.Client
 	onTrade     func()
 	watchlist   func([]model.Instrument)
+	publish     func(context.Context, signal.Signal) error
 
 	minConviction    float64
 	councilThreshold float64
@@ -62,22 +63,23 @@ type DeskConfig struct {
 	ABGroup string
 	Capital float64
 
-	LLM         *llm.Router
-	Scanner     *scanner.Engine
-	Research    *research.Desk
-	Quant       *quant.Service
-	Prosecutor  *research.Prosecutor
-	Council     *research.Council
-	RiskGate    *risk.Gate
-	Execution   *execution.Manager
-	Book        *book.Book
-	Beliefs     *belief.Graph
-	LearnWorker *memory.LearnWorker
-	Engrams     *memory.EngramStore
-	Store       *store.DB
-	Graph       *graphdb.Client
-	OnTrade     func()
-	Watchlist   func([]model.Instrument)
+	LLM           *llm.Router
+	Scanner       *scanner.Engine
+	Research      *research.Desk
+	Quant         *quant.Service
+	Prosecutor    *research.Prosecutor
+	Council       *research.Council
+	RiskGate      *risk.Gate
+	Execution     *execution.Manager
+	Book          *book.Book
+	Beliefs       *belief.Graph
+	LearnWorker   *memory.LearnWorker
+	Engrams       *memory.EngramStore
+	Store         *store.DB
+	Graph         *graphdb.Client
+	OnTrade       func()
+	Watchlist     func([]model.Instrument)
+	PublishSignal func(context.Context, signal.Signal) error
 
 	MinConviction    float64
 	CouncilThreshold float64
@@ -126,6 +128,7 @@ func NewDesk(cfg DeskConfig) *Desk {
 		graph:            cfg.Graph,
 		onTrade:          cfg.OnTrade,
 		watchlist:        cfg.Watchlist,
+		publish:          cfg.PublishSignal,
 		minConviction:    cfg.MinConviction,
 		councilThreshold: cfg.CouncilThreshold,
 		regime: model.Regime{
@@ -373,6 +376,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	if d.watchlist != nil {
 		d.watchlist(thesis.ExecutionInstruments())
 	}
+	d.maybePublishInternalSignal(ctx, sig, thesis)
 
 	span = span.WithStage("book")
 	ctx = trace.IntoContext(ctx, span)
@@ -555,6 +559,29 @@ func (d *Desk) maybeSpawnSubTeam(ctx context.Context, thesis *model.Thesis) {
 		"thesis_id", thesis.ID,
 		"intent", intent,
 		"analyses", len(result.Analyses),
+	)
+}
+
+func (d *Desk) maybePublishInternalSignal(ctx context.Context, origin signal.Signal, thesis *model.Thesis) {
+	if d.publish == nil || thesis == nil {
+		return
+	}
+	internal, ok := buildInternalSignal(origin, thesis, d.ID)
+	if !ok {
+		return
+	}
+	if err := d.publish(ctx, internal); err != nil {
+		d.log.Warn("publish internal thesis signal failed",
+			"thesis_id", thesis.ID,
+			"origin_source", origin.Source,
+			"error", err,
+		)
+		return
+	}
+	d.log.Info("published internal thesis signal",
+		"thesis_id", thesis.ID,
+		"signal_id", internal.ID,
+		"targets", internalTargetDomains(internal),
 	)
 }
 

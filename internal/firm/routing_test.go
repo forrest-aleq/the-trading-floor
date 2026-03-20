@@ -1,6 +1,7 @@
 package firm
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/hnic/trading-floor/pkg/signal"
@@ -37,5 +38,29 @@ func TestUnknownSignalsFallBackToBroadReview(t *testing.T) {
 	}
 	if !domainShouldReviewSignal("systematic", unknown) {
 		t.Fatal("expected unknown signal to remain eligible for systematic review")
+	}
+}
+
+func TestInternalSignalsRouteUsingExplicitTargetDomains(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{
+		"origin_desk":    "geo-cascade-a",
+		"target_domains": []string{"macro", "tail", "volatility"},
+		"internal_depth": 1,
+	})
+	internal := signal.Signal{
+		Source:   "internal/geo-cascade-a",
+		Type:     signal.TypeAlternative,
+		Category: "geopolitical",
+		Raw:      raw,
+	}
+
+	if !domainShouldReviewSignal("macro", internal) {
+		t.Fatal("expected macro desk to receive internal thesis signal")
+	}
+	if !domainShouldReviewSignal("tail", internal) {
+		t.Fatal("expected tail desk to receive internal thesis signal")
+	}
+	if domainShouldReviewSignal("corporate", internal) {
+		t.Fatal("did not expect corporate desk to receive unrelated internal thesis signal")
 	}
 }

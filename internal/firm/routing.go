@@ -29,6 +29,8 @@ func relevantDomainsForSignal(sig signal.Signal) []string {
 		return set.values()
 	}
 
+	set.add(sourceDomainsForSignal(sig)...)
+
 	switch strings.TrimSpace(strings.ToLower(sig.Category)) {
 	case "geopolitical":
 		set.add("geopolitical", "tail")
@@ -61,7 +63,75 @@ func relevantDomainsForSignal(sig signal.Signal) []string {
 		set.add("macro", "sector")
 	}
 
+	if len(set.values()) == 0 {
+		set.add("macro", "systematic")
+	}
+
 	return set.values()
+}
+
+func sourceDomainsForSignal(sig signal.Signal) []string {
+	source := strings.TrimSpace(strings.ToLower(sig.Source))
+	if source == "" {
+		return nil
+	}
+
+	set := newDomainSet()
+
+	switch {
+	case strings.HasPrefix(source, "fred"):
+		set.add("macro", "tail", "systematic")
+	case strings.HasPrefix(source, "fed-"):
+		set.add("macro", "tail")
+	case strings.Contains(source, "world"), strings.Contains(source, "politico"), strings.Contains(source, "le-monde"):
+		set.add("geopolitical", "macro", "tail")
+	case strings.Contains(source, "markets"):
+		set.add("macro", "volatility", "systematic")
+	case strings.Contains(source, "companies"), strings.Contains(source, "equities"), strings.Contains(source, "edgar"), strings.Contains(source, "earnings"):
+		set.add("corporate", "sector")
+	case strings.Contains(source, "finextra"), strings.Contains(source, "fintech"):
+		set.add("corporate", "sector", "systematic")
+	case strings.HasPrefix(source, "stocktwits"), strings.HasPrefix(source, "reddit/"):
+		set.add("flows", "volatility")
+	case strings.HasPrefix(source, "ibkr-market"):
+		set.add("systematic", "volatility")
+		if instrumentEntityCount(sig) > 0 {
+			set.add("sector")
+		}
+	}
+
+	if hasEntityType(sig, "country") {
+		set.add("geopolitical", "macro", "tail")
+	}
+
+	if instrumentEntityCount(sig) >= 2 {
+		set.add("flows", "systematic")
+	}
+
+	return set.values()
+}
+
+func hasEntityType(sig signal.Signal, entityType string) bool {
+	entityType = strings.TrimSpace(strings.ToLower(entityType))
+	if entityType == "" {
+		return false
+	}
+	for _, entity := range sig.Entities {
+		if strings.TrimSpace(strings.ToLower(entity.Type)) == entityType {
+			return true
+		}
+	}
+	return false
+}
+
+func instrumentEntityCount(sig signal.Signal) int {
+	count := 0
+	for _, entity := range sig.Entities {
+		if strings.TrimSpace(strings.ToLower(entity.Type)) == "instrument" {
+			count++
+		}
+	}
+	return count
 }
 
 type domainSet struct {

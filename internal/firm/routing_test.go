@@ -64,3 +64,49 @@ func TestInternalSignalsRouteUsingExplicitTargetDomains(t *testing.T) {
 		t.Fatal("did not expect corporate desk to receive unrelated internal thesis signal")
 	}
 }
+
+func TestSourceDrivenRoutingSpecializesDeskIntake(t *testing.T) {
+	geo := signal.Signal{Source: "ft-world", Type: signal.TypeNews}
+	if !domainShouldReviewSignal("geopolitical", geo) {
+		t.Fatal("expected geopolitical desk to receive ft-world signal")
+	}
+	if !domainShouldReviewSignal("macro", geo) {
+		t.Fatal("expected macro desk to receive ft-world signal")
+	}
+	if domainShouldReviewSignal("corporate", geo) {
+		t.Fatal("did not expect corporate desk to receive ft-world signal")
+	}
+
+	macro := signal.Signal{Source: "fred", Type: signal.TypeEconomic}
+	if !domainShouldReviewSignal("macro", macro) {
+		t.Fatal("expected macro desk to receive FRED signal")
+	}
+	if !domainShouldReviewSignal("systematic", macro) {
+		t.Fatal("expected systematic desk to receive FRED signal")
+	}
+	if domainShouldReviewSignal("corporate", macro) {
+		t.Fatal("did not expect corporate desk to receive FRED signal")
+	}
+
+	corp := signal.Signal{Source: "earnings-calendar", Type: signal.TypeNews}
+	if !domainShouldReviewSignal("corporate", corp) {
+		t.Fatal("expected corporate desk to receive earnings signal")
+	}
+	if !domainShouldReviewSignal("sector", corp) {
+		t.Fatal("expected sector desk to receive earnings signal")
+	}
+	if domainShouldReviewSignal("geopolitical", corp) {
+		t.Fatal("did not expect geopolitical desk to receive earnings signal")
+	}
+
+	flow := signal.Signal{Source: "stocktwits", Type: signal.TypeSocial}
+	if !domainShouldReviewSignal("flows", flow) {
+		t.Fatal("expected flows desk to receive stocktwits signal")
+	}
+	if !domainShouldReviewSignal("volatility", flow) {
+		t.Fatal("expected volatility desk to receive stocktwits signal")
+	}
+	if domainShouldReviewSignal("macro", flow) {
+		t.Fatal("did not expect macro desk to receive stocktwits signal")
+	}
+}

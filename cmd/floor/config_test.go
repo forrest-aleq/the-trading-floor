@@ -36,6 +36,7 @@ func TestFullDeskConfigBalancedAB(t *testing.T) {
 
 func TestRegisterDefaultFeedsRegistersExtendedWireSurface(t *testing.T) {
 	t.Setenv("FRED_API_KEY", "")
+	t.Setenv("FMP_API_KEY", "")
 	t.Setenv("EARNINGS_API_KEY", "")
 	t.Setenv("TELEGRAM_FEED_URLS", "")
 	t.Setenv("ALT_DATA_SOURCES", "")

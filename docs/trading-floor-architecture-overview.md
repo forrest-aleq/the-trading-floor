@@ -342,7 +342,8 @@ Macro:
 
 Earnings:
 
-- `EARNINGS_API_KEY`
+- `FMP_API_KEY`
+- `EARNINGS_API_KEY` legacy alias
 
 Telegram:
 
@@ -394,7 +395,7 @@ Regional sources:
 To unlock the current code fully:
 
 - a real `FRED_API_KEY`
-- a real `EARNINGS_API_KEY`
+- a real `FMP_API_KEY`
 - actual `TELEGRAM_FEED_URLS`
 - actual `ALT_DATA_SOURCES` JSON
 - a stable local model stack in `LLM_MODEL_SPEED`, `LLM_MODEL_ANALYSIS`, `LLM_MODEL_CRITICAL`

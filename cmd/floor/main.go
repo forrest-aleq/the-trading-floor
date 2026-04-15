@@ -600,7 +600,7 @@ func registerDefaultFeeds(wireMgr *wire.Manager, marketClient feeds.MarketDataCl
 		feeds.NewSocialFeed(),
 		feeds.NewMacroFeed(os.Getenv("FRED_API_KEY")),
 		feeds.NewTelegramFeed(nil),
-		feeds.NewEarningsFeed(os.Getenv("EARNINGS_API_KEY"), earningsWatchlist),
+		feeds.NewEarningsFeed(os.Getenv("FMP_API_KEY"), earningsWatchlist),
 		feeds.NewAlternativeFeed(nil),
 	}
 

@@ -40,9 +40,7 @@ type earningsEvent struct {
 }
 
 func NewEarningsFeed(apiKey string, instruments []model.Instrument) *EarningsFeed {
-	if apiKey == "" {
-		apiKey = strings.TrimSpace(os.Getenv("EARNINGS_API_KEY"))
-	}
+	apiKey = resolveFMPAPIKey(apiKey)
 
 	watch := make(map[string]struct{})
 	for _, inst := range instruments {
@@ -66,7 +64,7 @@ func (f *EarningsFeed) Name() string { return "earnings" }
 
 func (f *EarningsFeed) Start(ctx context.Context, out chan<- signal.Signal) error {
 	if f.apiKey == "" {
-		f.log.Warn("earnings feed disabled — set EARNINGS_API_KEY")
+		f.log.Warn("earnings feed disabled — set FMP_API_KEY (legacy alias: EARNINGS_API_KEY)")
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -217,4 +215,14 @@ func defaultString(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func resolveFMPAPIKey(explicit string) string {
+	if key := strings.TrimSpace(explicit); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(os.Getenv("FMP_API_KEY")); key != "" {
+		return key
+	}
+	return strings.TrimSpace(os.Getenv("EARNINGS_API_KEY"))
 }

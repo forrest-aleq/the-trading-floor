@@ -2,6 +2,7 @@ package research
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,18 @@ func (s *prosecutorCompilerFallbackClient) Complete(_ context.Context, req llm.R
 	}
 }
 
+type prosecutorTerminalBlockClient struct {
+	requests []llm.Request
+}
+
+func (s *prosecutorTerminalBlockClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: "Thinking Process:\n1. Crowded setup.\n2. Thin evidence.\nFINAL_JSON\n" + validProsecutionJSON() + "\nEND_FINAL_JSON",
+		Model:   "critical",
+	}, nil
+}
+
 func TestProsecutorUsesThoughtModeForQwen(t *testing.T) {
 	t.Setenv("PROSECUTION_MODEL", "qwen/qwen3.5-35b-a3b")
 
@@ -56,6 +69,9 @@ func TestProsecutorUsesThoughtModeForQwen(t *testing.T) {
 	}
 	if client.requests[0].JSONMode {
 		t.Fatal("expected Qwen prosecution request to avoid strict JSON mode")
+	}
+	if got := client.requests[0].Messages[0].Content; !strings.Contains(got, terminalJSONStart) || !strings.Contains(got, terminalJSONEnd) {
+		t.Fatalf("expected terminal JSON contract in prosecution prompt, got %q", got)
 	}
 }
 
@@ -81,6 +97,21 @@ func TestProsecutorCompilerFallbackRecoversStructuredVerdict(t *testing.T) {
 	}
 	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
 		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	}
+}
+
+func TestProsecutorAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T) {
+	t.Setenv("PROSECUTION_MODEL", "qwen/qwen3.5-35b-a3b")
+
+	client := &prosecutorTerminalBlockClient{}
+	prosecutor := NewProsecutor(llm.NewRouter(client, client, client))
+
+	result := prosecutor.Challenge(context.Background(), structuredTestThesis())
+	if result == nil {
+		t.Fatal("expected prosecution result")
+	}
+	if got := len(client.requests); got != 1 {
+		t.Fatalf("expected one prosecution call, got %d", got)
 	}
 }
 

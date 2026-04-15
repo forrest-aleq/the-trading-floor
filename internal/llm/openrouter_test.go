@@ -81,6 +81,29 @@ func TestOpenRouterClientRetriesLocal500s(t *testing.T) {
 	}
 }
 
+func TestOpenRouterClientPreservesReasoningFromLocalProviders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"FINAL_DECISION\ntradeable: false\nscore: 10\ninstruments: none\ndirection: none\nurgency: 0.0\ncategory: corporate\nreasoning: reject\nEND_FINAL_DECISION","reasoning":"bullet one\nbullet two"}}],"model":"ollama","usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{
+		BaseURL: server.URL,
+		Model:   "qwen3:8b",
+	})
+
+	resp, err := client.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "scan"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	if got := resp.Content; got != "<think>\nbullet one\nbullet two\n</think>\n\nFINAL_DECISION\ntradeable: false\nscore: 10\ninstruments: none\ndirection: none\nurgency: 0.0\ncategory: corporate\nreasoning: reject\nEND_FINAL_DECISION" {
+		t.Fatalf("unexpected normalized content %q", got)
+	}
+}
+
 func TestMakeLimiterDefaultsToTwoForLocalLLM(t *testing.T) {
 	limiter := makeLimiter("http://127.0.0.1:1234/v1")
 	if limiter == nil {
@@ -111,5 +134,16 @@ func TestApplyLocalQwenJSONControlsLeavesRemoteModelsUntouched(t *testing.T) {
 	got := applyLocalQwenJSONControls("https://openrouter.ai/api/v1", "qwen/qwen3-8b", true, messages)
 	if got[0].Content != "Return JSON only." {
 		t.Fatalf("expected remote model to be unchanged, got %q", got[0].Content)
+	}
+}
+
+func TestApplyLocalQwenJSONControlsHandlesOllamaQwenModels(t *testing.T) {
+	messages := []orMessage{
+		{Role: string(RoleSystem), Content: "Return JSON only."},
+	}
+
+	got := applyLocalQwenJSONControls("http://127.0.0.1:11434/v1", "qwen3:8b", true, messages)
+	if got[0].Content != "/no_think\nReturn JSON only." {
+		t.Fatalf("unexpected system message %q", got[0].Content)
 	}
 }

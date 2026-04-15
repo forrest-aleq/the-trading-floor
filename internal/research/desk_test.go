@@ -3,6 +3,7 @@ package research
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,18 @@ func (s *researchCompilerFallbackClient) Complete(_ context.Context, req llm.Req
 	}
 }
 
+type researchTerminalBlockClient struct {
+	requests []llm.Request
+}
+
+func (s *researchTerminalBlockClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: "Thinking Process:\n1. Strong event setup.\n2. Clear catalyst.\nFINAL_JSON\n" + validResearchJSON() + "\nEND_FINAL_JSON",
+		Model:   "analysis",
+	}, nil
+}
+
 func TestInvestigateUsesThoughtModeForQwenResearch(t *testing.T) {
 	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
 
@@ -64,6 +77,9 @@ func TestInvestigateUsesThoughtModeForQwenResearch(t *testing.T) {
 	}
 	if got := client.requests[0].Messages[0].Content; got == researchPrompt {
 		t.Fatal("expected thought-friendly research prompt prefix")
+	}
+	if got := client.requests[0].Messages[0].Content; !containsTerminalContract(got) {
+		t.Fatalf("expected terminal JSON contract in research prompt, got %q", got)
 	}
 }
 
@@ -92,6 +108,24 @@ func TestInvestigateCompilerFallbackRecoversStructuredThesis(t *testing.T) {
 	}
 	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
 		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	}
+}
+
+func TestInvestigateAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T) {
+	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+
+	client := &researchTerminalBlockClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected terminal JSON block to parse, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis")
+	}
+	if got := len(client.requests); got != 1 {
+		t.Fatalf("expected only one research call, got %d", got)
 	}
 }
 
@@ -151,4 +185,8 @@ func validResearchJSON() string {
   "kill_rules": [{"condition": "price_below_stop", "threshold": 88.0, "action": "close"}],
   "reasoning": "hawkish repricing favors duration rebound after overshoot"
 }`)
+}
+
+func containsTerminalContract(prompt string) bool {
+	return strings.Contains(prompt, terminalJSONStart) && strings.Contains(prompt, terminalJSONEnd)
 }

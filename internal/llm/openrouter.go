@@ -70,7 +70,8 @@ type orResponse struct {
 	ID      string `json:"id"`
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string `json:"content"`
+			Reasoning string `json:"reasoning"`
 		} `json:"message"`
 	} `json:"choices"`
 	Model string `json:"model"`
@@ -138,8 +139,10 @@ func (c *OpenRouterClient) Complete(ctx context.Context, req Request) (*Response
 		return nil, fmt.Errorf("no choices in response")
 	}
 
+	content := normalizeChoiceContent(orResp.Choices[0].Message.Content, orResp.Choices[0].Message.Reasoning)
+
 	return &Response{
-		Content:      orResp.Choices[0].Message.Content,
+		Content:      content,
 		Model:        orResp.Model,
 		InputTokens:  orResp.Usage.PromptTokens,
 		OutputTokens: orResp.Usage.CompletionTokens,
@@ -274,7 +277,10 @@ func isLocalQwenModel(baseURL, model string) bool {
 		return false
 	}
 	lower := strings.ToLower(strings.TrimSpace(model))
-	return strings.Contains(lower, "qwen/")
+	return strings.Contains(lower, "qwen/") ||
+		strings.Contains(lower, "qwen3:") ||
+		strings.Contains(lower, "qwen2.5:") ||
+		strings.HasPrefix(lower, "qwen")
 }
 
 func shouldRetryLocalLLM(baseURL string, statusCode, attempt, attempts int) bool {
@@ -304,6 +310,20 @@ func retryDelay(attempt int) time.Duration {
 		return 500 * time.Millisecond
 	default:
 		return time.Second
+	}
+}
+
+func normalizeChoiceContent(content, reasoning string) string {
+	content = strings.TrimSpace(content)
+	reasoning = strings.TrimSpace(reasoning)
+
+	switch {
+	case reasoning == "":
+		return content
+	case content == "":
+		return "<think>\n" + reasoning + "\n</think>"
+	default:
+		return "<think>\n" + reasoning + "\n</think>\n\n" + content
 	}
 }
 

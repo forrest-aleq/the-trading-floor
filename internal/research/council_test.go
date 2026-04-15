@@ -2,6 +2,7 @@ package research
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/hnic/trading-floor/internal/llm"
@@ -38,6 +39,18 @@ func (s *councilCompilerFallbackClient) Complete(_ context.Context, req llm.Requ
 			Model:   "compiler",
 		}, nil
 	}
+}
+
+type councilTerminalBlockClient struct {
+	requests []llm.Request
+}
+
+func (s *councilTerminalBlockClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: "Thinking Process:\n1. Timing is acceptable.\n2. Liquidity is fine.\nFINAL_JSON\n" + validCouncilPerspectiveJSON() + "\nEND_FINAL_JSON",
+		Model:   "critical",
+	}, nil
 }
 
 func TestNewCouncilIncludesExtendedVoices(t *testing.T) {
@@ -137,6 +150,9 @@ func TestCouncilPerspectiveUsesThoughtModeForQwen(t *testing.T) {
 	if client.requests[0].JSONMode {
 		t.Fatal("expected Qwen council request to avoid strict JSON mode")
 	}
+	if got := client.requests[0].Messages[0].Content; !strings.Contains(got, terminalJSONStart) || !strings.Contains(got, terminalJSONEnd) {
+		t.Fatalf("expected terminal JSON contract in council prompt, got %q", got)
+	}
 }
 
 func TestCouncilPerspectiveCompilerFallbackRecoversStructuredJSON(t *testing.T) {
@@ -164,6 +180,24 @@ func TestCouncilPerspectiveCompilerFallbackRecoversStructuredJSON(t *testing.T) 
 	}
 	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
 		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	}
+}
+
+func TestCouncilPerspectiveAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T) {
+	t.Setenv("COUNCIL_MODEL", "qwen/qwen3.5-35b-a3b")
+
+	client := &councilTerminalBlockClient{}
+	council := NewCouncil(llm.NewRouter(client, client, client))
+
+	cleaned, err := council.requestPerspectiveJSON(context.Background(), "Macro", "macro system prompt", "thesis prompt")
+	if err != nil {
+		t.Fatalf("expected terminal JSON block to parse, got %v", err)
+	}
+	if cleaned == "" {
+		t.Fatal("expected cleaned JSON")
+	}
+	if got := len(client.requests); got != 1 {
+		t.Fatalf("expected one council call, got %d", got)
 	}
 }
 

@@ -9,6 +9,13 @@ import (
 // domainShouldReviewSignal applies a deterministic pre-filter before the LLM
 // scanner so irrelevant desks do not burn inference budget on every signal.
 func domainShouldReviewSignal(domain string, sig signal.Signal) bool {
+	return ShouldDomainReviewSignal(domain, sig)
+}
+
+// ShouldDomainReviewSignal applies the same deterministic intake filter used by
+// the live floor. Replay/backfill paths should call this instead of inventing
+// their own routing logic.
+func ShouldDomainReviewSignal(domain string, sig signal.Signal) bool {
 	relevant := relevantDomainsForSignal(sig)
 	if len(relevant) == 0 {
 		return true
@@ -22,6 +29,12 @@ func domainShouldReviewSignal(domain string, sig signal.Signal) bool {
 }
 
 func relevantDomainsForSignal(sig signal.Signal) []string {
+	return RelevantDomainsForSignal(sig)
+}
+
+// RelevantDomainsForSignal returns the desk domains that should see a signal
+// before any LLM work is spent on it.
+func RelevantDomainsForSignal(sig signal.Signal) []string {
 	set := newDomainSet()
 
 	if targets := internalTargetDomains(sig); len(targets) > 0 {

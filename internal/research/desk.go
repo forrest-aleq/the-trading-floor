@@ -212,11 +212,11 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, sig sign
 		return nil, fmt.Errorf("research LLM error: %w", err)
 	}
 
-	cleaned, err := llm.ExtractJSON(resp)
+	cleaned, err := extractStructuredJSON(resp)
 	if err != nil {
 		if d.compilerModel != "" {
 			if compiled, compileErr := d.compileResearchJSON(ctx, prompt, resp); compileErr == nil {
-				if compiledJSON, extractErr := llm.ExtractJSON(compiled); extractErr == nil {
+				if compiledJSON, extractErr := extractStructuredJSON(compiled); extractErr == nil {
 					cleaned = compiledJSON
 					err = nil
 					d.log.Info("research compiler recovered structured thesis",
@@ -326,7 +326,7 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, sig sign
 func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt string) (string, error) {
 	systemPrompt := researchPrompt
 	if d.responseMode == structuredResponseModeThought {
-		systemPrompt = researchThoughtPrefix + "\n\n" + researchPrompt
+		systemPrompt = addTerminalJSONContract(researchThoughtPrefix + "\n\n" + researchPrompt)
 		return d.llm.AskWithLimit(ctx, llm.TierAnalysis, systemPrompt, prompt, researchMaxTokens, 0.2)
 	}
 	return d.llm.AskJSONWithLimit(ctx, llm.TierAnalysis, systemPrompt, prompt, researchMaxTokens, 0.2)
@@ -339,7 +339,7 @@ func (d *Desk) compileResearchJSON(ctx context.Context, originalPrompt, rawRespo
 	req := llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: researchCompilerPrompt},
-			{Role: llm.RoleUser, Content: fmt.Sprintf("Original research task:\n%s\n\nResearch reasoning transcript:\n%s", originalPrompt, rawResponse)},
+			{Role: llm.RoleUser, Content: fmt.Sprintf("Original research task:\n%s\n\nResearch reasoning transcript:\n%s", originalPrompt, truncateForCompiler(rawResponse, 2400))},
 		},
 		Model:       d.compilerModel,
 		Tier:        llm.TierSpeed,

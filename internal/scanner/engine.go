@@ -482,7 +482,10 @@ func detectScannerResponseMode(model string) scannerResponseMode {
 
 func isThoughtFriendlyScannerModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.Contains(model, "qwen/")
+	return strings.Contains(model, "qwen/") ||
+		strings.Contains(model, "qwen3:") ||
+		strings.Contains(model, "qwen2.5:") ||
+		strings.HasPrefix(model, "qwen")
 }
 
 func extractFinalDecisionBlock(raw string) (string, error) {

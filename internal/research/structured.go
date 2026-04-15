@@ -1,8 +1,11 @@
 package research
 
 import (
+	"fmt"
 	"os"
 	"strings"
+
+	"github.com/hnic/trading-floor/internal/llm"
 )
 
 type structuredResponseMode string
@@ -10,6 +13,11 @@ type structuredResponseMode string
 const (
 	structuredResponseModeJSON    structuredResponseMode = "structured_json"
 	structuredResponseModeThought structuredResponseMode = "thought_block"
+)
+
+const (
+	terminalJSONStart = "FINAL_JSON"
+	terminalJSONEnd   = "END_FINAL_JSON"
 )
 
 func detectStructuredResponseMode(envName, model string) structuredResponseMode {
@@ -61,4 +69,55 @@ func structuredCompilerModel(envName string) string {
 		}
 	}
 	return ""
+}
+
+func addTerminalJSONContract(systemPrompt string) string {
+	return strings.TrimSpace(systemPrompt) + `
+
+You MUST end with exactly one terminal JSON block:
+FINAL_JSON
+{ ... valid JSON matching the schema ... }
+END_FINAL_JSON
+
+Do not omit the terminal JSON block.`
+}
+
+func extractStructuredJSON(raw string) (string, error) {
+	if cleaned, err := llm.ExtractJSON(raw); err == nil {
+		return cleaned, nil
+	}
+
+	block, err := extractTerminalJSONBlock(raw)
+	if err != nil {
+		return "", err
+	}
+	return llm.ExtractJSON(block)
+}
+
+func extractTerminalJSONBlock(raw string) (string, error) {
+	upper := strings.ToUpper(raw)
+	start := strings.Index(upper, terminalJSONStart)
+	end := strings.LastIndex(upper, terminalJSONEnd)
+	if start < 0 || end < 0 || end <= start {
+		return "", fmt.Errorf("terminal JSON block missing")
+	}
+	block := strings.TrimSpace(raw[start+len(terminalJSONStart) : end])
+	if block == "" {
+		return "", fmt.Errorf("terminal JSON block empty")
+	}
+	return block, nil
+}
+
+func truncateForCompiler(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	if block, err := extractTerminalJSONBlock(value); err == nil && len(block) <= max {
+		return block
+	}
+	if block, err := extractTerminalJSONBlock(value); err == nil && len(block) > max {
+		return block[len(block)-max:]
+	}
+	return value[len(value)-max:]
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hnic/trading-floor/pkg/signal"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -65,6 +66,96 @@ func (db *DB) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 		sig.Timestamp,
 	)
 	return classifySignalWriteError(err)
+}
+
+type SignalQuery struct {
+	Limit int
+	Since time.Time
+}
+
+func (db *DB) ListSignals(ctx context.Context, query SignalQuery) ([]signal.Signal, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+
+	sql := `
+		SELECT id, source, type, category, content, language, translated, entities,
+		       urgency, strength, direction, content_hash, created_at
+		FROM signals`
+
+	args := make([]any, 0, 2)
+	if !query.Since.IsZero() {
+		sql += ` WHERE created_at >= $1`
+		args = append(args, query.Since)
+	}
+	sql += ` ORDER BY created_at ASC`
+	if len(args) == 0 {
+		sql += ` LIMIT $1`
+		args = append(args, limit)
+	} else {
+		sql += ` LIMIT $2`
+		args = append(args, limit)
+	}
+
+	rows, err := db.Pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query signals: %w", err)
+	}
+	defer rows.Close()
+
+	signals := make([]signal.Signal, 0, limit)
+	for rows.Next() {
+		var (
+			sig        signal.Signal
+			content    string
+			language   string
+			entities   []byte
+			direction  string
+			typeValue  string
+			category   string
+			translated string
+		)
+		if err := rows.Scan(
+			&sig.ID,
+			&sig.Source,
+			&typeValue,
+			&category,
+			&content,
+			&language,
+			&translated,
+			&entities,
+			&sig.Urgency,
+			&sig.Strength,
+			&direction,
+			&sig.ContentHash,
+			&sig.Timestamp,
+		); err != nil {
+			return nil, fmt.Errorf("scan signal row: %w", err)
+		}
+
+		sig.Type = signal.Type(typeValue)
+		sig.Category = category
+		sig.Direction = signal.Direction(direction)
+		sig.Translated = translated
+		if language != "" {
+			sig.Languages = []string{language}
+		}
+		if content != "" {
+			sig.Raw = json.RawMessage(content)
+		}
+		if len(entities) > 0 {
+			if err := json.Unmarshal(entities, &sig.Entities); err != nil {
+				return nil, fmt.Errorf("decode signal entities: %w", err)
+			}
+		}
+
+		signals = append(signals, sig)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate signals: %w", err)
+	}
+	return signals, nil
 }
 
 func classifySignalWriteError(err error) error {

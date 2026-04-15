@@ -230,11 +230,11 @@ func (c *Council) requestPerspectiveJSON(ctx context.Context, archetype, systemP
 		return "", err
 	}
 
-	cleaned, extractErr := llm.ExtractJSON(resp)
+	cleaned, extractErr := extractStructuredJSON(resp)
 	if extractErr != nil {
 		if c.compilerModel != "" {
 			if compiled, compileErr := c.compilePerspectiveJSON(ctx, archetype, systemPrompt, thesisPrompt, resp); compileErr == nil {
-				if compiledJSON, recoverErr := llm.ExtractJSON(compiled); recoverErr == nil {
+				if compiledJSON, recoverErr := extractStructuredJSON(compiled); recoverErr == nil {
 					c.log.Info("council compiler recovered structured perspective",
 						"archetype", archetype,
 						"compiler_model", c.compilerModel,
@@ -263,7 +263,7 @@ func (c *Council) requestPerspectiveJSON(ctx context.Context, archetype, systemP
 
 func (c *Council) askPerspectiveWithFallbackMode(ctx context.Context, systemPrompt, thesisPrompt string) (string, error) {
 	if c.responseMode == structuredResponseModeThought {
-		systemPrompt = councilThoughtPrefix + "\n\n" + systemPrompt
+		systemPrompt = addTerminalJSONContract(councilThoughtPrefix + "\n\n" + systemPrompt)
 		return c.llm.AskWithLimit(ctx, llm.TierCritical, systemPrompt, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
 	}
 	return c.llm.AskJSONWithLimit(ctx, llm.TierCritical, systemPrompt, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
@@ -276,7 +276,7 @@ func (c *Council) compilePerspectiveJSON(ctx context.Context, archetype, systemP
 	req := llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: councilCompilerPrompt},
-			{Role: llm.RoleUser, Content: fmt.Sprintf("Council voice: %s\n\nOriginal council system prompt:\n%s\n\nThesis under review:\n%s\n\nCouncil reasoning transcript:\n%s", archetype, systemPrompt, thesisPrompt, rawResponse)},
+			{Role: llm.RoleUser, Content: fmt.Sprintf("Council voice: %s\n\nOriginal council system prompt:\n%s\n\nThesis under review:\n%s\n\nCouncil reasoning transcript:\n%s", archetype, systemPrompt, thesisPrompt, truncateForCompiler(rawResponse, 1800))},
 		},
 		Model:       c.compilerModel,
 		Tier:        llm.TierSpeed,

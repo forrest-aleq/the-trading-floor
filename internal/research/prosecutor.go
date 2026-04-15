@@ -125,11 +125,11 @@ Quant Metrics:
 		}
 	}
 
-	cleaned, cleanErr := llm.ExtractJSON(resp)
+	cleaned, cleanErr := extractStructuredJSON(resp)
 	if cleanErr != nil {
 		if p.compilerModel != "" {
 			if compiled, compileErr := p.compileProsecutionJSON(ctx, prompt, resp); compileErr == nil {
-				if compiledJSON, extractErr := llm.ExtractJSON(compiled); extractErr == nil {
+				if compiledJSON, extractErr := extractStructuredJSON(compiled); extractErr == nil {
 					cleaned = compiledJSON
 					cleanErr = nil
 					p.log.Info("prosecution compiler recovered structured verdict",
@@ -193,7 +193,7 @@ Quant Metrics:
 func (p *Prosecutor) askProsecutionWithFallbackMode(ctx context.Context, prompt string) (string, error) {
 	systemPrompt := prosecutionPrompt
 	if p.responseMode == structuredResponseModeThought {
-		systemPrompt = prosecutionThoughtPrefix + "\n\n" + prosecutionPrompt
+		systemPrompt = addTerminalJSONContract(prosecutionThoughtPrefix + "\n\n" + prosecutionPrompt)
 		return p.llm.AskWithLimit(ctx, llm.TierCritical, systemPrompt, prompt, prosecutionMaxTokens, 0.2)
 	}
 	return p.llm.AskJSONWithLimit(ctx, llm.TierCritical, systemPrompt, prompt, prosecutionMaxTokens, 0.2)
@@ -206,7 +206,7 @@ func (p *Prosecutor) compileProsecutionJSON(ctx context.Context, originalPrompt,
 	req := llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: prosecutionCompilerPrompt},
-			{Role: llm.RoleUser, Content: fmt.Sprintf("Original prosecution task:\n%s\n\nProsecution reasoning transcript:\n%s", originalPrompt, rawResponse)},
+			{Role: llm.RoleUser, Content: fmt.Sprintf("Original prosecution task:\n%s\n\nProsecution reasoning transcript:\n%s", originalPrompt, truncateForCompiler(rawResponse, 1800))},
 		},
 		Model:       p.compilerModel,
 		Tier:        llm.TierSpeed,

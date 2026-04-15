@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
@@ -66,29 +67,49 @@ func TestInternalSignalsRouteUsingExplicitTargetDomains(t *testing.T) {
 }
 
 func TestSourceDrivenRoutingSpecializesDeskIntake(t *testing.T) {
-	geo := signal.Signal{Source: "ft-world", Type: signal.TypeNews}
+	geo := signal.Signal{
+		Type:     signal.TypeNews,
+		Category: "geopolitical",
+		EvidenceMeta: &evidence.Metadata{
+			SourceType:  "secondary",
+			OriginRegion: "europe",
+		},
+	}
 	if !domainShouldReviewSignal("geopolitical", geo) {
-		t.Fatal("expected geopolitical desk to receive ft-world signal")
+		t.Fatal("expected geopolitical desk to receive geopolitical signal")
 	}
 	if !domainShouldReviewSignal("macro", geo) {
-		t.Fatal("expected macro desk to receive ft-world signal")
+		t.Fatal("expected macro desk to receive geopolitical signal")
 	}
 	if domainShouldReviewSignal("corporate", geo) {
-		t.Fatal("did not expect corporate desk to receive ft-world signal")
+		t.Fatal("did not expect corporate desk to receive geopolitical signal")
 	}
 
-	macro := signal.Signal{Source: "fred", Type: signal.TypeEconomic}
+	macro := signal.Signal{
+		Type: signal.TypeEconomic,
+		EvidenceMeta: &evidence.Metadata{
+			SourceType:      "primary",
+			SourceOwnerGroup: "federal_reserve",
+		},
+	}
 	if !domainShouldReviewSignal("macro", macro) {
-		t.Fatal("expected macro desk to receive FRED signal")
+		t.Fatal("expected macro desk to receive macro primary signal")
 	}
 	if !domainShouldReviewSignal("systematic", macro) {
-		t.Fatal("expected systematic desk to receive FRED signal")
+		t.Fatal("expected systematic desk to receive macro primary signal")
 	}
 	if domainShouldReviewSignal("corporate", macro) {
-		t.Fatal("did not expect corporate desk to receive FRED signal")
+		t.Fatal("did not expect corporate desk to receive macro primary signal")
 	}
 
-	corp := signal.Signal{Source: "earnings-calendar", Type: signal.TypeNews}
+	corp := signal.Signal{
+		Type:     signal.TypeNews,
+		Category: "corporate",
+		EvidenceMeta: &evidence.Metadata{
+			SourceOwnerGroup: "earnings_provider",
+			SourceType:       "secondary",
+		},
+	}
 	if !domainShouldReviewSignal("corporate", corp) {
 		t.Fatal("expected corporate desk to receive earnings signal")
 	}
@@ -99,14 +120,19 @@ func TestSourceDrivenRoutingSpecializesDeskIntake(t *testing.T) {
 		t.Fatal("did not expect geopolitical desk to receive earnings signal")
 	}
 
-	flow := signal.Signal{Source: "stocktwits", Type: signal.TypeSocial}
+	flow := signal.Signal{
+		Type: signal.TypeSocial,
+		EvidenceMeta: &evidence.Metadata{
+			SourceType: "social",
+		},
+	}
 	if !domainShouldReviewSignal("flows", flow) {
-		t.Fatal("expected flows desk to receive stocktwits signal")
+		t.Fatal("expected flows desk to receive social signal")
 	}
 	if !domainShouldReviewSignal("volatility", flow) {
-		t.Fatal("expected volatility desk to receive stocktwits signal")
+		t.Fatal("expected volatility desk to receive social signal")
 	}
 	if domainShouldReviewSignal("macro", flow) {
-		t.Fatal("did not expect macro desk to receive stocktwits signal")
+		t.Fatal("did not expect macro desk to receive social signal")
 	}
 }

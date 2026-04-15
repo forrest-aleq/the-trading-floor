@@ -71,37 +71,43 @@ func relevantDomainsForSignal(sig signal.Signal) []string {
 }
 
 func sourceDomainsForSignal(sig signal.Signal) []string {
-	source := strings.TrimSpace(strings.ToLower(sig.Source))
-	if source == "" {
+	meta := sig.EvidenceMeta
+	if meta == nil {
 		return nil
 	}
 
 	set := newDomainSet()
+	sourceType := strings.TrimSpace(strings.ToLower(meta.SourceType))
+	ownerGroup := strings.TrimSpace(strings.ToLower(meta.SourceOwnerGroup))
+	originRegion := strings.TrimSpace(strings.ToLower(meta.OriginRegion))
 
-	switch {
-	case strings.HasPrefix(source, "fred"):
-		set.add("macro", "tail", "systematic")
-	case strings.HasPrefix(source, "fed-"):
-		set.add("macro", "tail")
-	case strings.Contains(source, "world"), strings.Contains(source, "politico"), strings.Contains(source, "le-monde"):
-		set.add("geopolitical", "macro", "tail")
-	case strings.Contains(source, "markets"):
-		set.add("macro", "volatility", "systematic")
-	case strings.Contains(source, "companies"), strings.Contains(source, "equities"), strings.Contains(source, "edgar"), strings.Contains(source, "earnings"):
-		set.add("corporate", "sector")
-	case strings.Contains(source, "finextra"), strings.Contains(source, "fintech"):
-		set.add("corporate", "sector", "systematic")
-	case strings.HasPrefix(source, "stocktwits"), strings.HasPrefix(source, "reddit/"):
+	switch sourceType {
+	case "social":
 		set.add("flows", "volatility")
-	case strings.HasPrefix(source, "ibkr-market"):
+	case "market":
 		set.add("systematic", "volatility")
 		if instrumentEntityCount(sig) > 0 {
 			set.add("sector")
 		}
+	case "alternative":
+		set.add("sector", "systematic")
+	}
+
+	switch ownerGroup {
+	case "federal_reserve":
+		set.add("macro", "tail", "systematic")
+	case "sec", "earnings_provider":
+		set.add("corporate", "sector")
+	case "interactive_brokers":
+		set.add("systematic", "volatility")
 	}
 
 	if hasEntityType(sig, "country") {
 		set.add("geopolitical", "macro", "tail")
+	}
+
+	if originRegion != "" && originRegion != "us" && originRegion != "global" {
+		set.add("geopolitical", "macro")
 	}
 
 	if instrumentEntityCount(sig) >= 2 {

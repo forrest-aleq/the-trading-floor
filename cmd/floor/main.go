@@ -107,7 +107,8 @@ func main() {
 
 	// --- Centralized Market Data ---
 	mdMgr := marketdata.NewManager(ibkrClient, pacing, 0)
-	mdMgr.AddInstruments(feeds.DefaultWatchlist())
+	marketBootstrap := feeds.DefaultWatchlist()
+	mdMgr.AddInstruments(marketBootstrap)
 	mdMgr.Subscribe(func(prices map[string]float64) {
 		bk.Mark(prices)
 		if db != nil {
@@ -121,7 +122,7 @@ func main() {
 	observe.SafeGo(slog.Default().With("component", "runtime"), "market data loop panic", func() {
 		mdMgr.Run(ctx)
 	}, "task", "marketdata")
-	slog.Info("market data manager initialized", "watchlist", len(feeds.DefaultWatchlist()))
+	slog.Info("market data manager initialized", "watchlist", len(marketBootstrap))
 
 	// --- Shared Services ---
 	riskGate := risk.NewGate(risk.DefaultLimits())
@@ -588,17 +589,18 @@ type deskDef struct {
 }
 
 func registerDefaultFeeds(wireMgr *wire.Manager, marketClient feeds.MarketDataClient) int {
-	watchlist := feeds.DefaultWatchlist()
+	marketWatchlist := feeds.DefaultWatchlist()
+	earningsWatchlist := feeds.DefaultEarningsWatchlist()
 	registered := 0
 
 	feedSet := []wire.Feed{
 		feeds.NewNewsFeed(nil),
-		feeds.NewMarketFeed(marketClient, watchlist),
+		feeds.NewMarketFeed(marketClient, marketWatchlist),
 		feeds.NewEDGARFeed(),
 		feeds.NewSocialFeed(),
 		feeds.NewMacroFeed(os.Getenv("FRED_API_KEY")),
 		feeds.NewTelegramFeed(nil),
-		feeds.NewEarningsFeed(os.Getenv("EARNINGS_API_KEY"), watchlist),
+		feeds.NewEarningsFeed(os.Getenv("EARNINGS_API_KEY"), earningsWatchlist),
 		feeds.NewAlternativeFeed(nil),
 	}
 

@@ -23,7 +23,13 @@ type MarketFeed struct {
 	client    MarketDataClient
 	watchlist []model.Instrument
 	interval  time.Duration
-	states    map[string]*sourceState
+	states    map[string]*marketSignalState
+}
+
+type marketSignalState struct {
+	source    *sourceState
+	lastPrice float64
+	primed    bool
 }
 
 func NewMarketFeed(client MarketDataClient, watchlist []model.Instrument) *MarketFeed {
@@ -53,18 +59,23 @@ func (f *MarketFeed) Start(ctx context.Context, out chan<- signal.Signal) error 
 		case <-ticker.C:
 			for _, inst := range f.watchlist {
 				state := f.states[inst.Symbol]
-				if skip, remaining := state.ShouldPoll(time.Now()); skip {
+				if skip, remaining := state.source.ShouldPoll(time.Now()); skip {
 					f.log.Debug("skipping market symbol during backoff", "symbol", inst.Symbol, "retry_in", remaining)
 					continue
 				}
 
 				md, err := f.client.ReqMarketData(ctx, inst)
 				if err != nil {
-					backoff := state.RecordFailure(time.Now(), marketDataBackoff(err, f.interval))
+					backoff := state.source.RecordFailure(time.Now(), marketDataBackoff(err, f.interval))
 					f.log.Warn("market data error", "symbol", inst.Symbol, "error", err, "retry_after", backoff)
 					continue
 				}
-				state.RecordSuccess()
+				state.source.RecordSuccess()
+
+				price := bestMarketSignalPrice(md)
+				if !state.shouldEmit(price) {
+					continue
+				}
 
 				raw, err := json.Marshal(map[string]any{
 					"symbol": inst.Symbol,
@@ -101,15 +112,37 @@ func (f *MarketFeed) Start(ctx context.Context, out chan<- signal.Signal) error 
 	}
 }
 
-func marketStates(watchlist []model.Instrument) map[string]*sourceState {
-	states := make(map[string]*sourceState, len(watchlist))
+func marketStates(watchlist []model.Instrument) map[string]*marketSignalState {
+	states := make(map[string]*marketSignalState, len(watchlist))
 	for _, inst := range watchlist {
 		if inst.Symbol == "" {
 			continue
 		}
-		states[inst.Symbol] = newSourceState(64)
+		states[inst.Symbol] = &marketSignalState{source: newSourceState(64)}
 	}
 	return states
+}
+
+func (s *marketSignalState) shouldEmit(price float64) bool {
+	if price <= 0 {
+		return false
+	}
+	threshold := 0.0075
+	if !s.primed {
+		s.lastPrice = price
+		s.primed = true
+		return false
+	}
+	if s.lastPrice <= 0 {
+		s.lastPrice = price
+		return false
+	}
+	change := abs((price - s.lastPrice) / s.lastPrice)
+	if change < threshold {
+		return false
+	}
+	s.lastPrice = price
+	return true
 }
 
 func marketDataBackoff(err error, interval time.Duration) time.Duration {
@@ -124,6 +157,23 @@ func marketDataBackoff(err error, interval time.Duration) time.Duration {
 	}
 }
 
+func bestMarketSignalPrice(md *ibkr.MarketData) float64 {
+	switch {
+	case md.Last > 0:
+		return md.Last
+	case md.Bid > 0 && md.Ask > 0:
+		return (md.Bid + md.Ask) / 2
+	case md.Bid > 0:
+		return md.Bid
+	case md.Ask > 0:
+		return md.Ask
+	default:
+		return 0
+	}
+}
+
+// DefaultWatchlist returns the small bootstrap set used for regime and
+// cross-asset context before any thesis-specific instruments are added.
 func DefaultWatchlist() []model.Instrument {
 	return []model.Instrument{
 		{Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD"},
@@ -131,15 +181,22 @@ func DefaultWatchlist() []model.Instrument {
 		{Symbol: "IWM", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 		{Symbol: "DIA", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 		{Symbol: "VIX", SecType: "IND", Exchange: "CBOE", Currency: "USD"},
-		{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "NVDA", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "AMZN", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "GOOGL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 		{Symbol: "GLD", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 		{Symbol: "USO", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 		{Symbol: "TLT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 		{Symbol: "XLE", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 		{Symbol: "XLF", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+	}
+}
+
+// DefaultEarningsWatchlist is a bounded catalyst universe for the earnings
+// calendar feed. It is intentionally separate from the market bootstrap set.
+func DefaultEarningsWatchlist() []model.Instrument {
+	return []model.Instrument{
+		{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		{Symbol: "NVDA", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		{Symbol: "AMZN", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		{Symbol: "GOOGL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 	}
 }

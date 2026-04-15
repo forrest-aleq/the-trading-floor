@@ -192,7 +192,9 @@ func parseDomainFilter(raw string) map[string]struct{} {
 
 func filterDomains(domains []string, allow map[string]struct{}) []string {
 	if len(allow) == 0 {
-		return domains
+		sorted := append([]string(nil), domains...)
+		sort.Strings(sorted)
+		return sorted
 	}
 	filtered := make([]string, 0, len(domains))
 	for _, domain := range domains {

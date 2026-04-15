@@ -24,6 +24,13 @@ func TestFilterDomainsHonorsAllowList(t *testing.T) {
 	}
 }
 
+func TestFilterDomainsSortsWhenAllowListIsEmpty(t *testing.T) {
+	got := filterDomains([]string{"tail", "macro", "corporate"}, nil)
+	if len(got) != 3 || got[0] != "corporate" || got[1] != "macro" || got[2] != "tail" {
+		t.Fatalf("unexpected sorted domains: %#v", got)
+	}
+}
+
 func TestClassifyReplayErrorBucketsStructuredFailures(t *testing.T) {
 	tests := map[string]string{
 		"research JSON extraction: terminal JSON block missing": "json_extraction",

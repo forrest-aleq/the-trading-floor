@@ -6,6 +6,39 @@ import (
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
+var categoryDomainRules = map[string][]string{
+	"geopolitical": {"geopolitical", "tail"},
+	"macro":        {"macro", "tail"},
+	"corporate":    {"corporate", "sector"},
+	"flows":        {"flows", "volatility"},
+	"tail":         {"tail", "volatility", "macro", "geopolitical"},
+	"volatility":   {"volatility", "tail"},
+	"sector":       {"sector", "corporate"},
+	"market":       {"systematic", "volatility", "sector"},
+}
+
+var signalTypeDomainRules = map[signal.Type][]string{
+	signal.TypeFiling:      {"corporate"},
+	signal.TypeEconomic:    {"macro", "tail"},
+	signal.TypePrice:       {"systematic", "volatility", "sector"},
+	signal.TypeSocial:      {"flows", "volatility"},
+	signal.TypeFlow:        {"flows", "volatility"},
+	signal.TypeAlternative: {"macro", "sector"},
+}
+
+var sourceTypeDomainRules = map[string][]string{
+	"social":      {"flows", "volatility"},
+	"market":      {"systematic", "volatility"},
+	"alternative": {"sector", "systematic"},
+}
+
+var ownerGroupDomainRules = map[string][]string{
+	"federal_reserve":     {"macro", "tail", "systematic"},
+	"sec":                 {"corporate", "sector"},
+	"earnings_provider":   {"corporate", "sector"},
+	"interactive_brokers": {"systematic", "volatility"},
+}
+
 // domainShouldReviewSignal applies a deterministic pre-filter before the LLM
 // scanner so irrelevant desks do not burn inference budget on every signal.
 func domainShouldReviewSignal(domain string, sig signal.Signal) bool {
@@ -44,37 +77,8 @@ func RelevantDomainsForSignal(sig signal.Signal) []string {
 
 	set.add(sourceDomainsForSignal(sig)...)
 
-	switch strings.TrimSpace(strings.ToLower(sig.Category)) {
-	case "geopolitical":
-		set.add("geopolitical", "tail")
-	case "macro":
-		set.add("macro", "tail")
-	case "corporate":
-		set.add("corporate", "sector")
-	case "flows":
-		set.add("flows", "volatility")
-	case "tail":
-		set.add("tail", "volatility", "macro", "geopolitical")
-	case "volatility":
-		set.add("volatility", "tail")
-	case "sector":
-		set.add("sector", "corporate")
-	case "market":
-		set.add("systematic", "volatility", "sector")
-	}
-
-	switch sig.Type {
-	case signal.TypeFiling:
-		set.add("corporate")
-	case signal.TypeEconomic:
-		set.add("macro", "tail")
-	case signal.TypePrice:
-		set.add("systematic", "volatility", "sector")
-	case signal.TypeSocial, signal.TypeFlow:
-		set.add("flows", "volatility")
-	case signal.TypeAlternative:
-		set.add("macro", "sector")
-	}
+	set.add(categoryDomainRules[strings.TrimSpace(strings.ToLower(sig.Category))]...)
+	set.add(signalTypeDomainRules[sig.Type]...)
 
 	if len(set.values()) == 0 {
 		set.add("macro", "systematic")
@@ -94,26 +98,12 @@ func sourceDomainsForSignal(sig signal.Signal) []string {
 	ownerGroup := strings.TrimSpace(strings.ToLower(meta.SourceOwnerGroup))
 	originRegion := strings.TrimSpace(strings.ToLower(meta.OriginRegion))
 
-	switch sourceType {
-	case "social":
-		set.add("flows", "volatility")
-	case "market":
-		set.add("systematic", "volatility")
-		if instrumentEntityCount(sig) > 0 {
-			set.add("sector")
-		}
-	case "alternative":
-		set.add("sector", "systematic")
+	set.add(sourceTypeDomainRules[sourceType]...)
+	if sourceType == "market" && instrumentEntityCount(sig) > 0 {
+		set.add("sector")
 	}
 
-	switch ownerGroup {
-	case "federal_reserve":
-		set.add("macro", "tail", "systematic")
-	case "sec", "earnings_provider":
-		set.add("corporate", "sector")
-	case "interactive_brokers":
-		set.add("systematic", "volatility")
-	}
+	set.add(ownerGroupDomainRules[ownerGroup]...)
 
 	if hasEntityType(sig, "country") {
 		set.add("geopolitical", "macro", "tail")

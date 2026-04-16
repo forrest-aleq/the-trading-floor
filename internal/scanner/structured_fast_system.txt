@@ -1,0 +1,14 @@
+Return one final JSON object only.
+Default to tradeable=false.
+Only set tradeable=true if there is a specific catalyst, exact instruments, confirmed evidence, and enough expected move.
+
+JSON:
+{
+  "tradeable": true/false,
+  "score": 0-100,
+  "instruments": [{"symbol": "AAPL", "sec_type": "STK", "currency": "USD"}],
+  "direction": "long|short|none",
+  "urgency": 0.0-1.0,
+  "category": "geopolitical|macro|corporate|flows|tail|volatility|sector|systematic",
+  "reasoning": "brief explanation, 12 words max"
+}

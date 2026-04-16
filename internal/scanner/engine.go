@@ -22,12 +22,16 @@ type evaluationTimeContextKey struct{}
 
 // Engine evaluates signals for tradeable opportunities using the speed-tier LLM
 type Engine struct {
-	log           *slog.Logger
-	llm           *llm.Router
-	minScore      float64 // Minimum score to pass (0-100)
-	selectedModel string
-	responseMode  scannerResponseMode
-	compilerModel string
+	log                  *slog.Logger
+	llm                  *llm.Router
+	minScore             float64 // Minimum score to pass (0-100)
+	selectedModel        string
+	responseMode         scannerResponseMode
+	compilerModel        string
+	structuredPrompt     string
+	structuredFastPrompt string
+	thoughtPrompt        string
+	compilerPrompt       string
 
 	mu                   sync.Mutex
 	llmUnavailableUntil  time.Time
@@ -63,102 +67,20 @@ func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
 		minScore = 70 // Default: aggressive filter — most signals should be rejected
 	}
 	selectedModel := scannerSelectedModel()
+	policy := activePromptPolicy()
 	return &Engine{
-		log:           slog.Default().With("component", "scanner"),
-		llm:           llmRouter,
-		minScore:      minScore,
-		selectedModel: selectedModel,
-		responseMode:  detectScannerResponseMode(selectedModel),
-		compilerModel: strings.TrimSpace(os.Getenv("SCANNER_COMPILER_MODEL")),
+		log:                  slog.Default().With("component", "scanner"),
+		llm:                  llmRouter,
+		minScore:             minScore,
+		selectedModel:        selectedModel,
+		responseMode:         detectScannerResponseMode(selectedModel),
+		compilerModel:        strings.TrimSpace(os.Getenv("SCANNER_COMPILER_MODEL")),
+		structuredPrompt:     policy.structuredPrompt,
+		structuredFastPrompt: policy.structuredFastPrompt,
+		thoughtPrompt:        policy.thoughtPrompt,
+		compilerPrompt:       policy.compilerPrompt,
 	}
 }
-
-const scannerStructuredPrompt = `You are a trading signal scanner. Output one final JSON object only.
-Do not include chain-of-thought, thinking tags, XML, markdown, or any explanatory preamble.
-Your DEFAULT response should be tradeable: false. Most signals are noise.
-
-Only mark tradeable: true if ALL of these are met:
-1. There is a SPECIFIC, actionable trade thesis (not vague commentary)
-2. You can name EXACT instruments to trade (tickers, not sectors)
-3. There is a clear catalyst with a defined time window
-4. The signal contains hard data or a confirmed event (not rumor or speculation)
-5. The expected move is large enough to overcome transaction costs
-6. Cross-source corroboration should increase confidence; isolated single-source noise should usually fail
-
-If in doubt, set tradeable: false. We lose nothing by passing. We lose real money by acting on noise.
-
-Respond in JSON:
-{
-  "tradeable": true/false,
-  "score": 0-100,
-  "instruments": [{"symbol": "AAPL", "sec_type": "STK", "currency": "USD"}],
-  "direction": "long" or "short",
-  "urgency": 0.0-1.0,
-  "category": "geopolitical|macro|corporate|flows|tail|volatility|sector|systematic",
-  "reasoning": "brief explanation, 12 words max"
-}`
-
-const scannerStructuredFastPrompt = `Return one final JSON object only.
-Default to tradeable=false.
-Only set tradeable=true if there is a specific catalyst, exact instruments, confirmed evidence, and enough expected move.
-
-JSON:
-{
-  "tradeable": true/false,
-  "score": 0-100,
-  "instruments": [{"symbol": "AAPL", "sec_type": "STK", "currency": "USD"}],
-  "direction": "long|short|none",
-  "urgency": 0.0-1.0,
-  "category": "geopolitical|macro|corporate|flows|tail|volatility|sector|systematic",
-  "reasoning": "brief explanation, 12 words max"
-}`
-
-const scannerThoughtPrompt = `You are a trading signal scanner. Most signals are noise.
-Do not restate the request, rubric, or output schema.
-Think briefly if useful, but keep it to at most 3 short bullets.
-If the signal is obviously not tradeable, skip the essay and go straight to the terminal decision block.
-You MUST end with exactly one terminal decision block.
-
-Only mark tradeable: true if ALL of these are met:
-1. There is a SPECIFIC, actionable trade thesis (not vague commentary)
-2. You can name EXACT instruments to trade (tickers, not sectors)
-3. There is a clear catalyst with a defined time window
-4. The signal contains hard data or a confirmed event (not rumor or speculation)
-5. The expected move is large enough to overcome transaction costs
-6. Cross-source corroboration should increase confidence; isolated single-source noise should usually fail
-
-If in doubt, set tradeable: false. We lose nothing by passing. We lose real money by acting on noise.
-
-Final block format:
-FINAL_DECISION
-tradeable: true/false
-score: 0-100
-instruments: SYMBOL[:SECTYPE[:CURRENCY]], SYMBOL[:SECTYPE[:CURRENCY]] or none
-direction: long|short|none
-urgency: 0.0-1.0
-category: geopolitical|macro|corporate|flows|tail|volatility|sector|systematic
-reasoning: brief explanation, 12 words max
-END_FINAL_DECISION
-
-If you are running out of room, output the final block immediately.
-Do not omit the final block.`
-
-const scannerCompilerPrompt = `You are a trading decision compiler.
-You will receive a trading signal and a scanner's freeform reasoning transcript.
-Return one final JSON object only. No prose, no markdown, no thinking.
-
-Default to tradeable=false if the reasoning or evidence is ambiguous.
-
-JSON schema:
-{
-  "tradeable": true/false,
-  "score": 0-100,
-  "instruments": [{"symbol": "AAPL", "sec_type": "STK", "currency": "USD"}],
-  "direction": "long" or "short" or "none",
-  "urgency": 0.0-1.0,
-  "category": "geopolitical|macro|corporate|flows|tail|volatility|sector|systematic",
-  "reasoning": "brief explanation, 12 words max"
-}`
 
 type scannerResponseMode string
 
@@ -424,7 +346,7 @@ func (e *Engine) retryStructuredFallback(ctx context.Context, domain string, sig
 	reqCtx, cancel := context.WithTimeout(ctx, scannerRequestTimeout)
 	defer cancel()
 
-	resp, err := e.askScannerWithLimit(reqCtx, scannerStructuredFastPrompt, prompt, scannerCompactMaxTokens, 0.0, true)
+	resp, err := e.askScannerWithLimit(reqCtx, e.structuredFastPrompt, prompt, scannerCompactMaxTokens, 0.0, true)
 	if err != nil {
 		return "", prompt, err
 	}
@@ -460,7 +382,7 @@ func (e *Engine) compileScannerDecision(ctx context.Context, signalPrompt, rawRe
 
 	req := llm.Request{
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: scannerCompilerPrompt},
+			{Role: llm.RoleSystem, Content: e.compilerPrompt},
 			{Role: llm.RoleUser, Content: buildScannerCompilerPrompt(signalPrompt, rawResponse)},
 		},
 		Model:       e.compilerModel,
@@ -489,7 +411,7 @@ type scannerRequestConfig struct {
 func (e *Engine) requestConfig() scannerRequestConfig {
 	if e.responseMode == scannerResponseModeThought {
 		return scannerRequestConfig{
-			systemPrompt:            scannerThoughtPrompt,
+			systemPrompt:            e.thoughtPrompt,
 			jsonMode:                false,
 			timeout:                 scannerThinkingRequestTimeout,
 			maxTokens:               scannerThinkingMaxTokens,
@@ -500,7 +422,7 @@ func (e *Engine) requestConfig() scannerRequestConfig {
 	}
 
 	return scannerRequestConfig{
-		systemPrompt:     scannerStructuredPrompt,
+		systemPrompt:     e.structuredPrompt,
 		jsonMode:         true,
 		timeout:          scannerRequestTimeout,
 		maxTokens:        scannerMaxTokens,

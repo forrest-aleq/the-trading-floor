@@ -16,6 +16,7 @@ import (
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
+	"golang.org/x/sync/singleflight"
 )
 
 type evaluationTimeContextKey struct{}
@@ -37,6 +38,16 @@ type Engine struct {
 	llmUnavailableUntil  time.Time
 	llmUnavailableReason string
 	lastCooldownNoticeAt time.Time
+
+	cacheMu    sync.RWMutex
+	cache      map[string]cachedEvaluation
+	cacheTTL   time.Duration
+	cacheGroup singleflight.Group
+}
+
+type cachedEvaluation struct {
+	evaluation Evaluation
+	cachedAt   time.Time
 }
 
 type Evaluation struct {
@@ -60,6 +71,7 @@ var (
 	scannerCompactContentMax      = readIntEnv("SCANNER_COMPACT_CONTENT_LIMIT", 220)
 	scannerStaleSignalAge         = readDurationEnv("SCANNER_STALE_SIGNAL_AGE", 6*time.Hour)
 	scannerLLMCooldown            = readDurationEnv("SCANNER_LLM_UNAVAILABLE_COOLDOWN", 20*time.Second)
+	scannerEvalCacheTTL           = readDurationEnv("SCANNER_EVAL_CACHE_TTL", 10*time.Minute)
 )
 
 func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
@@ -79,6 +91,8 @@ func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
 		structuredFastPrompt: policy.structuredFastPrompt,
 		thoughtPrompt:        policy.thoughtPrompt,
 		compilerPrompt:       policy.compilerPrompt,
+		cache:                make(map[string]cachedEvaluation),
+		cacheTTL:             scannerEvalCacheTTL,
 	}
 }
 
@@ -97,6 +111,27 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 
 // EvaluateDetailed runs the scanner and records deterministic rejection reasons for replay and regression analysis.
 func (e *Engine) EvaluateDetailed(ctx context.Context, sig signal.Signal, domain string) Evaluation {
+	cacheKey := e.evaluationCacheKey(sig, domain)
+	if cached, ok := e.lookupCachedEvaluation(cacheKey, time.Now().UTC()); ok {
+		return cloneEvaluation(cached)
+	}
+	if cacheKey != "" {
+		cachedValue, _, _ := e.cacheGroup.Do(cacheKey, func() (any, error) {
+			if cached, ok := e.lookupCachedEvaluation(cacheKey, time.Now().UTC()); ok {
+				return cached, nil
+			}
+			evaluation := e.evaluateDetailedUncached(ctx, sig, domain)
+			e.storeCachedEvaluation(cacheKey, evaluation, time.Now().UTC())
+			return evaluation, nil
+		})
+		if evaluation, ok := cachedValue.(Evaluation); ok {
+			return cloneEvaluation(evaluation)
+		}
+	}
+	return e.evaluateDetailedUncached(ctx, sig, domain)
+}
+
+func (e *Engine) evaluateDetailedUncached(ctx context.Context, sig signal.Signal, domain string) Evaluation {
 	if skip, reason := shouldSkipSignalAt(sig, evaluationTime(ctx)); skip {
 		e.log.Debug("scanner skipped by deterministic prefilter",
 			"signal_id", sig.ID,
@@ -323,6 +358,87 @@ func (e *Engine) EvaluateDetailed(ctx context.Context, sig signal.Signal, domain
 		Score:       result.Score,
 		Tradeable:   true,
 	}
+}
+
+func (e *Engine) evaluationCacheKey(sig signal.Signal, domain string) string {
+	if strings.TrimSpace(domain) == "" || strings.TrimSpace(sig.ID) == "" {
+		return ""
+	}
+	keyParts := []string{
+		strings.TrimSpace(domain),
+		strings.TrimSpace(sig.ID),
+		strings.TrimSpace(sig.ContentHash),
+		strings.TrimSpace(sig.InstitutionalContext),
+	}
+	if sig.Expectation != nil {
+		keyParts = append(keyParts,
+			sig.Expectation.PredictedAction,
+			fmt.Sprintf("%.3f", sig.Expectation.PredictedImportance),
+			fmt.Sprintf("%.3f", sig.Expectation.PredictedReliability),
+			fmt.Sprintf("%.3f", sig.Expectation.PredictedTradability),
+		)
+	}
+	if sig.Appraisal != nil {
+		keyParts = append(keyParts,
+			sig.Appraisal.ViolationClass,
+			fmt.Sprintf("%.3f", sig.Appraisal.ActionPressure),
+			fmt.Sprintf("%.3f", sig.Appraisal.SocialCost),
+		)
+	}
+	if sig.ActionSelection != nil {
+		keyParts = append(keyParts,
+			sig.ActionSelection.RecommendedAction,
+			fmt.Sprintf("%.3f", sig.ActionSelection.ExpectedUtility),
+		)
+	}
+	return strings.Join(keyParts, "|")
+}
+
+func (e *Engine) lookupCachedEvaluation(key string, now time.Time) (Evaluation, bool) {
+	if key == "" || e.cacheTTL <= 0 {
+		return Evaluation{}, false
+	}
+	e.cacheMu.RLock()
+	cached, ok := e.cache[key]
+	e.cacheMu.RUnlock()
+	if !ok {
+		return Evaluation{}, false
+	}
+	if now.Sub(cached.cachedAt) > e.cacheTTL {
+		e.cacheMu.Lock()
+		delete(e.cache, key)
+		e.cacheMu.Unlock()
+		return Evaluation{}, false
+	}
+	return cached.evaluation, true
+}
+
+func (e *Engine) storeCachedEvaluation(key string, evaluation Evaluation, now time.Time) {
+	if key == "" || e.cacheTTL <= 0 {
+		return
+	}
+	if strings.TrimSpace(evaluation.Reason) == "llm_error" {
+		return
+	}
+	e.cacheMu.Lock()
+	e.cache[key] = cachedEvaluation{evaluation: evaluation, cachedAt: now}
+	e.cacheMu.Unlock()
+}
+
+func cloneEvaluation(in Evaluation) Evaluation {
+	out := in
+	if in.Opportunity != nil {
+		cloned := *in.Opportunity
+		cloned.SignalIDs = append([]string(nil), in.Opportunity.SignalIDs...)
+		cloned.Instruments = append([]model.Instrument(nil), in.Opportunity.Instruments...)
+		if in.Opportunity.EvidenceMeta != nil {
+			cloned.EvidenceMeta = in.Opportunity.EvidenceMeta.Clone()
+		}
+		cloned.ID = uuid.New().String()
+		cloned.CreatedAt = time.Now().UTC()
+		out.Opportunity = &cloned
+	}
+	return out
 }
 
 func WithEvaluationTime(ctx context.Context, at time.Time) context.Context {

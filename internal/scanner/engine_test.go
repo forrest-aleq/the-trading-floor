@@ -179,6 +179,19 @@ func (s *scannerBlankInstrumentClient) Complete(_ context.Context, req llm.Reque
 	}, nil
 }
 
+type scannerDeterministicClient struct {
+	requests int
+	content  string
+}
+
+func (s *scannerDeterministicClient) Complete(_ context.Context, _ llm.Request) (*llm.Response, error) {
+	s.requests++
+	return &llm.Response{
+		Content: s.content,
+		Model:   "stub",
+	}, nil
+}
+
 func TestEvaluateRetriesCompactPromptOnContextWindowError(t *testing.T) {
 	t.Setenv("SCANNER_RESPONSE_MODE", "json")
 
@@ -216,6 +229,72 @@ func TestEvaluateRetriesCompactPromptOnContextWindowError(t *testing.T) {
 	}
 	if opp.Direction != model.Long {
 		t.Fatalf("expected long opportunity, got %s", opp.Direction)
+	}
+}
+
+func TestEvaluateDetailedCachesBySignalAndDomain(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+
+	client := &scannerDeterministicClient{
+		content: `{"tradeable":true,"score":84,"instruments":[{"symbol":"TLT","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.7,"category":"macro","reasoning":"rates setup"}`,
+	}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	sig := signal.Signal{
+		ID:         "sig-cache-1",
+		Source:     "fed-press",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.7,
+		Translated: "Fed signals tighter conditions.",
+	}
+
+	first := engine.EvaluateDetailed(context.Background(), sig, "macro")
+	second := engine.EvaluateDetailed(context.Background(), sig, "macro")
+
+	if !first.Accepted || first.Opportunity == nil {
+		t.Fatalf("expected first evaluation accepted, got %+v", first)
+	}
+	if !second.Accepted || second.Opportunity == nil {
+		t.Fatalf("expected second evaluation accepted, got %+v", second)
+	}
+	if client.requests != 1 {
+		t.Fatalf("expected exactly one LLM request, got %d", client.requests)
+	}
+	if first.Opportunity.ID == second.Opportunity.ID {
+		t.Fatalf("expected unique opportunity IDs after cache clone, got %q", first.Opportunity.ID)
+	}
+}
+
+func TestEvaluateDetailedCacheKeyIncludesInstitutionalState(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+
+	client := &scannerDeterministicClient{
+		content: `{"tradeable":false,"score":40,"instruments":[],"direction":"long","urgency":0.3,"category":"macro","reasoning":"ignore"}`,
+	}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	base := signal.Signal{
+		ID:         "sig-cache-2",
+		Source:     "internal/desk-geo-a",
+		Type:       signal.TypeAlternative,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.6,
+		Translated: "Internal signal",
+	}
+
+	sigA := base
+	sigA.InstitutionalContext = "Institutional context:\n  colleague.from_desk=desk-geo-a\n  colleague.peer_trust=0.70"
+	sigB := base
+	sigB.InstitutionalContext = "Institutional context:\n  colleague.from_desk=desk-geo-a\n  colleague.peer_trust=0.90"
+
+	engine.EvaluateDetailed(context.Background(), sigA, "macro")
+	engine.EvaluateDetailed(context.Background(), sigB, "macro")
+
+	if client.requests != 2 {
+		t.Fatalf("expected distinct institutional contexts to miss shared cache, got %d requests", client.requests)
 	}
 }
 

@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 type ColleagueMessageKind string
@@ -35,6 +36,34 @@ type ColleagueMessage struct {
 	Subject          string               `json:"subject,omitempty"`
 	Summary          string               `json:"summary,omitempty"`
 	DisplaySymbol    string               `json:"display_symbol,omitempty"`
+}
+
+type CollaborationInput struct {
+	ThreadID               string               `json:"thread_id,omitempty"`
+	MessageID              string               `json:"message_id,omitempty"`
+	OriginDesk             string               `json:"origin_desk,omitempty"`
+	OriginDomain           string               `json:"origin_domain,omitempty"`
+	OriginSignalID         string               `json:"origin_signal_id,omitempty"`
+	OriginThesisID         string               `json:"origin_thesis_id,omitempty"`
+	RootThesisID           string               `json:"root_thesis_id,omitempty"`
+	Kind                   ColleagueMessageKind `json:"kind,omitempty"`
+	RequestedAction        string               `json:"requested_action,omitempty"`
+	Summary                string               `json:"summary,omitempty"`
+	RelationshipTrust      float64              `json:"relationship_trust,omitempty"`
+	RelationshipConfidence float64              `json:"relationship_confidence,omitempty"`
+}
+
+type DeskRelationshipBelief struct {
+	Key           string    `json:"key"`
+	OriginDesk    string    `json:"origin_desk"`
+	ReceivingDesk string    `json:"receiving_desk"`
+	Domain        string    `json:"domain"`
+	Regime        string    `json:"regime"`
+	Trust         float64   `json:"trust"`
+	Confidence    float64   `json:"confidence"`
+	SuccessCount  int       `json:"success_count"`
+	FailureCount  int       `json:"failure_count"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 func DecodeColleagueMessage(raw json.RawMessage) (ColleagueMessage, bool) {
@@ -109,6 +138,25 @@ func NewColleagueMessageID(thesisID string) string {
 		return ""
 	}
 	return "msg-" + thesisID
+}
+
+func CollaborationInputFromMessage(message ColleagueMessage) *CollaborationInput {
+	message = message.Normalize()
+	if message.IsZero() {
+		return nil
+	}
+	return &CollaborationInput{
+		ThreadID:        message.ThreadID,
+		MessageID:       message.MessageID,
+		OriginDesk:      message.OriginDesk,
+		OriginDomain:    message.OriginDomain,
+		OriginSignalID:  message.OriginSignalID,
+		OriginThesisID:  firstNonEmptyCollabString(message.ThesisID, message.ParentThesisID),
+		RootThesisID:    message.RootThesisID,
+		Kind:            message.Kind,
+		RequestedAction: message.RequestedAction,
+		Summary:         message.Summary,
+	}
 }
 
 func normalizeCollabDomains(values []string) []string {

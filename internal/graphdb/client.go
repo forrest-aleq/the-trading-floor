@@ -159,6 +159,90 @@ func (c *Client) UpsertCompetenceState(ctx context.Context, state *model.Compete
 	})
 }
 
+func (c *Client) UpsertDeskRelationshipBelief(ctx context.Context, state *model.DeskRelationshipBelief) error {
+	if c == nil || c.driver == nil || state == nil || strings.TrimSpace(state.Key) == "" {
+		return nil
+	}
+
+	updatedAt := state.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+
+	return c.executeWrite(ctx, func(tx neo4j.ManagedTransaction) error {
+		if err := runQuery(ctx, tx, `
+			MERGE (b:DeskRelationshipBelief {key: $key})
+			SET b.origin_desk = $origin_desk,
+			    b.receiving_desk = $receiving_desk,
+			    b.domain = $domain,
+			    b.regime = $regime,
+			    b.trust = $trust,
+			    b.confidence = $confidence,
+			    b.success_count = $success_count,
+			    b.failure_count = $failure_count,
+			    b.updated_at = $updated_at`,
+			map[string]any{
+				"key":            state.Key,
+				"origin_desk":    strings.TrimSpace(state.OriginDesk),
+				"receiving_desk": strings.TrimSpace(state.ReceivingDesk),
+				"domain":         strings.TrimSpace(state.Domain),
+				"regime":         strings.TrimSpace(state.Regime),
+				"trust":          state.Trust,
+				"confidence":     state.Confidence,
+				"success_count":  state.SuccessCount,
+				"failure_count":  state.FailureCount,
+				"updated_at":     updatedAt,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MERGE (origin:Desk {id: $origin_desk})
+			SET origin.updated_at = $updated_at`,
+			map[string]any{
+				"origin_desk": strings.TrimSpace(state.OriginDesk),
+				"updated_at":  updatedAt,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MERGE (receiver:Desk {id: $receiving_desk})
+			SET receiver.updated_at = $updated_at`,
+			map[string]any{
+				"receiving_desk": strings.TrimSpace(state.ReceivingDesk),
+				"updated_at":     updatedAt,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MATCH (origin:Desk {id: $origin_desk})
+			MATCH (b:DeskRelationshipBelief {key: $key})
+			MERGE (origin)-[r:HAS_PEER_BELIEF]->(b)
+			SET r.updated_at = $updated_at`,
+			map[string]any{
+				"origin_desk": strings.TrimSpace(state.OriginDesk),
+				"key":         state.Key,
+				"updated_at":  updatedAt,
+			},
+		); err != nil {
+			return err
+		}
+		return runQuery(ctx, tx, `
+			MATCH (receiver:Desk {id: $receiving_desk})
+			MATCH (b:DeskRelationshipBelief {key: $key})
+			MERGE (receiver)-[r:HAS_PEER_BELIEF]->(b)
+			SET r.updated_at = $updated_at`,
+			map[string]any{
+				"receiving_desk": strings.TrimSpace(state.ReceivingDesk),
+				"key":            state.Key,
+				"updated_at":     updatedAt,
+			},
+		)
+	})
+}
+
 func (c *Client) CouncilVoiceTelemetry(ctx context.Context, domain string) (map[string]model.CouncilVoiceStats, error) {
 	stats := make(map[string]model.CouncilVoiceStats)
 	if c == nil || c.driver == nil || strings.TrimSpace(domain) == "" {

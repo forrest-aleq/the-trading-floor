@@ -13,16 +13,19 @@ import (
 // Graph is the belief graph — trust/confidence per competence key.
 // Ported from MARS BeliefGraphStore.
 type Graph struct {
-	mu       sync.RWMutex
-	log      *slog.Logger
-	states   map[string]*model.CompetenceState
-	onChange func(*model.CompetenceState)
+	mu           sync.RWMutex
+	log          *slog.Logger
+	states       map[string]*model.CompetenceState
+	peerStates   map[string]*model.DeskRelationshipBelief
+	onChange     func(*model.CompetenceState)
+	onPeerChange func(*model.DeskRelationshipBelief)
 }
 
 func NewGraph() *Graph {
 	return &Graph{
-		log:    slog.Default().With("component", "belief-graph"),
-		states: make(map[string]*model.CompetenceState),
+		log:        slog.Default().With("component", "belief-graph"),
+		states:     make(map[string]*model.CompetenceState),
+		peerStates: make(map[string]*model.DeskRelationshipBelief),
 	}
 }
 
@@ -32,6 +35,18 @@ func CompetenceKey(deskID, capability, context, regime string) string {
 }
 
 func ParseCompetenceKey(key string) (deskID, capability, context, regime string) {
+	parts := strings.SplitN(key, "::", 4)
+	if len(parts) != 4 {
+		return "", "", "", ""
+	}
+	return parts[0], parts[1], parts[2], parts[3]
+}
+
+func PeerBeliefKey(originDesk, receivingDesk, domain, regime string) string {
+	return fmt.Sprintf("%s::%s::%s::%s", originDesk, receivingDesk, contextOrUnknown(domain), regime)
+}
+
+func ParsePeerBeliefKey(key string) (originDesk, receivingDesk, domain, regime string) {
 	parts := strings.SplitN(key, "::", 4)
 	if len(parts) != 4 {
 		return "", "", "", ""
@@ -90,6 +105,12 @@ func (g *Graph) SetChangeHandler(fn func(*model.CompetenceState)) {
 	g.mu.Unlock()
 }
 
+func (g *Graph) SetPeerChangeHandler(fn func(*model.DeskRelationshipBelief)) {
+	g.mu.Lock()
+	g.onPeerChange = fn
+	g.mu.Unlock()
+}
+
 func (g *Graph) Load(states []*model.CompetenceState) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -116,6 +137,45 @@ func (g *Graph) Lookup(deskID, capability, context, regime string) (*model.Compe
 		return nil, false
 	}
 	return cloneState(state), true
+}
+
+func (g *Graph) GetPeer(key string) *model.DeskRelationshipBelief {
+	g.mu.RLock()
+	state, exists := g.peerStates[key]
+	g.mu.RUnlock()
+	if exists {
+		return clonePeerState(state)
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if state, exists = g.peerStates[key]; exists {
+		return clonePeerState(state)
+	}
+	originDesk, receivingDesk, domain, regime := ParsePeerBeliefKey(key)
+	state = &model.DeskRelationshipBelief{
+		Key:           key,
+		OriginDesk:    originDesk,
+		ReceivingDesk: receivingDesk,
+		Domain:        domain,
+		Regime:        regime,
+		Trust:         0.55,
+		Confidence:    0.35,
+		UpdatedAt:     time.Now(),
+	}
+	g.peerStates[key] = state
+	return clonePeerState(state)
+}
+
+func (g *Graph) LookupPeer(originDesk, receivingDesk, domain, regime string) (*model.DeskRelationshipBelief, bool) {
+	key := PeerBeliefKey(originDesk, receivingDesk, domain, regime)
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	state, ok := g.peerStates[key]
+	if !ok {
+		return nil, false
+	}
+	return clonePeerState(state), true
 }
 
 func (g *Graph) AssessTerritory(deskID, capability, context, regime string, minObservations int) TerritoryAssessment {
@@ -274,6 +334,73 @@ func (g *Graph) ApplyFailure(key string, magnitude float64, boundaryViolation bo
 	}
 }
 
+func (g *Graph) ApplyPeerSuccess(key string, magnitude float64) {
+	g.GetPeer(key)
+
+	g.mu.Lock()
+	state := g.peerStates[key]
+	if state == nil {
+		g.mu.Unlock()
+		return
+	}
+	if magnitude > 2.0 {
+		magnitude = 2.0
+	}
+	if magnitude < 0 {
+		magnitude = 0
+	}
+	weight := 0.025 * magnitude
+	state.Trust += (1 - state.Trust) * weight
+	state.Confidence += 0.03 * magnitude
+	if state.Confidence > 1.0 {
+		state.Confidence = 1.0
+	}
+	state.SuccessCount++
+	state.UpdatedAt = time.Now()
+	changed := clonePeerState(state)
+	handler := g.onPeerChange
+	g.mu.Unlock()
+
+	if handler != nil {
+		handler(changed)
+	}
+}
+
+func (g *Graph) ApplyPeerFailure(key string, magnitude float64) {
+	g.GetPeer(key)
+
+	g.mu.Lock()
+	state := g.peerStates[key]
+	if state == nil {
+		g.mu.Unlock()
+		return
+	}
+	if magnitude > 2.0 {
+		magnitude = 2.0
+	}
+	if magnitude < 0 {
+		magnitude = 0
+	}
+	weight := 0.075 * magnitude
+	state.Trust -= state.Trust * weight
+	if state.Trust < 0 {
+		state.Trust = 0
+	}
+	state.Confidence -= 0.04 * magnitude
+	if state.Confidence < 0 {
+		state.Confidence = 0
+	}
+	state.FailureCount++
+	state.UpdatedAt = time.Now()
+	changed := clonePeerState(state)
+	handler := g.onPeerChange
+	g.mu.Unlock()
+
+	if handler != nil {
+		handler(changed)
+	}
+}
+
 // DecayAll applies periodic decay to all beliefs (anti-overfitting layer 5)
 func (g *Graph) DecayAll(decayPct float64) {
 	g.mu.Lock()
@@ -330,6 +457,16 @@ func (g *Graph) All() []*model.CompetenceState {
 	return states
 }
 
+func (g *Graph) AllPeerBeliefs() []*model.DeskRelationshipBelief {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	states := make([]*model.DeskRelationshipBelief, 0, len(g.peerStates))
+	for _, s := range g.peerStates {
+		states = append(states, clonePeerState(s))
+	}
+	return states
+}
+
 // Stats returns summary of belief graph
 func (g *Graph) Stats() GraphStats {
 	g.mu.RLock()
@@ -362,4 +499,20 @@ func cloneState(state *model.CompetenceState) *model.CompetenceState {
 	}
 	cloned := *state
 	return &cloned
+}
+
+func clonePeerState(state *model.DeskRelationshipBelief) *model.DeskRelationshipBelief {
+	if state == nil {
+		return nil
+	}
+	cloned := *state
+	return &cloned
+}
+
+func contextOrUnknown(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }

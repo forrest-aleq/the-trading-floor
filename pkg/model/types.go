@@ -261,6 +261,7 @@ type Thesis struct {
 	CompetenceKey        string              `json:"competence_key,omitempty"`
 	CompetenceTrust      float64             `json:"competence_trust,omitempty"`
 	CompetenceConfidence float64             `json:"competence_confidence,omitempty"`
+	CollaborationInput   *CollaborationInput `json:"collaboration_input,omitempty"`
 	EvidenceMeta         *evidence.Metadata  `json:"evidence_meta,omitempty"`
 	MarketContext        *MarketContext      `json:"market_context,omitempty"`
 	QuantMetrics         *QuantMetrics       `json:"quant_metrics,omitempty"`

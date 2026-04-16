@@ -186,3 +186,68 @@ func TestLearnWorkerSkipsBeliefHardeningForLuckDrivenWins(t *testing.T) {
 		t.Fatalf("expected no engram hardening for luck-driven win, got %+v", stats)
 	}
 }
+
+func TestLearnWorkerUpdatesPeerBeliefsFromCollaborationInput(t *testing.T) {
+	graph := belief.NewGraph()
+	worker := NewLearnWorker(graph, nil)
+
+	thesis := &model.Thesis{
+		ID:           "thesis-4",
+		DeskID:       "desk-macro-a",
+		Domain:       "macro",
+		Strategy:     "macro",
+		EntryPrice:   100,
+		StopLoss:     95,
+		PositionSize: 10,
+		Instrument: model.Instrument{
+			Symbol:   "TLT",
+			SecType:  "STK",
+			Currency: "USD",
+		},
+		CollaborationInput: &model.CollaborationInput{
+			OriginDesk:     "desk-geo-a",
+			OriginDomain:   "macro",
+			OriginThesisID: "thesis-root",
+		},
+	}
+	outcome := &model.ThesisOutcome{
+		Profitable:  true,
+		RealizedPnL: 200,
+		Attribution: &model.OutcomeAttribution{
+			TruthEdge:      0.80,
+			TimingEdge:     0.30,
+			ExpressionEdge: 0.20,
+			ExecutionEdge:  0.10,
+			LuckEstimate:   0.10,
+		},
+	}
+	regime := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "risk_on",
+		Liquidity:  "normal",
+	}
+
+	worker.ProcessOutcome(thesis, outcome, regime)
+
+	peer, ok := graph.LookupPeer("desk-geo-a", "desk-macro-a", "macro", regime.Key())
+	if !ok {
+		t.Fatal("expected peer belief to be updated")
+	}
+	if peer.SuccessCount != 1 {
+		t.Fatalf("expected peer belief success count to be 1, got %+v", peer)
+	}
+	if outcome.Attribution == nil {
+		t.Fatal("expected attribution to remain attached")
+	}
+	foundPeerUpdate := false
+	for _, update := range outcome.Attribution.CompetenceUpdates {
+		if update.Dimension == "peer_edge" {
+			foundPeerUpdate = true
+			break
+		}
+	}
+	if !foundPeerUpdate {
+		t.Fatalf("expected peer_edge competence update, got %+v", outcome.Attribution.CompetenceUpdates)
+	}
+}

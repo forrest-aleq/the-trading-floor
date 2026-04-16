@@ -162,6 +162,11 @@ func main() {
 				slog.Warn("persist competence state to graph failed", "key", state.Key, "error", err)
 			}
 		})
+		beliefGraph.SetPeerChangeHandler(func(rel *model.DeskRelationshipBelief) {
+			if err := graph.UpsertDeskRelationshipBelief(context.Background(), rel); err != nil {
+				slog.Warn("persist desk relationship belief to graph failed", "key", rel.Key, "error", err)
+			}
+		})
 		engramStore.SetChangeHandler(func(engram *memory.Engram) {
 			if err := db.UpsertEngram(context.Background(), engramRecordFromMemory(engram)); err != nil {
 				slog.Warn("persist engram failed", "id", engram.ID, "error", err)
@@ -171,6 +176,11 @@ func main() {
 		beliefGraph.SetChangeHandler(func(state *model.CompetenceState) {
 			if err := graph.UpsertCompetenceState(context.Background(), state); err != nil {
 				slog.Warn("persist competence state to graph failed", "key", state.Key, "error", err)
+			}
+		})
+		beliefGraph.SetPeerChangeHandler(func(rel *model.DeskRelationshipBelief) {
+			if err := graph.UpsertDeskRelationshipBelief(context.Background(), rel); err != nil {
+				slog.Warn("persist desk relationship belief to graph failed", "key", rel.Key, "error", err)
 			}
 		})
 	}

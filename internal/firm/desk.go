@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -97,6 +98,7 @@ var (
 	deskCouncilTimeout    = readDeskDurationEnv("DESK_COUNCIL_TIMEOUT", 45*time.Second)
 	deskExecutionTimeout  = readDeskDurationEnv("DESK_EXECUTION_TIMEOUT", 30*time.Second)
 	deskSlowStageWarnAt   = readDeskDurationEnv("DESK_SLOW_STAGE_WARN_AT", 10*time.Second)
+	deskColleagueWeight   = readDeskFloatEnv("DESK_COLLEAGUE_TRUST_WEIGHT", 0.18)
 )
 
 func NewDesk(cfg DeskConfig) *Desk {
@@ -209,6 +211,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		return
 	}
 	thesis.Domain = d.Domain
+	d.applyCollaborationContext(sig, thesis)
 	if d.quant != nil {
 		thesis.QuantMetrics = d.quant.AnalyzeThesis(thesis)
 		if thesis.QuantMetrics != nil {
@@ -469,6 +472,41 @@ func readDeskDurationEnv(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+func readDeskFloatEnv(name string, fallback float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func (d *Desk) applyCollaborationContext(sig signal.Signal, thesis *model.Thesis) {
+	if thesis == nil || !isInternalSignal(sig) {
+		return
+	}
+	message, ok := model.DecodeColleagueMessage(sig.Raw)
+	if !ok {
+		return
+	}
+	input := model.CollaborationInputFromMessage(message)
+	if input == nil {
+		return
+	}
+	if d.beliefs != nil && input.OriginDesk != "" {
+		if peer, ok := d.beliefs.LookupPeer(input.OriginDesk, d.ID, firstNonEmptyInternal(d.Domain, input.OriginDomain), d.regime.Key()); ok {
+			input.RelationshipTrust = peer.Trust
+			input.RelationshipConfidence = peer.Confidence
+			adjustment := (peer.Trust - 0.55) * deskColleagueWeight
+			thesis.Conviction = math.Max(0, math.Min(1, thesis.Conviction+adjustment))
+		}
+	}
+	thesis.CollaborationInput = input
 }
 
 func (d *Desk) ProcessOutcome(ctx context.Context, thesis *model.Thesis, outcome *model.ThesisOutcome) {

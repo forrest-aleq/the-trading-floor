@@ -59,3 +59,40 @@ func TestAssessTerritory(t *testing.T) {
 		t.Fatalf("expected known exact state with autonomous mode, got %+v", known.Exact)
 	}
 }
+
+func TestPeerBeliefUpdates(t *testing.T) {
+	graph := NewGraph()
+	regime := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "risk_on",
+		Liquidity:  "normal",
+	}
+
+	key := PeerBeliefKey("desk-geo-a", "desk-macro-a", "macro", regime.Key())
+	graph.ApplyPeerSuccess(key, 1.0)
+
+	state, ok := graph.LookupPeer("desk-geo-a", "desk-macro-a", "macro", regime.Key())
+	if !ok {
+		t.Fatal("expected peer belief to be created")
+	}
+	if state.SuccessCount != 1 {
+		t.Fatalf("expected peer success count 1, got %+v", state)
+	}
+	baselineTrust := state.Trust
+
+	graph.ApplyPeerFailure(key, 1.0)
+	state, ok = graph.LookupPeer("desk-geo-a", "desk-macro-a", "macro", regime.Key())
+	if !ok {
+		t.Fatal("expected peer belief to remain available")
+	}
+	if state.FailureCount != 1 {
+		t.Fatalf("expected peer failure count 1, got %+v", state)
+	}
+	if state.Trust >= baselineTrust {
+		t.Fatalf("expected peer trust to fall after failure, got %.4f >= %.4f", state.Trust, baselineTrust)
+	}
+	if len(graph.AllPeerBeliefs()) != 1 {
+		t.Fatalf("expected one peer belief record, got %d", len(graph.AllPeerBeliefs()))
+	}
+}

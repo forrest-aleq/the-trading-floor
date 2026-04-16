@@ -103,6 +103,22 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 	if surpriseScore, ok := surpriseValidationScore(thesis, outcome); ok {
 		recordUpdate(surpriseKey, "surprise_validation", surpriseScore, false)
 	}
+	if input := thesis.CollaborationInput; input != nil && input.OriginDesk != "" && input.OriginDesk != thesis.DeskID {
+		peerKey := belief.PeerBeliefKey(input.OriginDesk, thesis.DeskID, firstNonEmptyLearn(thesis.Domain, input.OriginDomain), regime.Key())
+		peerMagnitude := magnitude * math.Abs(clampSigned(overallAttributionScore(attribution))) * learningWeight(attribution)
+		if peerMagnitude >= 0.05 {
+			if overallAttributionScore(attribution) >= 0 {
+				l.graph.ApplyPeerSuccess(peerKey, peerMagnitude)
+			} else {
+				l.graph.ApplyPeerFailure(peerKey, peerMagnitude)
+			}
+			updates = append(updates, model.AttributionUpdate{
+				Key:       peerKey,
+				Dimension: "peer_edge",
+				Score:     clampSigned(overallAttributionScore(attribution)),
+			})
+		}
+	}
 	attribution.CompetenceUpdates = updates
 
 	// Record engram for pattern caching
@@ -161,4 +177,13 @@ func clip(v, min, max float64) float64 {
 		return max
 	}
 	return v
+}
+
+func firstNonEmptyLearn(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

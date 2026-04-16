@@ -271,14 +271,25 @@ func BuildActionSelectionContext(selection *model.ActionSelectionState, indent s
 }
 
 func expectationAction(importance, reliability, tradability float64) string {
-	switch {
-	case tradability >= 0.68 && reliability >= 0.60:
-		return "investigate"
-	case importance >= 0.45 || tradability >= 0.40:
-		return "monitor"
-	default:
-		return "ignore"
+	policy := activeActionPolicy()
+	bestAction := "ignore"
+	bestGoalValue := -1.0
+	for _, rule := range policy.Actions {
+		if importance < rule.ImportanceThreshold {
+			continue
+		}
+		if reliability < rule.ReliabilityThreshold {
+			continue
+		}
+		if tradability < rule.TradabilityThreshold {
+			continue
+		}
+		if rule.BaseGoalValue > bestGoalValue {
+			bestGoalValue = rule.BaseGoalValue
+			bestAction = rule.Name
+		}
 	}
+	return bestAction
 }
 
 func predictedDirection(sig signal.Signal) string {

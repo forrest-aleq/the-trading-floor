@@ -43,6 +43,10 @@ type MarketDataClient interface {
 	ReqMarketData(context.Context, model.Instrument) (*ibkr.MarketData, error)
 }
 
+type historicalPriceClient interface {
+	HistoricalBars(context.Context, model.Instrument, time.Time, string, string, string, bool) ([]ibkr.HistoricalBar, error)
+}
+
 // NewManager creates a new centralized market data manager.
 func NewManager(client MarketDataClient, pacing *ibkr.PacingBudget, interval time.Duration) *Manager {
 	if interval <= 0 {
@@ -143,6 +147,8 @@ func (m *Manager) PriceChange(inst model.Instrument, window time.Duration) (floa
 
 // Run polls IBKR for market data on the shared watchlist and distributes updates.
 func (m *Manager) Run(ctx context.Context) {
+	m.poll(ctx)
+
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 
@@ -188,6 +194,10 @@ func (m *Manager) poll(ctx context.Context) {
 
 		md, err := m.client.ReqMarketData(ctx, inst)
 		if err != nil {
+			if fallback, ok := m.historicalFallbackPrice(ctx, inst); ok {
+				prices[key] = fallback
+				continue
+			}
 			backoff := marketDataBackoff(err, m.interval)
 			m.suppress(key, time.Now().Add(backoff))
 			m.log.Warn("market data fetch failed", "symbol", inst.Label(), "error", err, "retry_after", backoff)
@@ -196,9 +206,13 @@ func (m *Manager) poll(ctx context.Context) {
 		m.clearSuppression(key)
 
 		price := bestPrice(md)
-		if price > 0 {
-			prices[key] = price
+		if price <= 0 {
+			if fallback, ok := m.historicalFallbackPrice(ctx, inst); ok {
+				prices[key] = fallback
+			}
+			continue
 		}
+		prices[key] = price
 	}
 
 	if len(prices) == 0 {
@@ -229,6 +243,26 @@ func (m *Manager) poll(ctx context.Context) {
 	for _, fn := range subs {
 		fn(prices)
 	}
+}
+
+func (m *Manager) historicalFallbackPrice(ctx context.Context, inst model.Instrument) (float64, bool) {
+	client, ok := m.client.(historicalPriceClient)
+	if !ok || inst.Symbol == "" {
+		return 0, false
+	}
+	historyCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	bars, err := client.HistoricalBars(historyCtx, inst, time.Now(), "2 D", "1 hour", "", true)
+	if err != nil || len(bars) == 0 {
+		return 0, false
+	}
+	for i := len(bars) - 1; i >= 0; i-- {
+		if bars[i].Close > 0 {
+			return bars[i].Close, true
+		}
+	}
+	return 0, false
 }
 
 func bestPrice(md *ibkr.MarketData) float64 {

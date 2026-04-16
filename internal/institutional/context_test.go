@@ -43,8 +43,30 @@ func TestBuildSignalContextIncludesInstitutionalAndEvidenceState(t *testing.T) {
 		Urgency:              0.84,
 		Languages:            []string{"ar"},
 		InstitutionalContext: "Institutional context:\n  colleague.from_desk=desk-geo-a",
-		Translated:           "Federal Reserve speech signaled a more hawkish balance of risks.",
-		Entities:             []signal.Entity{{Name: "TLT", Type: "instrument"}},
+		Expectation: &model.ExpectationState{
+			Domain:               "macro",
+			PredictedImportance:  0.84,
+			PredictedReliability: 0.82,
+			PredictedTradability: 0.77,
+			PredictedNovelty:     0.70,
+			PredictedDirection:   "bullish",
+			PredictedAction:      "investigate",
+		},
+		Appraisal: &model.AppraisalState{
+			Domain:             "macro",
+			ViolationClass:     "positive_surprise",
+			ViolationScore:     0.21,
+			ExpectationGap:     0.19,
+			ActionPressure:     0.88,
+			Power:              0.77,
+			Distance:           0.34,
+			Rank:               0.84,
+			FaceThreatScore:    0.04,
+			SocialCost:         0.08,
+			RelationshipHealth: 0.83,
+		},
+		Translated: "Federal Reserve speech signaled a more hawkish balance of risks.",
+		Entities:   []signal.Entity{{Name: "TLT", Type: "instrument"}},
 		EvidenceMeta: &evidence.Metadata{
 			SourceTrust:          0.95,
 			SourceTier:           "primary",
@@ -75,6 +97,10 @@ func TestBuildSignalContextIncludesInstitutionalAndEvidenceState(t *testing.T) {
 	for _, want := range []string{
 		"Institutional context:",
 		"colleague.from_desk=desk-geo-a",
+		"Expectation context:",
+		"expectation.action=investigate",
+		"Appraisal context:",
+		"appraisal.class=positive_surprise",
 		"Source: reuters",
 		"Category: macro",
 		"Urgency: 0.84",
@@ -84,6 +110,63 @@ func TestBuildSignalContextIncludesInstitutionalAndEvidenceState(t *testing.T) {
 	} {
 		if !strings.Contains(formatted, want) {
 			t.Fatalf("formatted context missing %q\n%s", want, formatted)
+		}
+	}
+}
+
+func TestEnrichSignalCognitionAttachesExpectationAndAppraisal(t *testing.T) {
+	sig := signal.Signal{
+		ID:         "sig-2",
+		Source:     "internal/desk-geo-a",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.72,
+		Direction:  signal.Bullish,
+		Translated: "Shipping insurers are repricing Gulf routes after renewed Iranian escalation.",
+		EvidenceMeta: &evidence.Metadata{
+			SourceTrust:      0.82,
+			EvidenceScore:    0.79,
+			FreshnessStatus:  "fresh",
+			ConfidenceVector: &evidence.ConfidenceVector{FactConfidence: 0.78, NoveltyConfidence: 0.76, MarketMappingConfidence: 0.73, ExecutionConfidence: 0.69},
+		},
+	}
+
+	enriched := EnrichSignalCognition(sig, "macro", &model.CollaborationInput{
+		OriginDesk:             "desk-geo-a",
+		OriginDomain:           "geopolitical",
+		RequestedAction:        "review",
+		RelationshipTrust:      0.81,
+		RelationshipConfidence: 0.64,
+	})
+
+	if enriched.Expectation == nil {
+		t.Fatal("expected expectation state")
+	}
+	if enriched.Appraisal == nil {
+		t.Fatal("expected appraisal state")
+	}
+	if enriched.Expectation.PredictedAction == "" {
+		t.Fatalf("expected predicted action, got %+v", enriched.Expectation)
+	}
+	if enriched.Appraisal.ViolationClass == "" {
+		t.Fatalf("expected appraisal class, got %+v", enriched.Appraisal)
+	}
+	formatted := BuildSignalContext(enriched, SignalContextOptions{
+		ContentLimit:         220,
+		RelatedLimit:         4,
+		EntityLimit:          8,
+		IncludeEvidence:      true,
+		IncludeInstitutional: true,
+	})
+	for _, want := range []string{
+		"Expectation context:",
+		"Appraisal context:",
+		"expectation.action=",
+		"appraisal.class=",
+	} {
+		if !strings.Contains(formatted, want) {
+			t.Fatalf("expected formatted context to include %q\n%s", want, formatted)
 		}
 	}
 }

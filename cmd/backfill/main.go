@@ -64,6 +64,8 @@ type replaySummary struct {
 	ResearchRejects         map[string]int         `json:"research_rejects,omitempty"`
 	ResearchErrors          map[string]int         `json:"research_errors,omitempty"`
 	BacktestErrors          map[string]int         `json:"backtest_errors,omitempty"`
+	AppraisalClasses        map[string]int         `json:"appraisal_classes,omitempty"`
+	ExpectationActions      map[string]int         `json:"expectation_actions,omitempty"`
 	Warnings                []string               `json:"warnings,omitempty"`
 	Domains                 map[string]domainStats `json:"domains"`
 	Since                   string                 `json:"since"`
@@ -83,6 +85,8 @@ type domainStats struct {
 	TotalPnL                float64        `json:"total_pnl"`
 	CollaborativePnL        float64        `json:"collaborative_pnl,omitempty"`
 	SoloPnL                 float64        `json:"solo_pnl,omitempty"`
+	AppraisalClasses        map[string]int `json:"appraisal_classes,omitempty"`
+	ExpectationActions      map[string]int `json:"expectation_actions,omitempty"`
 	ScanRejects             map[string]int `json:"scan_rejects,omitempty"`
 	ResearchRejects         map[string]int `json:"research_rejects,omitempty"`
 }
@@ -140,6 +144,8 @@ func main() {
 		ResearchRejects:     map[string]int{},
 		ResearchErrors:      map[string]int{},
 		BacktestErrors:      map[string]int{},
+		AppraisalClasses:    map[string]int{},
+		ExpectationActions:  map[string]int{},
 		Domains:             map[string]domainStats{},
 		Since:               opts.since.String(),
 		GeneratedAt:         time.Now().UTC(),
@@ -166,6 +172,8 @@ func main() {
 
 			collaborationInput := replayCollaborationInput(sig, beliefGraph, domain)
 			evaluatedSignal := institutional.AugmentSignalWithCollaborationContext(sig, collaborationInput)
+			evaluatedSignal = institutional.EnrichSignalCognition(evaluatedSignal, domain, collaborationInput)
+			recordCognitiveSummary(&summary, &stats, evaluatedSignal)
 
 			signalCtx, cancel := context.WithTimeout(ctx, opts.signalTimeout)
 			scanCtx := scanner.WithEvaluationTime(signalCtx, evaluatedSignal.Timestamp)
@@ -271,6 +279,12 @@ func main() {
 	if len(summary.BacktestErrors) == 0 {
 		summary.BacktestErrors = nil
 	}
+	if len(summary.AppraisalClasses) == 0 {
+		summary.AppraisalClasses = nil
+	}
+	if len(summary.ExpectationActions) == 0 {
+		summary.ExpectationActions = nil
+	}
 	if len(summary.Warnings) == 0 {
 		summary.Warnings = nil
 	}
@@ -311,6 +325,31 @@ func recordResearchReject(summary *replaySummary, stats *domainStats, reason str
 		stats.ResearchRejects = map[string]int{}
 	}
 	stats.ResearchRejects[reason]++
+}
+
+func recordCognitiveSummary(summary *replaySummary, stats *domainStats, sig signal.Signal) {
+	if sig.Appraisal != nil {
+		class := strings.TrimSpace(sig.Appraisal.ViolationClass)
+		if class == "" {
+			class = "unknown"
+		}
+		summary.AppraisalClasses[class]++
+		if stats.AppraisalClasses == nil {
+			stats.AppraisalClasses = map[string]int{}
+		}
+		stats.AppraisalClasses[class]++
+	}
+	if sig.Expectation != nil {
+		action := strings.TrimSpace(sig.Expectation.PredictedAction)
+		if action == "" {
+			action = "unknown"
+		}
+		summary.ExpectationActions[action]++
+		if stats.ExpectationActions == nil {
+			stats.ExpectationActions = map[string]int{}
+		}
+		stats.ExpectationActions[action]++
+	}
 }
 
 func parseOptions() options {

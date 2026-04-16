@@ -33,6 +33,12 @@ func BuildSignalContext(sig signal.Signal, opts SignalContextOptions) string {
 	if opts.IncludeInstitutional && strings.TrimSpace(sig.InstitutionalContext) != "" {
 		appendIndentedBlock(&sb, opts.Indent, sig.InstitutionalContext)
 	}
+	if opts.IncludeInstitutional && sig.Expectation != nil {
+		appendIndentedBlock(&sb, opts.Indent, BuildExpectationContext(sig.Expectation, "  "))
+	}
+	if opts.IncludeInstitutional && sig.Appraisal != nil {
+		appendIndentedBlock(&sb, opts.Indent, BuildAppraisalContext(sig.Appraisal, "  "))
+	}
 
 	write("Source: %s", sig.Source)
 	write("Type: %s", sig.Type)

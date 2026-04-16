@@ -162,7 +162,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	if err := d.graph.RecordSignalSeen(ctx, sig.ID, d.ID, d.Domain, time.Now().UTC()); err != nil {
 		d.log.Warn("graph signal seen failed", "signal_id", sig.ID, "error", err)
 	}
-	sig = d.augmentSignalWithCollaborationContext(sig)
+	sig = d.augmentSignalInstitutionalState(sig)
 
 	span := trace.FromContext(ctx).WithStage("scanner")
 	ctx = trace.IntoContext(ctx, span)
@@ -509,6 +509,12 @@ func (d *Desk) collaborationInputForSignal(sig signal.Signal) *model.Collaborati
 func (d *Desk) augmentSignalWithCollaborationContext(sig signal.Signal) signal.Signal {
 	input := d.collaborationInputForSignal(sig)
 	return institutional.AugmentSignalWithCollaborationContext(sig, input)
+}
+
+func (d *Desk) augmentSignalInstitutionalState(sig signal.Signal) signal.Signal {
+	input := d.collaborationInputForSignal(sig)
+	sig = institutional.AugmentSignalWithCollaborationContext(sig, input)
+	return institutional.EnrichSignalCognition(sig, d.Domain, input)
 }
 
 func (d *Desk) ProcessOutcome(ctx context.Context, thesis *model.Thesis, outcome *model.ThesisOutcome) {

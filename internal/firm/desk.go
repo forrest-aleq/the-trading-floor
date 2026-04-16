@@ -624,6 +624,17 @@ func (d *Desk) maybeSpawnSubTeam(ctx context.Context, thesis *model.Thesis) {
 	if !deskSubTeamsEnabled || d.llm == nil || thesis == nil {
 		return
 	}
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 && remaining < subTeamRequiredBudget() {
+			d.log.Info("skipping sub-team due to remaining task budget",
+				"thesis_id", thesis.ID,
+				"remaining", remaining,
+				"required", subTeamRequiredBudget(),
+			)
+			return
+		}
+	}
 
 	intent, shouldSpawn := ShouldSpawnSubTeam(thesis)
 	if !shouldSpawn {

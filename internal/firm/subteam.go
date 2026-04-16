@@ -33,6 +33,7 @@ const (
 	subTeamSynthesisTimout = 40 * time.Second
 	subTeamAgentMaxTokens  = 512
 	subTeamSynthMaxTokens  = 768
+	subTeamBudgetBuffer    = 5 * time.Second
 )
 
 // SubAgent is a single specialist agent within a sub-team.
@@ -200,4 +201,8 @@ func ShouldSpawnSubTeam(thesis *model.Thesis) (string, bool) {
 	}
 
 	return "", false
+}
+
+func subTeamRequiredBudget() time.Duration {
+	return subTeamAgentTimeout + subTeamSynthesisTimout + subTeamBudgetBuffer
 }

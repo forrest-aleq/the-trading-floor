@@ -490,6 +490,44 @@ func TestEnrichResearchJSONBackfillsOpportunityAndMarketContext(t *testing.T) {
 	}
 }
 
+func TestEnrichResearchJSONBackfillsNullDirection(t *testing.T) {
+	raw := `{
+  "structure": "single",
+  "instrument": {},
+  "direction": null
+}`
+
+	opp := testOpportunity()
+	enriched := enrichResearchJSON(raw, opp, nil)
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(enriched), &payload); err != nil {
+		t.Fatalf("expected valid JSON after enrichment, got %v", err)
+	}
+	if got := payload["direction"]; got != "long" {
+		t.Fatalf("expected null direction to backfill from opportunity, got %#v", got)
+	}
+}
+
+func TestInvestigateAllowsMissingEntryPriceWhenDirectionAndInstrumentExist(t *testing.T) {
+	client := &researchMissingEntryPriceClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected thesis without explicit entry price, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis")
+	}
+	if thesis.EntryPrice != 0 {
+		t.Fatalf("expected missing entry price to remain zero without market context, got %.2f", thesis.EntryPrice)
+	}
+	if thesis.Direction != model.Long {
+		t.Fatalf("expected normalized long direction, got %s", thesis.Direction)
+	}
+}
+
 func TestNormalizeResearchInstrumentParsesOptionContractSymbol(t *testing.T) {
 	inst := normalizeResearchInstrument(model.Instrument{
 		Symbol:   "TLT 2026-05-18 130PUT",
@@ -516,6 +554,28 @@ func TestNormalizeResearchInstrumentParsesOptionContractSymbol(t *testing.T) {
 	if inst.Multiplier != "100" {
 		t.Fatalf("expected multiplier 100, got %q", inst.Multiplier)
 	}
+}
+
+type researchMissingEntryPriceClient struct{}
+
+func (c *researchMissingEntryPriceClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	return &llm.Response{
+		Content: `{
+  "instrument": {"symbol": "TLT", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+  "direction": "long",
+  "target_price": 96.0,
+  "stop_loss": 88.0,
+  "conviction": 0.74,
+  "time_horizon_hours": 24,
+  "position_size_pct": 0.01,
+  "strategy": "event",
+  "evidence": ["macro spillover"],
+  "counter_args": ["positioning"],
+  "kill_rules": [{"condition": "price_below_stop", "threshold": 88.0, "action": "close"}],
+  "reasoning": "still valid without explicit entry price"
+}`,
+		Model: "analysis",
+	}, nil
 }
 
 func TestNormalizeResearchInstrumentDowngradesStaleDerivativeToUnderlying(t *testing.T) {

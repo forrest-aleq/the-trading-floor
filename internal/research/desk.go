@@ -212,7 +212,7 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 	}
 	cleaned = enrichResearchJSON(cleaned, opp, marketCtx)
 
-	if err := llm.ValidateJSONFields(cleaned, []string{"instrument", "direction", "entry_price"}); err != nil {
+	if err := llm.ValidateJSONFields(cleaned, []string{"instrument", "direction"}); err != nil {
 		return Investigation{Reason: "validation"}, fmt.Errorf("research response validation: %w", err)
 	}
 
@@ -326,11 +326,14 @@ func (d *Desk) HydrateThesisPricing(ctx context.Context, thesis *model.Thesis) {
 func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactPrompt string) (string, error) {
 	if d.responseMode == structuredResponseModeThought {
 		thoughtPrompt := addTerminalJSONContract(d.thoughtPrefix + "\n\n" + d.systemPrompt)
-		primaryCtx, cancel := withStructuredTimeout(ctx, researchThoughtTimeout)
+		primaryCtx, cancel := withStructuredBudgetFraction(ctx, researchThoughtTimeout, 0.5)
 		resp, err := d.llm.AskWithLimit(primaryCtx, llm.TierAnalysis, thoughtPrompt, prompt, researchMaxTokens, 0.2)
 		cancel()
 		if err != nil {
-			retryCtx, retryCancel := withStructuredTimeout(ctx, researchRetryTimeout)
+			if !hasStructuredBudget(ctx, minStructuredAttemptBudget) {
+				return "", err
+			}
+			retryCtx, retryCancel := withStructuredBudgetFraction(ctx, researchRetryTimeout, 0.5)
 			retryResp, retryErr := d.retryStructuredJSON(retryCtx, compactPrompt)
 			retryCancel()
 			if retryErr == nil {
@@ -348,7 +351,10 @@ func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactP
 			return resp, nil
 		}
 
-		retryCtx, retryCancel := withStructuredTimeout(ctx, researchRetryTimeout)
+		if !hasStructuredBudget(ctx, minStructuredAttemptBudget) {
+			return resp, nil
+		}
+		retryCtx, retryCancel := withStructuredBudgetFraction(ctx, researchRetryTimeout, 0.5)
 		retryResp, retryErr := d.retryStructuredJSON(retryCtx, compactPrompt)
 		retryCancel()
 		if retryErr == nil {
@@ -389,7 +395,7 @@ func (d *Desk) retryStructuredJSON(ctx context.Context, prompt string) (string, 
 }
 
 func (d *Desk) compileResearchJSON(ctx context.Context, originalPrompt, rawResponse string) (string, error) {
-	compileCtx, cancel := context.WithTimeout(ctx, researchCompilerTimeout)
+	compileCtx, cancel := withStructuredBudgetFraction(ctx, researchCompilerTimeout, 1.0)
 	defer cancel()
 
 	req := llm.Request{
@@ -886,7 +892,7 @@ func enrichResearchJSON(cleaned string, opp *model.Opportunity, marketCtx *model
 	if !hasInstrumentPayload(payload["instrument"]) && opp != nil && len(opp.Instruments) > 0 {
 		payload["instrument"] = instrumentPayload(opp.Instruments[0])
 	}
-	if strings.TrimSpace(fmt.Sprint(payload["direction"])) == "" && opp != nil && opp.Direction != "" {
+	if researchDirectionMissing(payload["direction"]) && opp != nil && opp.Direction != "" {
 		payload["direction"] = string(opp.Direction)
 	}
 	if value, ok := numericValue(payload["entry_price"]); !ok || value <= 0 {
@@ -912,6 +918,19 @@ func hasInstrumentPayload(value any) bool {
 		return false
 	}
 	return strings.TrimSpace(fmt.Sprint(symbol)) != ""
+}
+
+func researchDirectionMissing(value any) bool {
+	if value == nil {
+		return true
+	}
+	text := strings.TrimSpace(strings.ToLower(fmt.Sprint(value)))
+	switch text {
+	case "", "<nil>", "null", "none", "n/a":
+		return true
+	default:
+		return false
+	}
 }
 
 func instrumentPayload(inst model.Instrument) map[string]any {

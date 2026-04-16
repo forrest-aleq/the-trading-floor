@@ -119,6 +119,61 @@ func TestDeskSkipsCouncilForSmallPctAndSpawnsSubTeam(t *testing.T) {
 	}
 }
 
+func TestDeskSkipsSubTeamWhenRemainingTaskBudgetIsTooLow(t *testing.T) {
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "AAPL", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        100.0,
+		"target_price":       110.0,
+		"stop_loss":          95.0,
+		"conviction":         0.8,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.01,
+		"strategy":           "event",
+		"evidence":           []string{"earnings beat", "guide raised"},
+		"counter_args":       []string{"already priced"},
+		"kill_rules":         []map[string]any{{"condition": "price_below_stop", "threshold": 95.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"crowded trade"},
+		"missing_data":          []string{"flow"},
+		"historical_analogues":  []string{"prior beats"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"AAPL","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.9,"category":"corporate","reasoning":"earnings surprise"}`},
+		scriptedLLM{fn: func(req llm.Request) string {
+			if req.JSONMode || strings.Contains(strings.ToLower(req.Messages[0].Content), "trading research desk") {
+				return string(researchResp)
+			}
+			return "sub-team analysis with concrete supporting detail"
+		}},
+		scriptedLLM{response: string(prosecuteResp)},
+	)
+
+	desk, bk, _ := newRuntimeDesk(t, "A", router, nil, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	desk.Process(ctx, signal.Signal{
+		ID:        "sig-subteam-budget",
+		Source:    "test",
+		Type:      signal.TypeNews,
+		Category:  "corporate",
+		Timestamp: time.Now(),
+		Urgency:   0.9,
+		Raw:       []byte(`AAPL beats earnings estimates and raises guidance`),
+	})
+
+	thesis := fetchActiveThesis(t, desk, bk)
+	if len(thesis.Evidence) != 2 {
+		t.Fatalf("expected sub-team evidence to be skipped when task budget is too low, got %d evidence items", len(thesis.Evidence))
+	}
+}
+
 func TestControlDeskSkipsEngramBoost(t *testing.T) {
 	researchResp, _ := json.Marshal(map[string]any{
 		"instrument":         map[string]any{"symbol": "AAPL", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},

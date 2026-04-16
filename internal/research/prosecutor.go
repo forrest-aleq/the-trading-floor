@@ -150,7 +150,7 @@ func (p *Prosecutor) askProsecutionWithFallbackMode(ctx context.Context, prompt 
 }
 
 func (p *Prosecutor) compileProsecutionJSON(ctx context.Context, originalPrompt, rawResponse string) (string, error) {
-	compileCtx, cancel := context.WithTimeout(ctx, prosecutionCompilerTimeout)
+	compileCtx, cancel := withStructuredBudgetFraction(ctx, prosecutionCompilerTimeout, 1.0)
 	defer cancel()
 
 	req := llm.Request{

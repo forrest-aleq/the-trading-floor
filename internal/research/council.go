@@ -197,7 +197,7 @@ func (c *Council) askPerspectiveWithFallbackMode(ctx context.Context, systemProm
 }
 
 func (c *Council) compilePerspectiveJSON(ctx context.Context, archetype, systemPrompt, thesisPrompt, rawResponse string) (string, error) {
-	compileCtx, cancel := context.WithTimeout(ctx, councilCompilerTimeout)
+	compileCtx, cancel := withStructuredBudgetFraction(ctx, councilCompilerTimeout, 1.0)
 	defer cancel()
 
 	req := llm.Request{

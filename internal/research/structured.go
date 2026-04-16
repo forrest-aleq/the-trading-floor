@@ -29,6 +29,8 @@ var (
 	structuredJSONRetryTokens = readStructuredIntEnv("STRUCTURED_JSON_RETRY_MAX_TOKENS", 640)
 )
 
+const minStructuredAttemptBudget = 1500 * time.Millisecond
+
 func detectStructuredResponseMode(envName, model string) structuredResponseMode {
 	override := strings.ToLower(strings.TrimSpace(envName))
 	switch override {
@@ -149,16 +151,28 @@ func truncateForCompiler(value string, max int) string {
 func askStructuredWithRetry(ctx context.Context, router *llm.Router, tier llm.Tier, mode structuredResponseMode, baseSystemPrompt, thoughtPrefix, prompt string, maxTokens int, temperature float64) (string, bool, error) {
 	if mode == structuredResponseModeThought {
 		thoughtPrompt := addTerminalJSONContract(thoughtPrefix + "\n\n" + baseSystemPrompt)
-		primaryCtx, cancel := withStructuredTimeout(ctx, structuredThoughtTimeout)
+		primaryCtx, cancel := withStructuredBudgetFraction(ctx, structuredThoughtTimeout, 0.5)
 		resp, err := router.AskWithLimit(primaryCtx, tier, thoughtPrompt, prompt, maxTokens, temperature)
 		cancel()
 		if err != nil {
+			if !hasStructuredBudget(ctx, minStructuredAttemptBudget) {
+				return "", false, err
+			}
+			retryCtx, retryCancel := withStructuredBudgetFraction(ctx, structuredJSONRetryTimout, 0.5)
+			fallbackResp, fallbackErr := router.AskJSONWithLimit(retryCtx, tier, baseSystemPrompt, prompt, minStructuredRetryTokens(maxTokens), temperature)
+			retryCancel()
+			if fallbackErr == nil {
+				return fallbackResp, true, nil
+			}
 			return "", false, err
 		}
 		if _, err := extractStructuredJSON(resp); err == nil {
 			return resp, false, nil
 		}
-		retryCtx, retryCancel := withStructuredTimeout(ctx, structuredJSONRetryTimout)
+		if !hasStructuredBudget(ctx, minStructuredAttemptBudget) {
+			return resp, false, nil
+		}
+		retryCtx, retryCancel := withStructuredBudgetFraction(ctx, structuredJSONRetryTimout, 0.5)
 		fallbackResp, fallbackErr := router.AskJSONWithLimit(retryCtx, tier, baseSystemPrompt, prompt, minStructuredRetryTokens(maxTokens), temperature)
 		retryCancel()
 		if fallbackErr == nil {
@@ -179,6 +193,59 @@ func withStructuredTimeout(ctx context.Context, timeout time.Duration) (context.
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, timeout)
+}
+
+func withStructuredBudgetFraction(ctx context.Context, preferred time.Duration, fraction float64) (context.Context, context.CancelFunc) {
+	timeout := structuredBudgetTimeout(ctx, preferred, fraction)
+	return withStructuredTimeout(ctx, timeout)
+}
+
+func structuredBudgetTimeout(ctx context.Context, preferred time.Duration, fraction float64) time.Duration {
+	if preferred <= 0 {
+		preferred = minStructuredAttemptBudget
+	}
+	if fraction <= 0 || fraction > 1 {
+		fraction = 1
+	}
+
+	remaining, ok := remainingStructuredBudget(ctx)
+	if !ok {
+		return preferred
+	}
+	if remaining <= 0 {
+		return 0
+	}
+
+	allowed := time.Duration(float64(remaining) * fraction)
+	if allowed < minStructuredAttemptBudget {
+		allowed = minStructuredAttemptBudget
+	}
+	if allowed > remaining {
+		allowed = remaining
+	}
+	if preferred > allowed {
+		return allowed
+	}
+	return preferred
+}
+
+func hasStructuredBudget(ctx context.Context, minimum time.Duration) bool {
+	if minimum <= 0 {
+		minimum = minStructuredAttemptBudget
+	}
+	remaining, ok := remainingStructuredBudget(ctx)
+	if !ok {
+		return true
+	}
+	return remaining >= minimum
+}
+
+func remainingStructuredBudget(ctx context.Context) (time.Duration, bool) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0, false
+	}
+	return time.Until(deadline), true
 }
 
 func minStructuredRetryTokens(maxTokens int) int {

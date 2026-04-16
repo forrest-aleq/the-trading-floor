@@ -55,6 +55,7 @@ func schemaStatements() []string {
 		"CREATE CONSTRAINT conversation_thread_id IF NOT EXISTS FOR (n:ConversationThread) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT colleague_message_id IF NOT EXISTS FOR (n:ColleagueMessage) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT desk_relationship_belief_key IF NOT EXISTS FOR (n:DeskRelationshipBelief) REQUIRE n.key IS UNIQUE",
+		"CREATE CONSTRAINT source_reliability_belief_key IF NOT EXISTS FOR (n:SourceReliabilityBelief) REQUIRE n.key IS UNIQUE",
 		"CREATE INDEX source_name IF NOT EXISTS FOR (n:Source) ON (n.name)",
 		"CREATE INDEX entity_name IF NOT EXISTS FOR (n:Entity) ON (n.name)",
 		"CREATE INDEX thesis_status IF NOT EXISTS FOR (n:Thesis) ON (n.status)",

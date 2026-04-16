@@ -108,6 +108,20 @@ func refreshEvidenceAssessment(sig signal.Signal, meta *evidence.Metadata) *evid
 	return meta
 }
 
+func ApplyLearnedSourceReliability(sig signal.Signal, trust, confidence float64) signal.Signal {
+	if sig.EvidenceMeta == nil {
+		return sig
+	}
+	meta := sig.EvidenceMeta.Clone()
+	weight := math.Max(0, math.Min(0.85, confidence))
+	if weight == 0 {
+		return sig
+	}
+	meta.SourceTrust = roundEvidence((meta.SourceTrust * (1 - weight)) + (trust * weight))
+	sig.EvidenceMeta = refreshEvidenceAssessment(sig, meta)
+	return sig
+}
+
 func inferSourceProfile(sig signal.Signal, domain string) sourceProfile {
 	if profile, ok := profileForDomain(domain); ok {
 		return applyProfileDefaults(profile, sig)

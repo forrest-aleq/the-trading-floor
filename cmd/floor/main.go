@@ -35,6 +35,7 @@ import (
 	"github.com/hnic/trading-floor/internal/wire"
 	"github.com/hnic/trading-floor/internal/wire/feeds"
 	"github.com/hnic/trading-floor/pkg/model"
+	sigpkg "github.com/hnic/trading-floor/pkg/signal"
 )
 
 func main() {
@@ -125,6 +126,9 @@ func main() {
 	}, "task", "marketdata")
 	slog.Info("market data manager initialized", "watchlist", len(marketBootstrap))
 
+	// --- Wire (Signal Feeds) ---
+	wireMgr := wire.NewManager()
+
 	// --- Shared Services ---
 	riskGate := risk.NewGate(risk.DefaultLimits())
 	beliefGraph := belief.NewGraph()
@@ -138,8 +142,10 @@ func main() {
 		} else {
 			beliefGraph.Load(states)
 			for _, state := range states {
-				if err := graph.UpsertCompetenceState(ctx, state); err != nil {
-					slog.Warn("persist hydrated competence state to graph failed", "key", state.Key, "error", err)
+				if graph != nil {
+					if err := graph.UpsertCompetenceState(ctx, state); err != nil {
+						slog.Warn("persist hydrated competence state to graph failed", "key", state.Key, "error", err)
+					}
 				}
 			}
 			slog.Info("competence states hydrated", "count", len(states))
@@ -158,13 +164,24 @@ func main() {
 			if err := db.UpsertCompetenceState(context.Background(), state); err != nil {
 				slog.Warn("persist competence state failed", "key", state.Key, "error", err)
 			}
-			if err := graph.UpsertCompetenceState(context.Background(), state); err != nil {
-				slog.Warn("persist competence state to graph failed", "key", state.Key, "error", err)
+			if graph != nil {
+				if err := graph.UpsertCompetenceState(context.Background(), state); err != nil {
+					slog.Warn("persist competence state to graph failed", "key", state.Key, "error", err)
+				}
 			}
 		})
 		beliefGraph.SetPeerChangeHandler(func(rel *model.DeskRelationshipBelief) {
-			if err := graph.UpsertDeskRelationshipBelief(context.Background(), rel); err != nil {
-				slog.Warn("persist desk relationship belief to graph failed", "key", rel.Key, "error", err)
+			if graph != nil {
+				if err := graph.UpsertDeskRelationshipBelief(context.Background(), rel); err != nil {
+					slog.Warn("persist desk relationship belief to graph failed", "key", rel.Key, "error", err)
+				}
+			}
+		})
+		beliefGraph.SetSourceChangeHandler(func(rel *model.SourceReliabilityBelief) {
+			if graph != nil {
+				if err := graph.UpsertSourceReliabilityBelief(context.Background(), rel); err != nil {
+					slog.Warn("persist source reliability belief to graph failed", "key", rel.Key, "error", err)
+				}
 			}
 		})
 		engramStore.SetChangeHandler(func(engram *memory.Engram) {
@@ -183,6 +200,11 @@ func main() {
 				slog.Warn("persist desk relationship belief to graph failed", "key", rel.Key, "error", err)
 			}
 		})
+		beliefGraph.SetSourceChangeHandler(func(rel *model.SourceReliabilityBelief) {
+			if err := graph.UpsertSourceReliabilityBelief(context.Background(), rel); err != nil {
+				slog.Warn("persist source reliability belief to graph failed", "key", rel.Key, "error", err)
+			}
+		})
 	}
 	learnWorker := memory.NewLearnWorker(beliefGraph, engramStore)
 	scan := scanner.NewEngine(llmRouter, 70)
@@ -194,6 +216,23 @@ func main() {
 	if graph != nil {
 		council.SetVoiceTelemetryProvider(graph)
 	}
+	wireMgr.SetSignalEnricher(func(sig sigpkg.Signal) sigpkg.Signal {
+		meta := sig.EvidenceMeta
+		if meta == nil {
+			return sig
+		}
+		state, ok := beliefGraph.LookupSource(
+			meta.SourceOwnerGroup,
+			meta.SourceDomain,
+			firstNonEmptyRuntime(sig.Category, string(sig.Type)),
+			meta.OriginalLanguage,
+			meta.OriginRegion,
+		)
+		if !ok {
+			return sig
+		}
+		return wire.ApplyLearnedSourceReliability(sig, state.Trust, state.Confidence)
+	})
 	startBeliefDecay(ctx, beliefGraph)
 	slog.Info("decision services initialized")
 
@@ -219,8 +258,6 @@ func main() {
 		"desks":          40,
 	})
 
-	// --- Wire (Signal Feeds) ---
-	wireMgr := wire.NewManager()
 	feedCount := registerDefaultFeeds(wireMgr, ibkrClient)
 
 	// --- Floor + Desks ---
@@ -259,8 +296,10 @@ func main() {
 		})
 		desksByID[d.id] = desk
 		floor.AddDesk(desk)
-		if err := graph.UpsertDesk(ctx, d.id, d.domain, d.group); err != nil {
-			slog.Warn("persist desk to graph failed", "desk_id", d.id, "error", err)
+		if graph != nil {
+			if err := graph.UpsertDesk(ctx, d.id, d.domain, d.group); err != nil {
+				slog.Warn("persist desk to graph failed", "desk_id", d.id, "error", err)
+			}
 		}
 	}
 
@@ -330,8 +369,10 @@ func main() {
 				desk.ProcessOutcome(ctx, thesis, outcome)
 			}
 		}
-		if err := graph.RecordOutcome(ctx, thesis, pos, outcome, normalizeClosedAt(pos), reason); err != nil {
-			slog.Warn("persist outcome to graph failed", "position_id", pos.ID, "error", err)
+		if graph != nil {
+			if err := graph.RecordOutcome(ctx, thesis, pos, outcome, normalizeClosedAt(pos), reason); err != nil {
+				slog.Warn("persist outcome to graph failed", "position_id", pos.ID, "error", err)
+			}
 		}
 
 		audit.Record("position_closed", pos.DeskID, pos.ThesisID, map[string]any{
@@ -584,6 +625,15 @@ func readRuntimeFloat(name string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+func firstNonEmptyRuntime(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type deskDef struct {

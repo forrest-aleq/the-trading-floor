@@ -13,19 +13,22 @@ import (
 // Graph is the belief graph — trust/confidence per competence key.
 // Ported from MARS BeliefGraphStore.
 type Graph struct {
-	mu           sync.RWMutex
-	log          *slog.Logger
-	states       map[string]*model.CompetenceState
-	peerStates   map[string]*model.DeskRelationshipBelief
-	onChange     func(*model.CompetenceState)
-	onPeerChange func(*model.DeskRelationshipBelief)
+	mu             sync.RWMutex
+	log            *slog.Logger
+	states         map[string]*model.CompetenceState
+	peerStates     map[string]*model.DeskRelationshipBelief
+	sourceStates   map[string]*model.SourceReliabilityBelief
+	onChange       func(*model.CompetenceState)
+	onPeerChange   func(*model.DeskRelationshipBelief)
+	onSourceChange func(*model.SourceReliabilityBelief)
 }
 
 func NewGraph() *Graph {
 	return &Graph{
-		log:        slog.Default().With("component", "belief-graph"),
-		states:     make(map[string]*model.CompetenceState),
-		peerStates: make(map[string]*model.DeskRelationshipBelief),
+		log:          slog.Default().With("component", "belief-graph"),
+		states:       make(map[string]*model.CompetenceState),
+		peerStates:   make(map[string]*model.DeskRelationshipBelief),
+		sourceStates: make(map[string]*model.SourceReliabilityBelief),
 	}
 }
 
@@ -52,6 +55,24 @@ func ParsePeerBeliefKey(key string) (originDesk, receivingDesk, domain, regime s
 		return "", "", "", ""
 	}
 	return parts[0], parts[1], parts[2], parts[3]
+}
+
+func SourceBeliefKey(ownerGroup, sourceDomain, signalDomain, language, region string) string {
+	return fmt.Sprintf("%s::%s::%s::%s::%s",
+		contextOrUnknown(ownerGroup),
+		contextOrUnknown(sourceDomain),
+		contextOrUnknown(signalDomain),
+		contextOrUnknown(language),
+		contextOrUnknown(region),
+	)
+}
+
+func ParseSourceBeliefKey(key string) (ownerGroup, sourceDomain, signalDomain, language, region string) {
+	parts := strings.SplitN(key, "::", 5)
+	if len(parts) != 5 {
+		return "", "", "", "", ""
+	}
+	return parts[0], parts[1], parts[2], parts[3], parts[4]
 }
 
 type TerritoryStatus string
@@ -108,6 +129,12 @@ func (g *Graph) SetChangeHandler(fn func(*model.CompetenceState)) {
 func (g *Graph) SetPeerChangeHandler(fn func(*model.DeskRelationshipBelief)) {
 	g.mu.Lock()
 	g.onPeerChange = fn
+	g.mu.Unlock()
+}
+
+func (g *Graph) SetSourceChangeHandler(fn func(*model.SourceReliabilityBelief)) {
+	g.mu.Lock()
+	g.onSourceChange = fn
 	g.mu.Unlock()
 }
 
@@ -176,6 +203,46 @@ func (g *Graph) LookupPeer(originDesk, receivingDesk, domain, regime string) (*m
 		return nil, false
 	}
 	return clonePeerState(state), true
+}
+
+func (g *Graph) GetSource(key string) *model.SourceReliabilityBelief {
+	g.mu.RLock()
+	state, exists := g.sourceStates[key]
+	g.mu.RUnlock()
+	if exists {
+		return cloneSourceState(state)
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if state, exists = g.sourceStates[key]; exists {
+		return cloneSourceState(state)
+	}
+	ownerGroup, sourceDomain, signalDomain, language, region := ParseSourceBeliefKey(key)
+	state = &model.SourceReliabilityBelief{
+		Key:          key,
+		OwnerGroup:   ownerGroup,
+		SourceDomain: sourceDomain,
+		SignalDomain: signalDomain,
+		Language:     language,
+		Region:       region,
+		Trust:        0.55,
+		Confidence:   0.35,
+		UpdatedAt:    time.Now(),
+	}
+	g.sourceStates[key] = state
+	return cloneSourceState(state)
+}
+
+func (g *Graph) LookupSource(ownerGroup, sourceDomain, signalDomain, language, region string) (*model.SourceReliabilityBelief, bool) {
+	key := SourceBeliefKey(ownerGroup, sourceDomain, signalDomain, language, region)
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	state, ok := g.sourceStates[key]
+	if !ok {
+		return nil, false
+	}
+	return cloneSourceState(state), true
 }
 
 func (g *Graph) AssessTerritory(deskID, capability, context, regime string, minObservations int) TerritoryAssessment {
@@ -401,6 +468,73 @@ func (g *Graph) ApplyPeerFailure(key string, magnitude float64) {
 	}
 }
 
+func (g *Graph) ApplySourceSuccess(key string, magnitude float64) {
+	g.GetSource(key)
+
+	g.mu.Lock()
+	state := g.sourceStates[key]
+	if state == nil {
+		g.mu.Unlock()
+		return
+	}
+	if magnitude > 2.0 {
+		magnitude = 2.0
+	}
+	if magnitude < 0 {
+		magnitude = 0
+	}
+	weight := 0.025 * magnitude
+	state.Trust += (1 - state.Trust) * weight
+	state.Confidence += 0.03 * magnitude
+	if state.Confidence > 1.0 {
+		state.Confidence = 1.0
+	}
+	state.SuccessCount++
+	state.UpdatedAt = time.Now()
+	changed := cloneSourceState(state)
+	handler := g.onSourceChange
+	g.mu.Unlock()
+
+	if handler != nil {
+		handler(changed)
+	}
+}
+
+func (g *Graph) ApplySourceFailure(key string, magnitude float64) {
+	g.GetSource(key)
+
+	g.mu.Lock()
+	state := g.sourceStates[key]
+	if state == nil {
+		g.mu.Unlock()
+		return
+	}
+	if magnitude > 2.0 {
+		magnitude = 2.0
+	}
+	if magnitude < 0 {
+		magnitude = 0
+	}
+	weight := 0.075 * magnitude
+	state.Trust -= state.Trust * weight
+	if state.Trust < 0 {
+		state.Trust = 0
+	}
+	state.Confidence -= 0.04 * magnitude
+	if state.Confidence < 0 {
+		state.Confidence = 0
+	}
+	state.FailureCount++
+	state.UpdatedAt = time.Now()
+	changed := cloneSourceState(state)
+	handler := g.onSourceChange
+	g.mu.Unlock()
+
+	if handler != nil {
+		handler(changed)
+	}
+}
+
 // DecayAll applies periodic decay to all beliefs (anti-overfitting layer 5)
 func (g *Graph) DecayAll(decayPct float64) {
 	g.mu.Lock()
@@ -467,6 +601,16 @@ func (g *Graph) AllPeerBeliefs() []*model.DeskRelationshipBelief {
 	return states
 }
 
+func (g *Graph) AllSourceBeliefs() []*model.SourceReliabilityBelief {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	states := make([]*model.SourceReliabilityBelief, 0, len(g.sourceStates))
+	for _, s := range g.sourceStates {
+		states = append(states, cloneSourceState(s))
+	}
+	return states
+}
+
 // Stats returns summary of belief graph
 func (g *Graph) Stats() GraphStats {
 	g.mu.RLock()
@@ -502,6 +646,14 @@ func cloneState(state *model.CompetenceState) *model.CompetenceState {
 }
 
 func clonePeerState(state *model.DeskRelationshipBelief) *model.DeskRelationshipBelief {
+	if state == nil {
+		return nil
+	}
+	cloned := *state
+	return &cloned
+}
+
+func cloneSourceState(state *model.SourceReliabilityBelief) *model.SourceReliabilityBelief {
 	if state == nil {
 		return nil
 	}

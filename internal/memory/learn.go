@@ -38,6 +38,7 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 	structureKey := belief.CompetenceKey(thesis.DeskID, competenceStructureSelect, capability, regime.Key())
 	executionKey := belief.CompetenceKey(thesis.DeskID, competenceExecutionQuality, capability, regime.Key())
 	surpriseKey := belief.CompetenceKey(thesis.DeskID, competenceSurpriseAssess, thesis.Strategy, regime.Key())
+	sourceKey := sourceBeliefKeyForThesis(thesis)
 
 	// Calculate magnitude: realized_return / expected_risk, clamped to [-2, 2]
 	expectedRisk := math.Abs(thesis.EntryPrice - thesis.StopLoss)
@@ -102,6 +103,21 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 	recordUpdate(executionKey, "execution_edge", attribution.ExecutionEdge, boundaryViolation)
 	if surpriseScore, ok := surpriseValidationScore(thesis, outcome); ok {
 		recordUpdate(surpriseKey, "surprise_validation", surpriseScore, false)
+	}
+	if sourceKey != "" {
+		sourceMagnitude := magnitude * math.Abs(clampSigned(overallAttributionScore(attribution))) * learningWeight(attribution)
+		if sourceMagnitude >= 0.05 {
+			if overallAttributionScore(attribution) >= 0 {
+				l.graph.ApplySourceSuccess(sourceKey, sourceMagnitude)
+			} else {
+				l.graph.ApplySourceFailure(sourceKey, sourceMagnitude)
+			}
+			updates = append(updates, model.AttributionUpdate{
+				Key:       sourceKey,
+				Dimension: "source_edge",
+				Score:     clampSigned(overallAttributionScore(attribution)),
+			})
+		}
 	}
 	if input := thesis.CollaborationInput; input != nil && input.OriginDesk != "" && input.OriginDesk != thesis.DeskID {
 		peerKey := belief.PeerBeliefKey(input.OriginDesk, thesis.DeskID, firstNonEmptyLearn(thesis.Domain, input.OriginDomain), regime.Key())
@@ -186,4 +202,21 @@ func firstNonEmptyLearn(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func sourceBeliefKeyForThesis(thesis *model.Thesis) string {
+	if thesis == nil || thesis.EvidenceMeta == nil {
+		return ""
+	}
+	meta := thesis.EvidenceMeta
+	if meta.SourceOwnerGroup == "" && meta.SourceDomain == "" {
+		return ""
+	}
+	return belief.SourceBeliefKey(
+		meta.SourceOwnerGroup,
+		meta.SourceDomain,
+		firstNonEmptyLearn(thesis.Domain, thesis.Strategy),
+		meta.OriginalLanguage,
+		meta.OriginRegion,
+	)
 }

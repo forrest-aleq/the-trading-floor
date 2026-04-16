@@ -243,6 +243,101 @@ func (c *Client) UpsertDeskRelationshipBelief(ctx context.Context, state *model.
 	})
 }
 
+func (c *Client) UpsertSourceReliabilityBelief(ctx context.Context, state *model.SourceReliabilityBelief) error {
+	if c == nil || c.driver == nil || state == nil || strings.TrimSpace(state.Key) == "" {
+		return nil
+	}
+
+	updatedAt := state.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+
+	return c.executeWrite(ctx, func(tx neo4j.ManagedTransaction) error {
+		if err := runQuery(ctx, tx, `
+			MERGE (b:SourceReliabilityBelief {key: $key})
+			SET b.source_domain = $source_domain,
+			    b.owner_group = $owner_group,
+			    b.signal_domain = $signal_domain,
+			    b.language = $language,
+			    b.region = $region,
+			    b.trust = $trust,
+			    b.confidence = $confidence,
+			    b.success_count = $success_count,
+			    b.failure_count = $failure_count,
+			    b.updated_at = $updated_at`,
+			map[string]any{
+				"key":           state.Key,
+				"source_domain": strings.TrimSpace(state.SourceDomain),
+				"owner_group":   strings.TrimSpace(state.OwnerGroup),
+				"signal_domain": strings.TrimSpace(state.SignalDomain),
+				"language":      strings.TrimSpace(state.Language),
+				"region":        strings.TrimSpace(state.Region),
+				"trust":         state.Trust,
+				"confidence":    state.Confidence,
+				"success_count": state.SuccessCount,
+				"failure_count": state.FailureCount,
+				"updated_at":    updatedAt,
+			},
+		); err != nil {
+			return err
+		}
+		if strings.TrimSpace(state.SourceDomain) != "" {
+			if err := runQuery(ctx, tx, `
+				MERGE (src:Source {id: $source_id})
+				SET src.name = CASE WHEN src.name IS NULL OR src.name = '' THEN $source_domain ELSE src.name END,
+				    src.updated_at = $updated_at`,
+				map[string]any{
+					"source_id":     strings.ToLower(strings.TrimSpace(state.SourceDomain)),
+					"source_domain": strings.TrimSpace(state.SourceDomain),
+					"updated_at":    updatedAt,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MATCH (src:Source {id: $source_id})
+				MATCH (b:SourceReliabilityBelief {key: $key})
+				MERGE (src)-[r:HAS_RELIABILITY_BELIEF]->(b)
+				SET r.updated_at = $updated_at`,
+				map[string]any{
+					"source_id":  strings.ToLower(strings.TrimSpace(state.SourceDomain)),
+					"key":        state.Key,
+					"updated_at": updatedAt,
+				},
+			); err != nil {
+				return err
+			}
+		}
+		if strings.TrimSpace(state.SignalDomain) != "" {
+			if err := runQuery(ctx, tx, `
+				MERGE (d:Domain {id: $domain})
+				SET d.updated_at = $updated_at`,
+				map[string]any{
+					"domain":     strings.TrimSpace(state.SignalDomain),
+					"updated_at": updatedAt,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MATCH (d:Domain {id: $domain})
+				MATCH (b:SourceReliabilityBelief {key: $key})
+				MERGE (b)-[r:RELIABLE_FOR]->(d)
+				SET r.updated_at = $updated_at`,
+				map[string]any{
+					"domain":     strings.TrimSpace(state.SignalDomain),
+					"key":        state.Key,
+					"updated_at": updatedAt,
+				},
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (c *Client) CouncilVoiceTelemetry(ctx context.Context, domain string) (map[string]model.CouncilVoiceStats, error) {
 	stats := make(map[string]model.CouncilVoiceStats)
 	if c == nil || c.driver == nil || strings.TrimSpace(domain) == "" {

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/hnic/trading-floor/internal/memory/belief"
+	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
@@ -249,5 +250,71 @@ func TestLearnWorkerUpdatesPeerBeliefsFromCollaborationInput(t *testing.T) {
 	}
 	if !foundPeerUpdate {
 		t.Fatalf("expected peer_edge competence update, got %+v", outcome.Attribution.CompetenceUpdates)
+	}
+}
+
+func TestLearnWorkerUpdatesSourceBeliefsFromEvidenceMeta(t *testing.T) {
+	graph := belief.NewGraph()
+	worker := NewLearnWorker(graph, nil)
+
+	thesis := &model.Thesis{
+		ID:           "thesis-5",
+		DeskID:       "desk-macro-a",
+		Domain:       "macro",
+		Strategy:     "macro",
+		EntryPrice:   100,
+		StopLoss:     95,
+		PositionSize: 10,
+		Instrument: model.Instrument{
+			Symbol:   "TLT",
+			SecType:  "STK",
+			Currency: "USD",
+		},
+		EvidenceMeta: &evidence.Metadata{
+			SourceDomain:     "reuters.com",
+			SourceOwnerGroup: "thomson_reuters",
+			OriginalLanguage: "ar",
+			OriginRegion:     "mena",
+		},
+	}
+	outcome := &model.ThesisOutcome{
+		Profitable:  true,
+		RealizedPnL: 200,
+		Attribution: &model.OutcomeAttribution{
+			TruthEdge:      0.80,
+			TimingEdge:     0.30,
+			ExpressionEdge: 0.20,
+			ExecutionEdge:  0.10,
+			LuckEstimate:   0.10,
+		},
+	}
+	regime := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "risk_on",
+		Liquidity:  "normal",
+	}
+
+	worker.ProcessOutcome(thesis, outcome, regime)
+
+	sourceState, ok := graph.LookupSource("thomson_reuters", "reuters.com", "macro", "ar", "mena")
+	if !ok {
+		t.Fatal("expected source belief to be updated")
+	}
+	if sourceState.SuccessCount != 1 {
+		t.Fatalf("expected source belief success count to be 1, got %+v", sourceState)
+	}
+	if outcome.Attribution == nil {
+		t.Fatal("expected attribution to remain attached")
+	}
+	foundSourceUpdate := false
+	for _, update := range outcome.Attribution.CompetenceUpdates {
+		if update.Dimension == "source_edge" {
+			foundSourceUpdate = true
+			break
+		}
+	}
+	if !foundSourceUpdate {
+		t.Fatalf("expected source_edge competence update, got %+v", outcome.Attribution.CompetenceUpdates)
 	}
 }

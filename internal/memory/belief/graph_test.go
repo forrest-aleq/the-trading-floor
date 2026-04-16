@@ -96,3 +96,34 @@ func TestPeerBeliefUpdates(t *testing.T) {
 		t.Fatalf("expected one peer belief record, got %d", len(graph.AllPeerBeliefs()))
 	}
 }
+
+func TestSourceBeliefUpdates(t *testing.T) {
+	graph := NewGraph()
+
+	key := SourceBeliefKey("thomson_reuters", "reuters.com", "macro", "ar", "mena")
+	graph.ApplySourceSuccess(key, 1.0)
+
+	state, ok := graph.LookupSource("thomson_reuters", "reuters.com", "macro", "ar", "mena")
+	if !ok {
+		t.Fatal("expected source belief to be created")
+	}
+	if state.SuccessCount != 1 {
+		t.Fatalf("expected source success count 1, got %+v", state)
+	}
+	baselineTrust := state.Trust
+
+	graph.ApplySourceFailure(key, 1.0)
+	state, ok = graph.LookupSource("thomson_reuters", "reuters.com", "macro", "ar", "mena")
+	if !ok {
+		t.Fatal("expected source belief to remain available")
+	}
+	if state.FailureCount != 1 {
+		t.Fatalf("expected source failure count 1, got %+v", state)
+	}
+	if state.Trust >= baselineTrust {
+		t.Fatalf("expected source trust to fall after failure, got %.4f >= %.4f", state.Trust, baselineTrust)
+	}
+	if len(graph.AllSourceBeliefs()) != 1 {
+		t.Fatalf("expected one source belief record, got %d", len(graph.AllSourceBeliefs()))
+	}
+}

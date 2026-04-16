@@ -210,3 +210,34 @@ func TestNarrativeCorrelationCrossLinksLanguages(t *testing.T) {
 		t.Fatalf("expected multilingual corroboration metadata, got %+v", second.EvidenceMeta)
 	}
 }
+
+func TestApplyLearnedSourceReliabilityBlendsTrustIntoEvidence(t *testing.T) {
+	sig := NormalizeSignal(signal.Signal{
+		ID:        "sig-learned-source",
+		Source:    "stocktwits",
+		Type:      signal.TypeSocial,
+		Category:  "flows",
+		Timestamp: time.Now(),
+		Raw:       []byte(`{"title":"Flow desk is seeing unusual call buying"}`),
+	})
+	if sig.EvidenceMeta == nil {
+		t.Fatal("expected normalized evidence metadata")
+	}
+	baselineTrust := sig.EvidenceMeta.SourceTrust
+	baselineScore := sig.EvidenceMeta.EvidenceScore
+
+	enriched := ApplyLearnedSourceReliability(sig, 0.88, 0.80)
+
+	if enriched.EvidenceMeta == nil {
+		t.Fatal("expected enriched evidence metadata")
+	}
+	if enriched.EvidenceMeta.SourceTrust <= baselineTrust {
+		t.Fatalf("expected source trust to increase, got %.2f <= %.2f", enriched.EvidenceMeta.SourceTrust, baselineTrust)
+	}
+	if enriched.EvidenceMeta.EvidenceScore <= baselineScore {
+		t.Fatalf("expected evidence score to increase, got %.2f <= %.2f", enriched.EvidenceMeta.EvidenceScore, baselineScore)
+	}
+	if sig.EvidenceMeta.SourceTrust != baselineTrust {
+		t.Fatalf("expected original signal metadata to remain unchanged, got %.2f want %.2f", sig.EvidenceMeta.SourceTrust, baselineTrust)
+	}
+}

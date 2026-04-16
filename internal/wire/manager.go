@@ -23,6 +23,7 @@ type Manager struct {
 	feeds       []Feed
 	subscribers []chan signal.Signal
 	ingress     chan signal.Signal
+	enricher    func(signal.Signal) signal.Signal
 	mu          sync.RWMutex
 	statsMu     sync.RWMutex
 
@@ -97,6 +98,12 @@ func (m *Manager) Subscribe() <-chan signal.Signal {
 	return ch
 }
 
+func (m *Manager) SetSignalEnricher(fn func(signal.Signal) signal.Signal) {
+	m.mu.Lock()
+	m.enricher = fn
+	m.mu.Unlock()
+}
+
 func (m *Manager) Publish(ctx context.Context, sig signal.Signal) error {
 	timer := time.NewTimer(m.publishTimeout)
 	defer timer.Stop()
@@ -140,6 +147,12 @@ func (m *Manager) Start(ctx context.Context) error {
 				}
 				m.totalReceived.Add(1)
 				sig = NormalizeSignal(sig)
+				m.mu.RLock()
+				enricher := m.enricher
+				m.mu.RUnlock()
+				if enricher != nil {
+					sig = enricher(sig)
+				}
 				m.recordSignalIngress(sig)
 				m.log.Debug("wire ingested signal",
 					"signal_id", sig.ID,

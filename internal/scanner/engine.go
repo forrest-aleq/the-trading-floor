@@ -543,7 +543,7 @@ type scannerRequestConfig struct {
 func (e *Engine) requestConfig() scannerRequestConfig {
 	if e.responseMode == scannerResponseModeThought {
 		return scannerRequestConfig{
-			systemPrompt:            e.thoughtPrompt,
+			systemPrompt:            addTerminalDecisionContract(e.thoughtPrompt),
 			jsonMode:                false,
 			timeout:                 scannerThinkingRequestTimeout,
 			maxTokens:               scannerThinkingMaxTokens,
@@ -629,6 +629,23 @@ func extractFinalDecisionBlock(raw string) (string, error) {
 		return "", fmt.Errorf("terminal decision block empty")
 	}
 	return block, nil
+}
+
+func addTerminalDecisionContract(systemPrompt string) string {
+	return strings.TrimSpace(systemPrompt) + `
+
+You MUST end with exactly one terminal decision block:
+FINAL_DECISION
+tradeable: true|false
+score: 0-100
+instruments: SYMBOL:SECTYPE:CURRENCY, ...
+direction: long|short|none
+urgency: 0.0-1.0
+category: macro|corporate|geopolitical|flows|tail|volatility|sector|systematic
+reasoning: short explanation
+END_FINAL_DECISION
+
+Do not omit the terminal decision block.`
 }
 
 func parseScanResponse(raw string) (scanResult, error) {

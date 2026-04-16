@@ -1,0 +1,44 @@
+{
+  "actions": [
+    {
+      "name": "ignore",
+      "base_goal_value": 0.25,
+      "social_penalty_weight": 0.10,
+      "importance_threshold": 0.00,
+      "reliability_threshold": 0.00,
+      "tradability_threshold": 0.00,
+      "pressure_weight": 0.10,
+      "peer_weight": 0.00
+    },
+    {
+      "name": "monitor",
+      "base_goal_value": 0.45,
+      "social_penalty_weight": 0.20,
+      "importance_threshold": 0.25,
+      "reliability_threshold": 0.25,
+      "tradability_threshold": 0.00,
+      "pressure_weight": 0.30,
+      "peer_weight": 0.15
+    },
+    {
+      "name": "investigate",
+      "base_goal_value": 0.70,
+      "social_penalty_weight": 0.35,
+      "importance_threshold": 0.45,
+      "reliability_threshold": 0.45,
+      "tradability_threshold": 0.30,
+      "pressure_weight": 0.45,
+      "peer_weight": 0.20
+    },
+    {
+      "name": "escalate",
+      "base_goal_value": 0.88,
+      "social_penalty_weight": 0.55,
+      "importance_threshold": 0.65,
+      "reliability_threshold": 0.55,
+      "tradability_threshold": 0.45,
+      "pressure_weight": 0.60,
+      "peer_weight": 0.25
+    }
+  ]
+}

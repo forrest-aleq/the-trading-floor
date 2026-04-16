@@ -26,3 +26,14 @@ type AppraisalState struct {
 	RelationshipHealth  float64  `json:"relationship_health,omitempty"`
 	Basis               []string `json:"basis,omitempty"`
 }
+
+type ActionSelectionState struct {
+	Domain               string   `json:"domain,omitempty"`
+	RecommendedAction    string   `json:"recommended_action,omitempty"`
+	SuccessProbability   float64  `json:"success_probability,omitempty"`
+	GoalValue            float64  `json:"goal_value,omitempty"`
+	SocialCost           float64  `json:"social_cost,omitempty"`
+	ExpectedUtility      float64  `json:"expected_utility,omitempty"`
+	RequestedActionMatch float64  `json:"requested_action_match,omitempty"`
+	Basis                []string `json:"basis,omitempty"`
+}

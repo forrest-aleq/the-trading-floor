@@ -494,15 +494,15 @@ func (d *Desk) applyCollaborationContext(sig signal.Signal, thesis *model.Thesis
 }
 
 func (d *Desk) collaborationInputForSignal(sig signal.Signal) *model.CollaborationInput {
-	return institutional.CollaborationInputForSignal(sig, func(originDesk, originDomain string) (float64, float64, bool) {
+	return institutional.CollaborationInputForSignal(sig, func(originDesk, originDomain string) (*model.DeskRelationshipBelief, bool) {
 		if d.beliefs == nil || originDesk == "" {
-			return 0, 0, false
+			return nil, false
 		}
 		peer, ok := d.beliefs.LookupPeer(originDesk, d.ID, firstNonEmptyInternal(d.Domain, originDomain), d.regime.Key())
 		if !ok {
-			return 0, 0, false
+			return nil, false
 		}
-		return peer.Trust, peer.Confidence, true
+		return peer, true
 	})
 }
 

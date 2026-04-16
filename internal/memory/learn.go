@@ -124,9 +124,10 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 		peerMagnitude := magnitude * math.Abs(clampSigned(overallAttributionScore(attribution))) * learningWeight(attribution)
 		if peerMagnitude >= 0.05 {
 			if overallAttributionScore(attribution) >= 0 {
-				l.graph.ApplyPeerSuccess(peerKey, peerMagnitude)
+				recovery := input.SocialCost >= 0.20 || input.FaceThreatScore >= 0.20 || input.AppraisalClass == "negative_surprise"
+				l.graph.ApplyPeerSuccessWithContext(peerKey, peerMagnitude, recovery, input.SocialCost)
 			} else {
-				l.graph.ApplyPeerFailure(peerKey, peerMagnitude)
+				l.graph.ApplyPeerFailureWithContext(peerKey, peerMagnitude, input.FaceThreatScore)
 			}
 			updates = append(updates, model.AttributionUpdate{
 				Key:       peerKey,

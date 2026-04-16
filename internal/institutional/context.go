@@ -39,6 +39,9 @@ func BuildSignalContext(sig signal.Signal, opts SignalContextOptions) string {
 	if opts.IncludeInstitutional && sig.Appraisal != nil {
 		appendIndentedBlock(&sb, opts.Indent, BuildAppraisalContext(sig.Appraisal, "  "))
 	}
+	if opts.IncludeInstitutional && sig.ActionSelection != nil {
+		appendIndentedBlock(&sb, opts.Indent, BuildActionSelectionContext(sig.ActionSelection, "  "))
+	}
 
 	write("Source: %s", sig.Source)
 	write("Type: %s", sig.Type)
@@ -367,6 +370,21 @@ func BuildCollaborationContext(input *model.CollaborationInput, indent string) s
 		fmt.Sprintf("%scolleague.requested_action=%s", indent, input.RequestedAction),
 		fmt.Sprintf("%scolleague.peer_trust=%.2f", indent, input.RelationshipTrust),
 		fmt.Sprintf("%scolleague.peer_confidence=%.2f", indent, input.RelationshipConfidence),
+	}
+	if input.RelationshipHealth > 0 {
+		lines = append(lines, fmt.Sprintf("%scolleague.relationship_health=%.2f", indent, input.RelationshipHealth))
+	}
+	if input.RecoveryScore > 0 {
+		lines = append(lines, fmt.Sprintf("%scolleague.recovery_score=%.2f", indent, input.RecoveryScore))
+	}
+	if input.AppraisalClass != "" {
+		lines = append(lines, fmt.Sprintf("%scolleague.appraisal_class=%s", indent, input.AppraisalClass))
+	}
+	if input.FaceThreatScore > 0 {
+		lines = append(lines, fmt.Sprintf("%scolleague.face_threat=%.2f", indent, input.FaceThreatScore))
+	}
+	if input.SocialCost > 0 {
+		lines = append(lines, fmt.Sprintf("%scolleague.social_cost=%.2f", indent, input.SocialCost))
 	}
 	if input.Summary != "" {
 		lines = append(lines, fmt.Sprintf("%scolleague.summary=%s", indent, input.Summary))

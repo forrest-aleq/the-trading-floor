@@ -55,6 +55,8 @@ type replaySummary struct {
 	TotalPnL                float64                `json:"total_pnl"`
 	CollaborativePnL        float64                `json:"collaborative_pnl,omitempty"`
 	SoloPnL                 float64                `json:"solo_pnl,omitempty"`
+	RecoveredCollaborations int                    `json:"recovered_collaborations,omitempty"`
+	ViolatedCollaborations  int                    `json:"violated_collaborations,omitempty"`
 	HistoricalAvailable     bool                   `json:"historical_available"`
 	BeliefsGenerated        int                    `json:"beliefs_generated,omitempty"`
 	EngramsGenerated        int                    `json:"engrams_generated,omitempty"`
@@ -66,6 +68,7 @@ type replaySummary struct {
 	BacktestErrors          map[string]int         `json:"backtest_errors,omitempty"`
 	AppraisalClasses        map[string]int         `json:"appraisal_classes,omitempty"`
 	ExpectationActions      map[string]int         `json:"expectation_actions,omitempty"`
+	SelectedActions         map[string]int         `json:"selected_actions,omitempty"`
 	Warnings                []string               `json:"warnings,omitempty"`
 	Domains                 map[string]domainStats `json:"domains"`
 	Since                   string                 `json:"since"`
@@ -85,8 +88,11 @@ type domainStats struct {
 	TotalPnL                float64        `json:"total_pnl"`
 	CollaborativePnL        float64        `json:"collaborative_pnl,omitempty"`
 	SoloPnL                 float64        `json:"solo_pnl,omitempty"`
+	RecoveredCollaborations int            `json:"recovered_collaborations,omitempty"`
+	ViolatedCollaborations  int            `json:"violated_collaborations,omitempty"`
 	AppraisalClasses        map[string]int `json:"appraisal_classes,omitempty"`
 	ExpectationActions      map[string]int `json:"expectation_actions,omitempty"`
+	SelectedActions         map[string]int `json:"selected_actions,omitempty"`
 	ScanRejects             map[string]int `json:"scan_rejects,omitempty"`
 	ResearchRejects         map[string]int `json:"research_rejects,omitempty"`
 }
@@ -146,6 +152,7 @@ func main() {
 		BacktestErrors:      map[string]int{},
 		AppraisalClasses:    map[string]int{},
 		ExpectationActions:  map[string]int{},
+		SelectedActions:     map[string]int{},
 		Domains:             map[string]domainStats{},
 		Since:               opts.since.String(),
 		GeneratedAt:         time.Now().UTC(),
@@ -245,6 +252,14 @@ func main() {
 							summary.CollaborativeBacktested++
 							stats.CollaborativePnL += outcome.RealizedPnL
 							summary.CollaborativePnL += outcome.RealizedPnL
+							if collaborationWasRecovered(thesis.CollaborationInput, outcome) {
+								stats.RecoveredCollaborations++
+								summary.RecoveredCollaborations++
+							}
+							if collaborationWasViolated(thesis.CollaborationInput, outcome) {
+								stats.ViolatedCollaborations++
+								summary.ViolatedCollaborations++
+							}
 						} else {
 							stats.SoloBacktested++
 							summary.SoloBacktested++
@@ -284,6 +299,9 @@ func main() {
 	}
 	if len(summary.ExpectationActions) == 0 {
 		summary.ExpectationActions = nil
+	}
+	if len(summary.SelectedActions) == 0 {
+		summary.SelectedActions = nil
 	}
 	if len(summary.Warnings) == 0 {
 		summary.Warnings = nil
@@ -350,6 +368,31 @@ func recordCognitiveSummary(summary *replaySummary, stats *domainStats, sig sign
 		}
 		stats.ExpectationActions[action]++
 	}
+	if sig.ActionSelection != nil {
+		action := strings.TrimSpace(sig.ActionSelection.RecommendedAction)
+		if action == "" {
+			action = "unknown"
+		}
+		summary.SelectedActions[action]++
+		if stats.SelectedActions == nil {
+			stats.SelectedActions = map[string]int{}
+		}
+		stats.SelectedActions[action]++
+	}
+}
+
+func collaborationWasRecovered(input *model.CollaborationInput, outcome *model.ThesisOutcome) bool {
+	if input == nil || outcome == nil || !outcome.Profitable {
+		return false
+	}
+	return input.FaceThreatScore >= 0.20 || input.SocialCost >= 0.20 || strings.EqualFold(input.AppraisalClass, "negative_surprise")
+}
+
+func collaborationWasViolated(input *model.CollaborationInput, outcome *model.ThesisOutcome) bool {
+	if input == nil || outcome == nil || outcome.Profitable {
+		return false
+	}
+	return input.FaceThreatScore >= 0.20 || input.SocialCost >= 0.20
 }
 
 func parseOptions() options {
@@ -432,15 +475,15 @@ func backfillDeskID(domain string) string {
 func replayCollaborationInput(sig signal.Signal, graph *belief.Graph, domain string) *model.CollaborationInput {
 	deskID := backfillDeskID(domain)
 	regime := defaultReplayRegime()
-	return institutional.CollaborationInputForSignal(sig, func(originDesk, originDomain string) (float64, float64, bool) {
+	return institutional.CollaborationInputForSignal(sig, func(originDesk, originDomain string) (*model.DeskRelationshipBelief, bool) {
 		if graph == nil || originDesk == "" {
-			return 0, 0, false
+			return nil, false
 		}
 		peer, ok := graph.LookupPeer(originDesk, deskID, replayFirstNonEmpty(strings.TrimSpace(domain), originDomain), regime.Key())
 		if !ok {
-			return 0, 0, false
+			return nil, false
 		}
-		return peer.Trust, peer.Confidence, true
+		return peer, true
 	})
 }
 

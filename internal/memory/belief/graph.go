@@ -194,6 +194,7 @@ func (g *Graph) LoadPeerBeliefs(states []*model.DeskRelationshipBelief) {
 		if state.OriginDesk == "" || state.ReceivingDesk == "" || state.Domain == "" || state.Regime == "" {
 			state.OriginDesk, state.ReceivingDesk, state.Domain, state.Regime = ParsePeerBeliefKey(state.Key)
 		}
+		normalizePeerState(state)
 		g.peerStates[state.Key] = state
 	}
 }
@@ -257,14 +258,16 @@ func (g *Graph) GetPeer(key string) *model.DeskRelationshipBelief {
 	}
 	originDesk, receivingDesk, domain, regime := ParsePeerBeliefKey(key)
 	state = &model.DeskRelationshipBelief{
-		Key:           key,
-		OriginDesk:    originDesk,
-		ReceivingDesk: receivingDesk,
-		Domain:        domain,
-		Regime:        regime,
-		Trust:         0.55,
-		Confidence:    0.35,
-		UpdatedAt:     time.Now(),
+		Key:                key,
+		OriginDesk:         originDesk,
+		ReceivingDesk:      receivingDesk,
+		Domain:             domain,
+		Regime:             regime,
+		Trust:              0.55,
+		Confidence:         0.35,
+		RelationshipHealth: 0.50,
+		RecoveryScore:      0.00,
+		UpdatedAt:          time.Now(),
 	}
 	g.peerStates[key] = state
 	return clonePeerState(state)
@@ -490,6 +493,10 @@ func (g *Graph) ApplyFailure(key string, magnitude float64, boundaryViolation bo
 }
 
 func (g *Graph) ApplyPeerSuccess(key string, magnitude float64) {
+	g.ApplyPeerSuccessWithContext(key, magnitude, false, 0)
+}
+
+func (g *Graph) ApplyPeerSuccessWithContext(key string, magnitude float64, recovery bool, socialCost float64) {
 	g.GetPeer(key)
 
 	g.mu.Lock()
@@ -510,6 +517,19 @@ func (g *Graph) ApplyPeerSuccess(key string, magnitude float64) {
 	if state.Confidence > 1.0 {
 		state.Confidence = 1.0
 	}
+	state.RelationshipHealth += (1 - state.RelationshipHealth) * (0.04 * magnitude)
+	if state.RelationshipHealth > 1.0 {
+		state.RelationshipHealth = 1.0
+	}
+	if recovery {
+		recoveryWeight := clamp01(socialCost) * 0.08 * magnitude
+		state.Trust += (1 - state.Trust) * recoveryWeight
+		state.RecoveryScore += (1 - state.RecoveryScore) * recoveryWeight
+		if state.RecoveryScore > 1.0 {
+			state.RecoveryScore = 1.0
+		}
+		state.PositiveRecoveries++
+	}
 	state.SuccessCount++
 	state.UpdatedAt = time.Now()
 	changed := clonePeerState(state)
@@ -522,6 +542,10 @@ func (g *Graph) ApplyPeerSuccess(key string, magnitude float64) {
 }
 
 func (g *Graph) ApplyPeerFailure(key string, magnitude float64) {
+	g.ApplyPeerFailureWithContext(key, magnitude, 0)
+}
+
+func (g *Graph) ApplyPeerFailureWithContext(key string, magnitude float64, faceThreat float64) {
 	g.GetPeer(key)
 
 	g.mu.Lock()
@@ -544,6 +568,18 @@ func (g *Graph) ApplyPeerFailure(key string, magnitude float64) {
 	state.Confidence -= 0.04 * magnitude
 	if state.Confidence < 0 {
 		state.Confidence = 0
+	}
+	healthWeight := 0.06 * magnitude
+	state.RelationshipHealth -= state.RelationshipHealth * healthWeight
+	if state.RelationshipHealth < 0 {
+		state.RelationshipHealth = 0
+	}
+	state.RecoveryScore -= state.RecoveryScore * (0.05 * magnitude)
+	if state.RecoveryScore < 0 {
+		state.RecoveryScore = 0
+	}
+	if faceThreat >= 0.20 {
+		state.NegativeViolations++
 	}
 	state.FailureCount++
 	state.UpdatedAt = time.Now()
@@ -816,6 +852,24 @@ func clonePeerState(state *model.DeskRelationshipBelief) *model.DeskRelationship
 	return &cloned
 }
 
+func normalizePeerState(state *model.DeskRelationshipBelief) {
+	if state == nil {
+		return
+	}
+	if state.Trust <= 0 {
+		state.Trust = 0.55
+	}
+	if state.Confidence <= 0 {
+		state.Confidence = 0.35
+	}
+	if state.RelationshipHealth <= 0 {
+		state.RelationshipHealth = 0.50
+	}
+	if state.RecoveryScore < 0 {
+		state.RecoveryScore = 0
+	}
+}
+
 func cloneSourceState(state *model.SourceReliabilityBelief) *model.SourceReliabilityBelief {
 	if state == nil {
 		return nil
@@ -830,6 +884,16 @@ func cloneLeadTimeState(state *model.SourceLeadTimeBelief) *model.SourceLeadTime
 	}
 	cloned := *state
 	return &cloned
+}
+
+func clamp01(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
 }
 
 func leadTimeBeliefScore(hours float64, observations int) float64 {

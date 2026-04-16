@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/hnic/trading-floor/pkg/model"
+	"github.com/hnic/trading-floor/pkg/signal"
 )
 
 func TestNormalizeReplayModeDefaultsToResearch(t *testing.T) {
@@ -101,5 +102,43 @@ func TestRecordResearchRejectTracksGlobalAndDomainCounts(t *testing.T) {
 	}
 	if got := stats.ResearchRejects["conviction_below_threshold"]; got != 2 {
 		t.Fatalf("unexpected domain reject count %d", got)
+	}
+}
+
+func TestRecordCognitiveSummaryTracksSelectedActions(t *testing.T) {
+	summary := replaySummary{
+		AppraisalClasses:   map[string]int{},
+		ExpectationActions: map[string]int{},
+		SelectedActions:    map[string]int{},
+	}
+	stats := domainStats{}
+
+	recordCognitiveSummary(&summary, &stats, signal.Signal{
+		Expectation: &model.ExpectationState{PredictedAction: "investigate"},
+		Appraisal:   &model.AppraisalState{ViolationClass: "positive_surprise"},
+		ActionSelection: &model.ActionSelectionState{
+			RecommendedAction: "escalate",
+		},
+	})
+
+	if got := summary.SelectedActions["escalate"]; got != 1 {
+		t.Fatalf("unexpected global selected action count %d", got)
+	}
+	if got := stats.SelectedActions["escalate"]; got != 1 {
+		t.Fatalf("unexpected domain selected action count %d", got)
+	}
+}
+
+func TestCollaborationRecoveryHelpers(t *testing.T) {
+	input := &model.CollaborationInput{
+		AppraisalClass:  "negative_surprise",
+		FaceThreatScore: 0.28,
+		SocialCost:      0.31,
+	}
+	if !collaborationWasRecovered(input, &model.ThesisOutcome{Profitable: true}) {
+		t.Fatal("expected profitable high-friction collaboration to count as recovered")
+	}
+	if !collaborationWasViolated(input, &model.ThesisOutcome{Profitable: false}) {
+		t.Fatal("expected failed high-friction collaboration to count as violated")
 	}
 }

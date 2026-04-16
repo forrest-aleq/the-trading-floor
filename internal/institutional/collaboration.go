@@ -9,7 +9,7 @@ import (
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
-type RelationshipLookup func(originDesk, originDomain string) (trust, confidence float64, ok bool)
+type RelationshipLookup func(originDesk, originDomain string) (*model.DeskRelationshipBelief, bool)
 
 func IsInternalSignal(sig signal.Signal) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(sig.Source)), "internal/")
@@ -28,9 +28,19 @@ func CollaborationInputForSignal(sig signal.Signal, lookup RelationshipLookup) *
 		return nil
 	}
 	if lookup != nil && input.OriginDesk != "" {
-		if trust, confidence, ok := lookup(input.OriginDesk, input.OriginDomain); ok {
-			input.RelationshipTrust = trust
-			input.RelationshipConfidence = confidence
+		if peer, ok := lookup(input.OriginDesk, input.OriginDomain); ok && peer != nil {
+			input.RelationshipTrust = peer.Trust
+			input.RelationshipConfidence = peer.Confidence
+			input.RelationshipHealth = peer.RelationshipHealth
+			input.RecoveryScore = peer.RecoveryScore
+		}
+	}
+	if sig.Appraisal != nil {
+		input.AppraisalClass = sig.Appraisal.ViolationClass
+		input.FaceThreatScore = sig.Appraisal.FaceThreatScore
+		input.SocialCost = sig.Appraisal.SocialCost
+		if sig.Appraisal.RelationshipHealth > 0 {
+			input.RelationshipHealth = sig.Appraisal.RelationshipHealth
 		}
 	}
 	return input

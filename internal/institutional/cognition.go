@@ -13,8 +13,10 @@ import (
 func EnrichSignalCognition(sig signal.Signal, domain string, input *model.CollaborationInput) signal.Signal {
 	expectation := BuildExpectationState(sig, domain, input)
 	appraisal := BuildAppraisalState(sig, expectation, input)
+	actionSelection := BuildActionSelectionState(expectation, appraisal, input)
 	sig.Expectation = expectation
 	sig.Appraisal = appraisal
+	sig.ActionSelection = actionSelection
 	return sig
 }
 
@@ -83,6 +85,9 @@ func BuildAppraisalState(sig signal.Signal, expectation *model.ExpectationState,
 
 	power, distance, rank := appraisalModerators(sig, expectation, input)
 	relationshipHealth := relationshipHealth(expectation.PredictedNovelty, power, distance)
+	if input != nil && input.RelationshipHealth > 0 {
+		relationshipHealth = clamp01((relationshipHealth + input.RelationshipHealth) / 2)
+	}
 	negativeBias := violationScore
 	if violationClass == "positive_surprise" {
 		negativeBias *= 0.35
@@ -91,7 +96,11 @@ func BuildAppraisalState(sig signal.Signal, expectation *model.ExpectationState,
 	if input != nil {
 		faceThreat = clamp01(negativeBias * (0.45*power + 0.30*distance + 0.25*rank))
 	}
-	socialCost := clamp01(faceThreat + (1-relationshipHealth)*0.5)
+	recoveryBuffer := 0.0
+	if input != nil && input.RecoveryScore > 0 {
+		recoveryBuffer = input.RecoveryScore * 0.35
+	}
+	socialCost := clamp01(faceThreat + (1-relationshipHealth)*0.5 - recoveryBuffer)
 	actionPressure := clamp01(max3(expectation.PredictedTradability, clamp01(sig.Urgency), rank*(1-socialCost*0.4)))
 
 	basis := []string{
@@ -117,6 +126,78 @@ func BuildAppraisalState(sig signal.Signal, expectation *model.ExpectationState,
 		RelationshipHealth:  relationshipHealth,
 		Basis:               basis,
 	}
+}
+
+func BuildActionSelectionState(expectation *model.ExpectationState, appraisal *model.AppraisalState, input *model.CollaborationInput) *model.ActionSelectionState {
+	if expectation == nil || appraisal == nil {
+		return nil
+	}
+
+	peerTrust := 0.0
+	requestedAction := ""
+	if input != nil {
+		peerTrust = clamp01(input.RelationshipTrust)
+		requestedAction = strings.TrimSpace(strings.ToLower(input.RequestedAction))
+	}
+
+	baseSuccessProbability := clamp01(
+		0.35*expectation.PredictedReliability +
+			0.30*expectation.PredictedTradability +
+			0.20*appraisal.ActionPressure +
+			0.15*peerTrust,
+	)
+
+	policy := activeActionPolicy()
+	best := model.ActionSelectionState{
+		Domain:             expectation.Domain,
+		RecommendedAction:  "ignore",
+		SuccessProbability: baseSuccessProbability,
+		GoalValue:          0,
+		SocialCost:         appraisal.SocialCost,
+		ExpectedUtility:    -1,
+	}
+	for _, rule := range policy.Actions {
+		matchScore := 0.0
+		if requestedAction != "" && requestedAction == rule.Name {
+			matchScore = 1.0
+		}
+		successProbability := clamp01(baseSuccessProbability + matchScore*rule.PeerWeight*0.20)
+		goalValue := clamp01(rule.BaseGoalValue + 0.20*expectation.PredictedImportance + 0.15*appraisal.ActionPressure + matchScore*rule.PeerWeight)
+		thresholdPenalty := 0.0
+		if expectation.PredictedImportance < rule.ImportanceThreshold {
+			thresholdPenalty += rule.ImportanceThreshold - expectation.PredictedImportance
+		}
+		if expectation.PredictedReliability < rule.ReliabilityThreshold {
+			thresholdPenalty += rule.ReliabilityThreshold - expectation.PredictedReliability
+		}
+		if expectation.PredictedTradability < rule.TradabilityThreshold {
+			thresholdPenalty += rule.TradabilityThreshold - expectation.PredictedTradability
+		}
+		thresholdPenalty = clamp01(thresholdPenalty)
+		expectedUtility := successProbability*goalValue + appraisePressureBonus(appraisal.ActionPressure, rule.PressureWeight) - appraisal.SocialCost*rule.SocialPenaltyWeight - thresholdPenalty
+		if expectedUtility > best.ExpectedUtility {
+			best = model.ActionSelectionState{
+				Domain:               expectation.Domain,
+				RecommendedAction:    rule.Name,
+				SuccessProbability:   successProbability,
+				GoalValue:            goalValue,
+				SocialCost:           appraisal.SocialCost,
+				ExpectedUtility:      expectedUtility,
+				RequestedActionMatch: matchScore,
+				Basis: []string{
+					fmt.Sprintf("importance=%.2f", expectation.PredictedImportance),
+					fmt.Sprintf("reliability=%.2f", expectation.PredictedReliability),
+					fmt.Sprintf("tradability=%.2f", expectation.PredictedTradability),
+					fmt.Sprintf("action_pressure=%.2f", appraisal.ActionPressure),
+					fmt.Sprintf("social_cost=%.2f", appraisal.SocialCost),
+					fmt.Sprintf("peer_trust=%.2f", peerTrust),
+					fmt.Sprintf("threshold_penalty=%.2f", thresholdPenalty),
+				},
+			}
+		}
+	}
+	best.ExpectedUtility = clampSigned(best.ExpectedUtility)
+	return &best
 }
 
 func BuildExpectationContext(expectation *model.ExpectationState, indent string) string {
@@ -167,6 +248,28 @@ func BuildAppraisalContext(appraisal *model.AppraisalState, indent string) strin
 	return strings.Join(lines, "\n")
 }
 
+func BuildActionSelectionContext(selection *model.ActionSelectionState, indent string) string {
+	if selection == nil {
+		return ""
+	}
+	lines := []string{
+		"Action selection context:",
+		fmt.Sprintf("%saction.domain=%s", indent, selection.Domain),
+		fmt.Sprintf("%saction.recommended=%s", indent, selection.RecommendedAction),
+		fmt.Sprintf("%saction.success_probability=%.2f", indent, selection.SuccessProbability),
+		fmt.Sprintf("%saction.goal_value=%.2f", indent, selection.GoalValue),
+		fmt.Sprintf("%saction.social_cost=%.2f", indent, selection.SocialCost),
+		fmt.Sprintf("%saction.expected_utility=%.2f", indent, selection.ExpectedUtility),
+	}
+	if selection.RequestedActionMatch > 0 {
+		lines = append(lines, fmt.Sprintf("%saction.requested_action_match=%.2f", indent, selection.RequestedActionMatch))
+	}
+	if len(selection.Basis) > 0 {
+		lines = append(lines, fmt.Sprintf("%saction.basis=%s", indent, strings.Join(SampleStrings(selection.Basis, 8), "; ")))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func expectationAction(importance, reliability, tradability float64) string {
 	switch {
 	case tradability >= 0.68 && reliability >= 0.60:
@@ -198,6 +301,20 @@ func appraisalModerators(sig signal.Signal, expectation *model.ExpectationState,
 func relationshipHealth(predictedNovelty, power, distance float64) float64 {
 	currentTension := clamp01((power*(1-distance) + predictedNovelty) / 2)
 	return clamp01(1 - math.Abs(currentTension-0.50))
+}
+
+func appraisePressureBonus(actionPressure, pressureWeight float64) float64 {
+	return clamp01(actionPressure) * clamp01(pressureWeight)
+}
+
+func clampSigned(value float64) float64 {
+	if value > 1 {
+		return 1
+	}
+	if value < -1 {
+		return -1
+	}
+	return value
 }
 
 func deriveNovelty(sig signal.Signal) float64 {

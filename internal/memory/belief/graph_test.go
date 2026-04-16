@@ -80,6 +80,7 @@ func TestPeerBeliefUpdates(t *testing.T) {
 		t.Fatalf("expected peer success count 1, got %+v", state)
 	}
 	baselineTrust := state.Trust
+	baselineHealth := state.RelationshipHealth
 
 	graph.ApplyPeerFailure(key, 1.0)
 	state, ok = graph.LookupPeer("desk-geo-a", "desk-macro-a", "macro", regime.Key())
@@ -92,8 +93,47 @@ func TestPeerBeliefUpdates(t *testing.T) {
 	if state.Trust >= baselineTrust {
 		t.Fatalf("expected peer trust to fall after failure, got %.4f >= %.4f", state.Trust, baselineTrust)
 	}
+	if state.RelationshipHealth >= baselineHealth {
+		t.Fatalf("expected relationship health to fall after failure, got %.4f >= %.4f", state.RelationshipHealth, baselineHealth)
+	}
 	if len(graph.AllPeerBeliefs()) != 1 {
 		t.Fatalf("expected one peer belief record, got %d", len(graph.AllPeerBeliefs()))
+	}
+}
+
+func TestPeerBeliefRecoveryAndViolations(t *testing.T) {
+	graph := NewGraph()
+	regime := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "risk_on",
+		Liquidity:  "normal",
+	}
+
+	key := PeerBeliefKey("desk-geo-a", "desk-macro-a", "macro", regime.Key())
+	graph.ApplyPeerSuccessWithContext(key, 1.25, true, 0.55)
+
+	state, ok := graph.LookupPeer("desk-geo-a", "desk-macro-a", "macro", regime.Key())
+	if !ok {
+		t.Fatal("expected peer belief to be created")
+	}
+	if state.PositiveRecoveries != 1 {
+		t.Fatalf("expected one positive recovery, got %+v", state)
+	}
+	if state.RecoveryScore <= 0 {
+		t.Fatalf("expected recovery score increase, got %+v", state)
+	}
+	if state.RelationshipHealth <= 0.50 {
+		t.Fatalf("expected relationship health above default, got %+v", state)
+	}
+
+	graph.ApplyPeerFailureWithContext(key, 1.10, 0.35)
+	state, ok = graph.LookupPeer("desk-geo-a", "desk-macro-a", "macro", regime.Key())
+	if !ok {
+		t.Fatal("expected peer belief to remain available")
+	}
+	if state.NegativeViolations != 1 {
+		t.Fatalf("expected one negative violation, got %+v", state)
 	}
 }
 
@@ -158,6 +198,9 @@ func TestLoadPeerAndSourceBeliefs(t *testing.T) {
 	peer, ok := graph.LookupPeer("desk-geo-a", "desk-macro-a", "macro", "medium:neutral:risk_on:normal")
 	if !ok || peer.Trust != 0.71 {
 		t.Fatalf("expected loaded peer belief, got %+v", peer)
+	}
+	if peer.RelationshipHealth != 0.50 || peer.RecoveryScore != 0 {
+		t.Fatalf("expected peer relationship defaults, got %+v", peer)
 	}
 
 	source, ok := graph.LookupSource("thomson_reuters", "reuters.com", "macro", "ar", "mena")

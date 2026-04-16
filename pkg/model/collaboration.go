@@ -51,19 +51,28 @@ type CollaborationInput struct {
 	Summary                string               `json:"summary,omitempty"`
 	RelationshipTrust      float64              `json:"relationship_trust,omitempty"`
 	RelationshipConfidence float64              `json:"relationship_confidence,omitempty"`
+	RelationshipHealth     float64              `json:"relationship_health,omitempty"`
+	RecoveryScore          float64              `json:"recovery_score,omitempty"`
+	AppraisalClass         string               `json:"appraisal_class,omitempty"`
+	FaceThreatScore        float64              `json:"face_threat_score,omitempty"`
+	SocialCost             float64              `json:"social_cost,omitempty"`
 }
 
 type DeskRelationshipBelief struct {
-	Key           string    `json:"key"`
-	OriginDesk    string    `json:"origin_desk"`
-	ReceivingDesk string    `json:"receiving_desk"`
-	Domain        string    `json:"domain"`
-	Regime        string    `json:"regime"`
-	Trust         float64   `json:"trust"`
-	Confidence    float64   `json:"confidence"`
-	SuccessCount  int       `json:"success_count"`
-	FailureCount  int       `json:"failure_count"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Key                string    `json:"key"`
+	OriginDesk         string    `json:"origin_desk"`
+	ReceivingDesk      string    `json:"receiving_desk"`
+	Domain             string    `json:"domain"`
+	Regime             string    `json:"regime"`
+	Trust              float64   `json:"trust"`
+	Confidence         float64   `json:"confidence"`
+	RelationshipHealth float64   `json:"relationship_health"`
+	RecoveryScore      float64   `json:"recovery_score"`
+	PositiveRecoveries int       `json:"positive_recoveries"`
+	NegativeViolations int       `json:"negative_violations"`
+	SuccessCount       int       `json:"success_count"`
+	FailureCount       int       `json:"failure_count"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 func DecodeColleagueMessage(raw json.RawMessage) (ColleagueMessage, bool) {

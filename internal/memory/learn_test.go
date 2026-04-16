@@ -206,9 +206,14 @@ func TestLearnWorkerUpdatesPeerBeliefsFromCollaborationInput(t *testing.T) {
 			Currency: "USD",
 		},
 		CollaborationInput: &model.CollaborationInput{
-			OriginDesk:     "desk-geo-a",
-			OriginDomain:   "macro",
-			OriginThesisID: "thesis-root",
+			OriginDesk:         "desk-geo-a",
+			OriginDomain:       "macro",
+			OriginThesisID:     "thesis-root",
+			AppraisalClass:     "negative_surprise",
+			FaceThreatScore:    0.32,
+			SocialCost:         0.28,
+			RecoveryScore:      0.12,
+			RelationshipHealth: 0.58,
 		},
 	}
 	outcome := &model.ThesisOutcome{
@@ -238,6 +243,12 @@ func TestLearnWorkerUpdatesPeerBeliefsFromCollaborationInput(t *testing.T) {
 	if peer.SuccessCount != 1 {
 		t.Fatalf("expected peer belief success count to be 1, got %+v", peer)
 	}
+	if peer.PositiveRecoveries != 1 || peer.RecoveryScore <= 0 {
+		t.Fatalf("expected recovery context to be learned, got %+v", peer)
+	}
+	if peer.RelationshipHealth <= 0.50 {
+		t.Fatalf("expected relationship health to improve, got %+v", peer)
+	}
 	if outcome.Attribution == nil {
 		t.Fatal("expected attribution to remain attached")
 	}
@@ -250,6 +261,61 @@ func TestLearnWorkerUpdatesPeerBeliefsFromCollaborationInput(t *testing.T) {
 	}
 	if !foundPeerUpdate {
 		t.Fatalf("expected peer_edge competence update, got %+v", outcome.Attribution.CompetenceUpdates)
+	}
+}
+
+func TestLearnWorkerRecordsPeerViolationsFromNegativeOutcome(t *testing.T) {
+	graph := belief.NewGraph()
+	worker := NewLearnWorker(graph, nil)
+
+	thesis := &model.Thesis{
+		ID:           "thesis-4b",
+		DeskID:       "desk-macro-a",
+		Domain:       "macro",
+		Strategy:     "macro",
+		EntryPrice:   100,
+		StopLoss:     95,
+		PositionSize: 10,
+		Instrument: model.Instrument{
+			Symbol:   "TLT",
+			SecType:  "STK",
+			Currency: "USD",
+		},
+		CollaborationInput: &model.CollaborationInput{
+			OriginDesk:      "desk-geo-a",
+			OriginDomain:    "macro",
+			OriginThesisID:  "thesis-root",
+			AppraisalClass:  "negative_surprise",
+			FaceThreatScore: 0.41,
+			SocialCost:      0.33,
+		},
+	}
+	outcome := &model.ThesisOutcome{
+		Profitable:  false,
+		RealizedPnL: -180,
+		Attribution: &model.OutcomeAttribution{
+			TruthEdge:      -0.70,
+			TimingEdge:     -0.20,
+			ExpressionEdge: -0.10,
+			ExecutionEdge:  -0.05,
+			LuckEstimate:   0.05,
+		},
+	}
+	regime := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "risk_on",
+		Liquidity:  "normal",
+	}
+
+	worker.ProcessOutcome(thesis, outcome, regime)
+
+	peer, ok := graph.LookupPeer("desk-geo-a", "desk-macro-a", "macro", regime.Key())
+	if !ok {
+		t.Fatal("expected peer belief to be updated")
+	}
+	if peer.FailureCount != 1 || peer.NegativeViolations != 1 {
+		t.Fatalf("expected negative peer violation to be learned, got %+v", peer)
 	}
 }
 

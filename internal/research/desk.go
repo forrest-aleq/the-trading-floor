@@ -20,131 +20,45 @@ import (
 
 // Desk orchestrates thesis formation through the trio conversation
 type Desk struct {
-	log           *slog.Logger
-	llm           *llm.Router
-	minConviction float64
-	marketContext *marketcontext.Service
-	selectedModel string
-	responseMode  structuredResponseMode
-	retryModel    string
-	compilerModel string
+	log            *slog.Logger
+	llm            *llm.Router
+	minConviction  float64
+	marketContext  *marketcontext.Service
+	selectedModel  string
+	responseMode   structuredResponseMode
+	retryModel     string
+	compilerModel  string
+	systemPrompt   string
+	fastPrompt     string
+	compactPrefix  string
+	thoughtPrefix  string
+	compilerPrompt string
 }
 
 func NewDesk(llmRouter *llm.Router, minConviction float64) *Desk {
 	if minConviction == 0 {
 		minConviction = 0.65
 	}
+	policy := activePromptPolicy()
 	return &Desk{
-		log:           slog.Default().With("component", "research"),
-		llm:           llmRouter,
-		minConviction: minConviction,
-		selectedModel: researchSelectedModel(),
-		responseMode:  detectStructuredResponseMode(os.Getenv("RESEARCH_RESPONSE_MODE"), researchSelectedModel()),
-		retryModel:    structuredRetryModel("RESEARCH_RETRY_MODEL", structuredCompilerModel("RESEARCH_COMPILER_MODEL"), researchSelectedModel()),
-		compilerModel: structuredCompilerModel("RESEARCH_COMPILER_MODEL"),
+		log:            slog.Default().With("component", "research"),
+		llm:            llmRouter,
+		minConviction:  minConviction,
+		selectedModel:  researchSelectedModel(),
+		responseMode:   detectStructuredResponseMode(os.Getenv("RESEARCH_RESPONSE_MODE"), researchSelectedModel()),
+		retryModel:     structuredRetryModel("RESEARCH_RETRY_MODEL", structuredCompilerModel("RESEARCH_COMPILER_MODEL"), researchSelectedModel()),
+		compilerModel:  structuredCompilerModel("RESEARCH_COMPILER_MODEL"),
+		systemPrompt:   policy.researchPrompt,
+		fastPrompt:     policy.researchFastPrompt,
+		compactPrefix:  policy.researchUserCompactPrefix,
+		thoughtPrefix:  policy.researchThoughtPrefix,
+		compilerPrompt: policy.researchCompilerPrompt,
 	}
 }
 
 func (d *Desk) SetMarketContextService(service *marketcontext.Service) {
 	d.marketContext = service
 }
-
-const researchPrompt = `You are a trading research desk. Given this opportunity, build a rigorous trading thesis.
-
-You must determine:
-1. STRUCTURE: single, bull_call_spread, or bear_put_spread
-2. INSTRUMENT / LEGS: What exactly to trade. Use a single instrument for simple trades. Use explicit legs only for debit vertical spreads.
-2. DIRECTION: Long or short
-3. ENTRY: Target entry price
-4. TARGET: Price target (where to take profit)
-5. STOP: Stop loss level
-6. CONVICTION: 0.0-1.0 how confident you are
-7. TIME HORIZON: How long should this trade be held (hours, days, weeks)
-8. EVIDENCE: What supports this thesis (list 3-5 pieces of evidence)
-9. COUNTER ARGUMENTS: What could go wrong (list 2-3 risks)
-10. KILL RULES: Conditions that would invalidate the thesis
-11. SURPRISE ASSESSMENT: score how novel and underpriced this setup is
-
-Think like Bill Ackman. Deep conviction requires deep analysis. Don't trade unless you have an edge.
-If you choose a spread, it must be a defined-risk debit vertical:
-- bull_call_spread = long lower-strike call + short higher-strike call, same expiry
-- bear_put_spread = long higher-strike put + short lower-strike put, same expiry
-Do not propose condors, calendars, straddles, pairs, baskets, naked shorts, or undefined-risk structures yet.
-
-Respond in JSON:
-{
-  "structure": "single|bull_call_spread|bear_put_spread",
-  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
-  "legs": [
-    {
-      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
-      "direction": "long|short",
-      "ratio": 1,
-      "entry_price": 0.0
-    }
-  ],
-  "direction": "long",
-  "entry_price": 0.0,
-  "target_price": 0.0,
-  "stop_loss": 0.0,
-  "conviction": 0.0,
-  "time_horizon_hours": 0,
-  "position_size_pct": 0.0,
-  "strategy": "scalper|event|macro|fundamental|contrarian|tail",
-  "surprise_assessment": {
-    "truth_score": 0.0,
-    "novelty_score": 0.0,
-    "priced_in_score": 0.0,
-    "reaction_gap_score": 0.0,
-    "unmoved_asset_score": 0.0,
-    "summary": ""
-  },
-  "evidence": ["...", "..."],
-  "counter_args": ["...", "..."],
-  "kill_rules": [{"condition": "...", "threshold": 0.0, "action": "close|reduce|alert"}],
-  "reasoning": "..."
-}`
-
-const researchFastPrompt = `Return one final JSON object only.
-Use exactly this schema and keep the reasoning short.
-If the setup is weak or ambiguous, still return a conservative thesis with low conviction and small size.
-
-JSON schema:
-{
-  "structure": "single|bull_call_spread|bear_put_spread",
-  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
-  "legs": [
-    {
-      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
-      "direction": "long|short",
-      "ratio": 1,
-      "entry_price": 0.0
-    }
-  ],
-  "direction": "long|short",
-  "entry_price": 0.0,
-  "target_price": 0.0,
-  "stop_loss": 0.0,
-  "conviction": 0.0,
-  "time_horizon_hours": 0,
-  "position_size_pct": 0.0,
-  "strategy": "scalper|event|macro|fundamental|contrarian|tail",
-  "surprise_assessment": {
-    "truth_score": 0.0,
-    "novelty_score": 0.0,
-    "priced_in_score": 0.0,
-    "reaction_gap_score": 0.0,
-    "unmoved_asset_score": 0.0,
-    "summary": ""
-  },
-  "evidence": ["...", "..."],
-  "counter_args": ["...", "..."],
-  "kill_rules": [{"condition": "...", "threshold": 0.0, "action": "close|reduce|alert"}],
-  "reasoning": "..."
-}`
-
-const researchUserCompactPrefix = `Prioritize the signal text, exact catalyst, instrument choice, and risk rails.
-Do not restate metadata that is already obvious.`
 
 var (
 	researchMaxTokens         = readStructuredIntEnv("RESEARCH_MAX_TOKENS", 1024)
@@ -154,50 +68,6 @@ var (
 	researchCompilerTimeout   = readStructuredDurationEnv("RESEARCH_COMPILER_TIMEOUT", 35*time.Second)
 	researchCompilerMaxTokens = readStructuredIntEnv("RESEARCH_COMPILER_MAX_TOKENS", 900)
 )
-
-const researchThoughtPrefix = `Do not restate the request, schema, or instructions.
-Think if useful, but keep it concise.
-You must end with exactly one JSON object matching the schema below.`
-
-const researchCompilerPrompt = `You are a trading thesis compiler.
-You will receive the original research task and a freeform reasoning transcript from a trading research desk.
-Return one final JSON object only. No prose, no markdown, no thinking.
-
-If the transcript does not support a valid trade thesis, return a conservative thesis with low conviction and narrow position sizing, but still satisfy the schema.
-
-JSON schema:
-{
-  "structure": "single|bull_call_spread|bear_put_spread",
-  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
-  "legs": [
-    {
-      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
-      "direction": "long|short",
-      "ratio": 1,
-      "entry_price": 0.0
-    }
-  ],
-  "direction": "long",
-  "entry_price": 0.0,
-  "target_price": 0.0,
-  "stop_loss": 0.0,
-  "conviction": 0.0,
-  "time_horizon_hours": 0,
-  "position_size_pct": 0.0,
-  "strategy": "scalper|event|macro|fundamental|contrarian|tail",
-  "surprise_assessment": {
-    "truth_score": 0.0,
-    "novelty_score": 0.0,
-    "priced_in_score": 0.0,
-    "reaction_gap_score": 0.0,
-    "unmoved_asset_score": 0.0,
-    "summary": ""
-  },
-  "evidence": ["...", "..."],
-  "counter_args": ["...", "..."],
-  "kill_rules": [{"condition": "...", "threshold": 0.0, "action": "close|reduce|alert"}],
-  "reasoning": "..."
-}`
 
 type Investigation struct {
 	Thesis     *model.Thesis
@@ -352,7 +222,7 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 
 func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactPrompt string) (string, error) {
 	if d.responseMode == structuredResponseModeThought {
-		thoughtPrompt := addTerminalJSONContract(researchThoughtPrefix + "\n\n" + researchPrompt)
+		thoughtPrompt := addTerminalJSONContract(d.thoughtPrefix + "\n\n" + d.systemPrompt)
 		primaryCtx, cancel := withStructuredTimeout(ctx, researchThoughtTimeout)
 		resp, err := d.llm.AskWithLimit(primaryCtx, llm.TierAnalysis, thoughtPrompt, prompt, researchMaxTokens, 0.2)
 		cancel()
@@ -389,7 +259,7 @@ func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactP
 		}
 		return resp, nil
 	}
-	return d.llm.AskJSONWithLimit(ctx, llm.TierAnalysis, researchPrompt, prompt, researchMaxTokens, 0.2)
+	return d.llm.AskJSONWithLimit(ctx, llm.TierAnalysis, d.systemPrompt, prompt, researchMaxTokens, 0.2)
 }
 
 func (d *Desk) retryStructuredJSON(ctx context.Context, prompt string) (string, error) {
@@ -399,7 +269,7 @@ func (d *Desk) retryStructuredJSON(ctx context.Context, prompt string) (string, 
 	}
 	req := llm.Request{
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: researchFastPrompt},
+			{Role: llm.RoleSystem, Content: d.fastPrompt},
 			{Role: llm.RoleUser, Content: prompt},
 		},
 		Model:       d.retryModel,
@@ -421,7 +291,7 @@ func (d *Desk) compileResearchJSON(ctx context.Context, originalPrompt, rawRespo
 
 	req := llm.Request{
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: researchCompilerPrompt},
+			{Role: llm.RoleSystem, Content: d.compilerPrompt},
 			{Role: llm.RoleUser, Content: fmt.Sprintf("Original research task:\n%s\n\nResearch reasoning transcript:\n%s", originalPrompt, truncateForCompiler(rawResponse, 1200))},
 		},
 		Model:       d.compilerModel,
@@ -727,7 +597,7 @@ func truncateForLog(value string, max int) string {
 func (d *Desk) buildResearchPrompt(opp *model.Opportunity, sig signal.Signal, marketCtx *model.MarketContext, compact bool) string {
 	var sb strings.Builder
 	if compact {
-		sb.WriteString(researchUserCompactPrefix + "\n\n")
+		sb.WriteString(d.compactPrefix + "\n\n")
 	}
 	sb.WriteString(fmt.Sprintf("Opportunity (score: %.0f, urgency: %.2f, category: %s):\n", opp.Score, opp.Urgency, opp.Category))
 	sb.WriteString(fmt.Sprintf("Instruments: %v\n", instrumentNames(opp.Instruments)))

@@ -12,6 +12,21 @@ import (
 //go:embed prosecution_system.txt
 var embeddedProsecutionPrompt string
 
+//go:embed research_system.txt
+var embeddedResearchPrompt string
+
+//go:embed research_fast_system.txt
+var embeddedResearchFastPrompt string
+
+//go:embed research_user_compact_prefix.txt
+var embeddedResearchUserCompactPrefix string
+
+//go:embed research_thought_prefix.txt
+var embeddedResearchThoughtPrefix string
+
+//go:embed research_compiler_prompt.txt
+var embeddedResearchCompilerPrompt string
+
 //go:embed prosecution_thought_prefix.txt
 var embeddedProsecutionThoughtPrefix string
 
@@ -28,6 +43,11 @@ var embeddedCouncilCompilerPrompt string
 var embeddedCouncilVoices []byte
 
 type promptPolicy struct {
+	researchPrompt            string
+	researchFastPrompt        string
+	researchUserCompactPrefix string
+	researchThoughtPrefix     string
+	researchCompilerPrompt    string
 	prosecutionPrompt         string
 	prosecutionThoughtPrefix  string
 	prosecutionCompilerPrompt string
@@ -58,6 +78,11 @@ func loadPromptPolicy() (promptPolicy, error) {
 		return promptPolicy{}, err
 	}
 	return promptPolicy{
+		researchPrompt:            loadPromptText("RESEARCH_PROMPT_FILE", embeddedResearchPrompt),
+		researchFastPrompt:        loadPromptText("RESEARCH_FAST_PROMPT_FILE", embeddedResearchFastPrompt),
+		researchUserCompactPrefix: loadPromptText("RESEARCH_COMPACT_PREFIX_FILE", embeddedResearchUserCompactPrefix),
+		researchThoughtPrefix:     loadPromptText("RESEARCH_THOUGHT_PREFIX_FILE", embeddedResearchThoughtPrefix),
+		researchCompilerPrompt:    loadPromptText("RESEARCH_COMPILER_PROMPT_FILE", embeddedResearchCompilerPrompt),
 		prosecutionPrompt:         loadPromptText("PROSECUTION_PROMPT_FILE", embeddedProsecutionPrompt),
 		prosecutionThoughtPrefix:  loadPromptText("PROSECUTION_THOUGHT_PREFIX_FILE", embeddedProsecutionThoughtPrefix),
 		prosecutionCompilerPrompt: loadPromptText("PROSECUTION_COMPILER_PROMPT_FILE", embeddedProsecutionCompilerPrompt),

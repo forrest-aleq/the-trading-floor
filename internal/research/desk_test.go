@@ -114,7 +114,7 @@ func TestInvestigateUsesThoughtModeForQwenResearch(t *testing.T) {
 	if client.requests[0].JSONMode {
 		t.Fatal("expected Qwen research request to avoid strict JSON mode")
 	}
-	if got := client.requests[0].Messages[0].Content; got == researchPrompt {
+	if got := client.requests[0].Messages[0].Content; got == desk.systemPrompt {
 		t.Fatal("expected thought-friendly research prompt prefix")
 	}
 	if got := client.requests[0].Messages[0].Content; !containsTerminalContract(got) {

@@ -147,6 +147,7 @@ var (
 	researchRetryMaxTokens    = readStructuredIntEnv("RESEARCH_RETRY_MAX_TOKENS", 384)
 	researchCompilerTimeout   = readStructuredDurationEnv("RESEARCH_COMPILER_TIMEOUT", 35*time.Second)
 	researchCompilerMaxTokens = readStructuredIntEnv("RESEARCH_COMPILER_MAX_TOKENS", 900)
+	researchPricingTimeout    = readStructuredDurationEnv("RESEARCH_PRICING_TIMEOUT", 1500*time.Millisecond)
 	researchDefaultPosition   = readStructuredFloatEnv("RESEARCH_DEFAULT_POSITION_SIZE_PCT", 0.01)
 )
 
@@ -310,7 +311,9 @@ func (d *Desk) HydrateThesisPricing(ctx context.Context, thesis *model.Thesis) {
 		return
 	}
 
-	enriched := d.marketContext.BuildThesisContext(ctx, thesis)
+	pricingCtx, cancel := withStructuredBudgetFraction(ctx, researchPricingTimeout, 0.2)
+	defer cancel()
+	enriched := d.marketContext.BuildThesisContext(pricingCtx, thesis)
 	if enriched == nil {
 		return
 	}

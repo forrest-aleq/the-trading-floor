@@ -35,6 +35,19 @@ func (s stubPriceView) BestEffortPrice(_ context.Context, inst model.Instrument)
 	return resolved, s.price, true
 }
 
+type blockingPriceView struct{}
+
+func (blockingPriceView) LatestPrice(model.Instrument) (float64, bool) { return 0, false }
+
+func (blockingPriceView) PriceChange(model.Instrument, time.Duration) (float64, bool) {
+	return 0, false
+}
+
+func (blockingPriceView) BestEffortPrice(ctx context.Context, _ model.Instrument) (model.Instrument, float64, bool) {
+	<-ctx.Done()
+	return model.Instrument{}, 0, false
+}
+
 func TestBuildOpportunityContextIncludesConsensusAndPricePath(t *testing.T) {
 	service := NewService(stubPriceView{
 		price: 101.25,
@@ -111,5 +124,32 @@ func TestBuildThesisContextRehydratesPriceFromResolvedInstrument(t *testing.T) {
 	}
 	if !ctx.ConsensusAvailable {
 		t.Fatal("expected prior consensus fields to be preserved")
+	}
+}
+
+func TestBuildThesisContextRespectsCallerDeadline(t *testing.T) {
+	service := NewService(blockingPriceView{})
+	thesis := &model.Thesis{
+		Instrument: model.Instrument{
+			Symbol:   "SPY",
+			SecType:  "STK",
+			Currency: "USD",
+			Exchange: "SMART",
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	enriched := service.BuildThesisContext(ctx, thesis)
+	if enriched == nil {
+		t.Fatal("expected thesis context")
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("expected market context build to respect deadline, took %s", elapsed)
+	}
+	if enriched.CurrentPrice != 0 {
+		t.Fatalf("expected no hydrated price, got %.2f", enriched.CurrentPrice)
 	}
 }

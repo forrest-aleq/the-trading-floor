@@ -13,6 +13,7 @@ func ReloadRuntimeConfig() {
 	researchRetryMaxTokens = readStructuredIntEnv("RESEARCH_RETRY_MAX_TOKENS", 384)
 	researchCompilerTimeout = readStructuredDurationEnv("RESEARCH_COMPILER_TIMEOUT", 35*time.Second)
 	researchCompilerMaxTokens = readStructuredIntEnv("RESEARCH_COMPILER_MAX_TOKENS", 900)
+	researchPricingTimeout = readStructuredDurationEnv("RESEARCH_PRICING_TIMEOUT", 1500*time.Millisecond)
 	researchDefaultPosition = readStructuredFloatEnv("RESEARCH_DEFAULT_POSITION_SIZE_PCT", 0.01)
 
 	prosecutionMaxTokens = readStructuredIntEnv("PROSECUTION_MAX_TOKENS", 768)

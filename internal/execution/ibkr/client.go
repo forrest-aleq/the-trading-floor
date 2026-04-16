@@ -159,9 +159,9 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 	resolvedLegs := append([]model.TradeLeg(nil), order.Legs...)
 	var err error
 	if order.IsMultiLeg() {
-		contract, resolvedLegs, err = c.buildComboContract(order)
+		contract, resolvedLegs, err = c.buildComboContract(ctx, order)
 	} else {
-		contract, err = c.qualifyContract(order.Instrument)
+		contract, err = c.qualifyContract(ctx, order.Instrument)
 	}
 	if err != nil {
 		return nil, err
@@ -425,7 +425,7 @@ func (c *Client) ReqMarketData(ctx context.Context, inst model.Instrument) (*Mar
 		return nil, fmt.Errorf("not connected to IBKR")
 	}
 
-	contract, err := c.qualifyContract(inst)
+	contract, err := c.qualifyContract(ctx, inst)
 	if err != nil {
 		return nil, err
 	}
@@ -476,7 +476,7 @@ func (c *Client) HistoricalBars(ctx context.Context, inst model.Instrument, end 
 		return nil, fmt.Errorf("not connected to IBKR")
 	}
 
-	contract, err := c.qualifyContract(inst)
+	contract, err := c.qualifyContract(ctx, inst)
 	if err != nil {
 		return nil, err
 	}
@@ -521,18 +521,34 @@ func (c *Client) HistoricalBars(ctx context.Context, inst model.Instrument, end 
 	}
 }
 
-func (c *Client) qualifyContract(inst model.Instrument) (*ibsync.Contract, error) {
+func (c *Client) qualifyContract(ctx context.Context, inst model.Instrument) (*ibsync.Contract, error) {
 	ib := c.conn.IB()
 	if ib == nil {
 		return nil, fmt.Errorf("not connected to IBKR")
 	}
 
 	contract := BuildContract(inst)
-	if err := ib.QualifyContract(contract); err != nil {
+	waitCtx, cancel := withDefaultTimeout(ctx, 8*time.Second)
+	defer cancel()
+	if err := runBlockingIBCall(waitCtx, func() error { return ib.QualifyContract(contract) }); err != nil {
 		return nil, fmt.Errorf("qualify contract %s: %w", inst.Symbol, err)
 	}
 
 	return contract, nil
+}
+
+func runBlockingIBCall(ctx context.Context, fn func() error) error {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fn()
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		return err
+	}
 }
 
 func historicalWhatToShow(inst model.Instrument) string {
@@ -544,7 +560,7 @@ func historicalWhatToShow(inst model.Instrument) string {
 	}
 }
 
-func (c *Client) buildComboContract(order model.Order) (*ibsync.Contract, []model.TradeLeg, error) {
+func (c *Client) buildComboContract(ctx context.Context, order model.Order) (*ibsync.Contract, []model.TradeLeg, error) {
 	if len(order.Legs) < 2 {
 		return nil, nil, fmt.Errorf("multi-leg order requires at least two legs")
 	}
@@ -565,7 +581,7 @@ func (c *Client) buildComboContract(order model.Order) (*ibsync.Contract, []mode
 	resolved := make([]model.TradeLeg, 0, len(order.Legs))
 	combo.ComboLegs = make([]ibapi.ComboLeg, 0, len(order.Legs))
 	for _, leg := range order.Legs {
-		qualified, err := c.qualifyContract(leg.Instrument)
+		qualified, err := c.qualifyContract(ctx, leg.Instrument)
 		if err != nil {
 			return nil, nil, fmt.Errorf("qualify combo leg %s: %w", leg.Instrument.Label(), err)
 		}

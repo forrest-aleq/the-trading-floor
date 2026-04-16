@@ -92,3 +92,20 @@ func TestClientConnectStartsReconnectLoopOnlyOnce(t *testing.T) {
 	connects, loops := conn.counts()
 	t.Fatalf("expected two connect attempts and one reconnect loop start, got connects=%d loops=%d", connects, loops)
 }
+
+func TestRunBlockingIBCallRespectsContextDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := runBlockingIBCall(ctx, func() error {
+		<-make(chan struct{})
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("expected blocking call to stop promptly, took %s", elapsed)
+	}
+}

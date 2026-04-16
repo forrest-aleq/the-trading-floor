@@ -169,3 +169,43 @@ func (c *CEO) crowdedFactorPenalties(nav float64, positions []*model.Position) m
 func clampFactor(value float64) float64 {
 	return math.Max(0, math.Min(1, value))
 }
+
+func factorSnapshots(exposures []factorExposure) []model.PortfolioFactorSnapshot {
+	snapshots := make([]model.PortfolioFactorSnapshot, 0, len(exposures))
+	for _, exposure := range exposures {
+		snapshots = append(snapshots, exposure.snapshot())
+	}
+	return snapshots
+}
+
+func (f factorExposure) snapshot() model.PortfolioFactorSnapshot {
+	contributions := make([]model.FactorContributionRecord, 0, len(f.DeskContributions))
+	for _, contribution := range f.DeskContributions {
+		share := 0.0
+		if f.Gross > 0 {
+			share = contribution.Gross / f.Gross
+		}
+		contributions = append(contributions, model.FactorContributionRecord{
+			DeskID:     contribution.DeskID,
+			Domain:     contribution.Domain,
+			Gross:      contribution.Gross,
+			Net:        contribution.Net,
+			GrossShare: share,
+		})
+	}
+	sort.Slice(contributions, func(i, j int) bool {
+		if contributions[i].Gross == contributions[j].Gross {
+			return contributions[i].DeskID < contributions[j].DeskID
+		}
+		return contributions[i].Gross > contributions[j].Gross
+	})
+	return model.PortfolioFactorSnapshot{
+		Factor:        f.Factor,
+		Gross:         f.Gross,
+		Net:           f.Net,
+		GrossPctNAV:   f.GrossPctNAV,
+		NetPctNAV:     f.NetPctNAV,
+		DeskCount:     f.DeskCount,
+		Contributions: contributions,
+	}
+}

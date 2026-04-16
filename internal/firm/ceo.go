@@ -4,8 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hnic/trading-floor/internal/book"
@@ -78,6 +80,7 @@ func (c *CEO) evaluate(ctx context.Context) {
 
 	// Cross-desk correlation check
 	factors := c.checkCorrelation(snapshot, openPositions)
+	c.recordPortfolioFactors(ctx, snapshot, factors)
 
 	// Desk performance evaluation
 	c.evaluateDesks(snapshot)
@@ -302,4 +305,37 @@ func rollingSharpeSafe(returns []float64) float64 {
 
 	// Annualized: mean * 252 / (stddev * sqrt(252))
 	return mean / stddev * math.Sqrt(252)
+}
+
+func (c *CEO) recordPortfolioFactors(ctx context.Context, snap book.PortfolioSnapshot, factors []factorExposure) {
+	if c == nil || c.floor == nil || c.floor.graph == nil || len(factors) == 0 {
+		return
+	}
+
+	observedAt := time.Now().UTC()
+	portfolioID := strings.TrimSpace(os.Getenv("PORTFOLIO_GRAPH_ID"))
+	if portfolioID == "" {
+		portfolioID = "primary"
+	}
+	snapshotID := portfolioID + ":" + strconv.FormatInt(observedAt.UnixNano(), 10)
+	graphSnapshot := model.PortfolioGraphSnapshot{
+		ID:            snapshotID,
+		PortfolioID:   portfolioID,
+		SessionID:     strings.TrimSpace(c.floor.sessionID),
+		NAV:           snap.NAV,
+		Cash:          snap.Cash,
+		GrossExposure: snap.GrossExposure,
+		NetExposure:   snap.NetExposure,
+		MaxDrawdown:   snap.MaxDrawdown,
+		OpenPositions: snap.OpenPositions,
+		ObservedAt:    observedAt,
+		Factors:       factorSnapshots(factors),
+	}
+	if err := c.floor.graph.RecordPortfolioSnapshot(ctx, &graphSnapshot); err != nil {
+		c.log.Warn("persist portfolio factor snapshot failed",
+			"portfolio_id", portfolioID,
+			"snapshot_id", snapshotID,
+			"error", err,
+		)
+	}
 }

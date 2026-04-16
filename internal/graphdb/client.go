@@ -618,6 +618,238 @@ func (c *Client) LoadSourceLeadTimeBeliefs(ctx context.Context) ([]*model.Source
 	return result.([]*model.SourceLeadTimeBelief), nil
 }
 
+func (c *Client) RecordPortfolioSnapshot(ctx context.Context, snapshot *model.PortfolioGraphSnapshot) error {
+	if c == nil || c.driver == nil || snapshot == nil || strings.TrimSpace(snapshot.ID) == "" || strings.TrimSpace(snapshot.PortfolioID) == "" {
+		return nil
+	}
+
+	observedAt := snapshot.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+
+	return c.executeWrite(ctx, func(tx neo4j.ManagedTransaction) error {
+		if err := runQuery(ctx, tx, `
+			MERGE (p:Portfolio {id: $portfolio_id})
+			SET p.session_id = CASE WHEN $session_id = '' THEN p.session_id ELSE $session_id END,
+			    p.updated_at = $observed_at`,
+			map[string]any{
+				"portfolio_id": snapshot.PortfolioID,
+				"session_id":   strings.TrimSpace(snapshot.SessionID),
+				"observed_at":  observedAt,
+			},
+		); err != nil {
+			return err
+		}
+
+		if err := runQuery(ctx, tx, `
+			MERGE (snap:PortfolioSnapshot {id: $snapshot_id})
+			SET snap.portfolio_id = $portfolio_id,
+			    snap.session_id = $session_id,
+			    snap.nav = $nav,
+			    snap.cash = $cash,
+			    snap.gross_exposure = $gross_exposure,
+			    snap.net_exposure = $net_exposure,
+			    snap.max_drawdown = $max_drawdown,
+			    snap.open_positions = $open_positions,
+			    snap.observed_at = $observed_at,
+			    snap.updated_at = $observed_at`,
+			map[string]any{
+				"snapshot_id":    snapshot.ID,
+				"portfolio_id":   snapshot.PortfolioID,
+				"session_id":     strings.TrimSpace(snapshot.SessionID),
+				"nav":            snapshot.NAV,
+				"cash":           snapshot.Cash,
+				"gross_exposure": snapshot.GrossExposure,
+				"net_exposure":   snapshot.NetExposure,
+				"max_drawdown":   snapshot.MaxDrawdown,
+				"open_positions": snapshot.OpenPositions,
+				"observed_at":    observedAt,
+			},
+		); err != nil {
+			return err
+		}
+
+		if err := runQuery(ctx, tx, `
+			MATCH (p:Portfolio {id: $portfolio_id})
+			MATCH (snap:PortfolioSnapshot {id: $snapshot_id})
+			MERGE (p)-[r:HAS_SNAPSHOT]->(snap)
+			SET r.observed_time = $observed_at,
+			    r.decision_time = $observed_at`,
+			map[string]any{
+				"portfolio_id": snapshot.PortfolioID,
+				"snapshot_id":  snapshot.ID,
+				"observed_at":  observedAt,
+			},
+		); err != nil {
+			return err
+		}
+
+		for _, factor := range snapshot.Factors {
+			factorID := strings.TrimSpace(factor.Factor)
+			if factorID == "" {
+				continue
+			}
+			exposureID := snapshot.ID + "|" + factorID
+			if err := runQuery(ctx, tx, `
+				MERGE (f:Factor {id: $factor_id})
+				SET f.updated_at = $observed_at`,
+				map[string]any{
+					"factor_id":   factorID,
+					"observed_at": observedAt,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MERGE (exp:PortfolioFactorExposure {id: $exposure_id})
+				SET exp.factor = $factor_id,
+				    exp.gross = $gross,
+				    exp.net = $net,
+				    exp.gross_pct_nav = $gross_pct_nav,
+				    exp.net_pct_nav = $net_pct_nav,
+				    exp.desk_count = $desk_count,
+				    exp.observed_at = $observed_at,
+				    exp.updated_at = $observed_at`,
+				map[string]any{
+					"exposure_id":   exposureID,
+					"factor_id":     factorID,
+					"gross":         factor.Gross,
+					"net":           factor.Net,
+					"gross_pct_nav": factor.GrossPctNAV,
+					"net_pct_nav":   factor.NetPctNAV,
+					"desk_count":    factor.DeskCount,
+					"observed_at":   observedAt,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MATCH (snap:PortfolioSnapshot {id: $snapshot_id})
+				MATCH (exp:PortfolioFactorExposure {id: $exposure_id})
+				MERGE (snap)-[r:HAS_FACTOR_EXPOSURE]->(exp)
+				SET r.observed_time = $observed_at,
+				    r.decision_time = $observed_at`,
+				map[string]any{
+					"snapshot_id": snapshot.ID,
+					"exposure_id": exposureID,
+					"observed_at": observedAt,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MATCH (exp:PortfolioFactorExposure {id: $exposure_id})
+				MATCH (f:Factor {id: $factor_id})
+				MERGE (exp)-[r:FOR_FACTOR]->(f)
+				SET r.observed_time = $observed_at,
+				    r.decision_time = $observed_at`,
+				map[string]any{
+					"exposure_id": exposureID,
+					"factor_id":   factorID,
+					"observed_at": observedAt,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MATCH (snap:PortfolioSnapshot {id: $snapshot_id})
+				MATCH (f:Factor {id: $factor_id})
+				MERGE (snap)-[r:EXPOSED_TO]->(f)
+				SET r.gross = $gross,
+				    r.net = $net,
+				    r.gross_pct_nav = $gross_pct_nav,
+				    r.net_pct_nav = $net_pct_nav,
+				    r.desk_count = $desk_count,
+				    r.observed_time = $observed_at,
+				    r.decision_time = $observed_at`,
+				map[string]any{
+					"snapshot_id":   snapshot.ID,
+					"factor_id":     factorID,
+					"gross":         factor.Gross,
+					"net":           factor.Net,
+					"gross_pct_nav": factor.GrossPctNAV,
+					"net_pct_nav":   factor.NetPctNAV,
+					"desk_count":    factor.DeskCount,
+					"observed_at":   observedAt,
+				},
+			); err != nil {
+				return err
+			}
+
+			for _, contribution := range factor.Contributions {
+				deskID := strings.TrimSpace(contribution.DeskID)
+				if deskID == "" {
+					continue
+				}
+				contributionID := exposureID + "|" + deskID
+				if err := runQuery(ctx, tx, `
+					MERGE (d:Desk {id: $desk_id})
+					SET d.domain = CASE WHEN $domain = '' THEN d.domain ELSE $domain END,
+					    d.updated_at = $observed_at`,
+					map[string]any{
+						"desk_id":     deskID,
+						"domain":      strings.TrimSpace(contribution.Domain),
+						"observed_at": observedAt,
+					},
+				); err != nil {
+					return err
+				}
+				if err := runQuery(ctx, tx, `
+					MERGE (c:DeskFactorContribution {id: $contribution_id})
+					SET c.desk_id = $desk_id,
+					    c.domain = $domain,
+					    c.gross = $gross,
+					    c.net = $net,
+					    c.gross_share = $gross_share,
+					    c.observed_at = $observed_at,
+					    c.updated_at = $observed_at`,
+					map[string]any{
+						"contribution_id": contributionID,
+						"desk_id":         deskID,
+						"domain":          strings.TrimSpace(contribution.Domain),
+						"gross":           contribution.Gross,
+						"net":             contribution.Net,
+						"gross_share":     contribution.GrossShare,
+						"observed_at":     observedAt,
+					},
+				); err != nil {
+					return err
+				}
+				if err := runQuery(ctx, tx, `
+					MATCH (d:Desk {id: $desk_id})
+					MATCH (c:DeskFactorContribution {id: $contribution_id})
+					MERGE (d)-[r:CONTRIBUTED_TO]->(c)
+					SET r.observed_time = $observed_at,
+					    r.decision_time = $observed_at`,
+					map[string]any{
+						"desk_id":         deskID,
+						"contribution_id": contributionID,
+						"observed_at":     observedAt,
+					},
+				); err != nil {
+					return err
+				}
+				if err := runQuery(ctx, tx, `
+					MATCH (c:DeskFactorContribution {id: $contribution_id})
+					MATCH (exp:PortfolioFactorExposure {id: $exposure_id})
+					MERGE (c)-[r:IN_FACTOR_EXPOSURE]->(exp)
+					SET r.observed_time = $observed_at,
+					    r.decision_time = $observed_at`,
+					map[string]any{
+						"contribution_id": contributionID,
+						"exposure_id":     exposureID,
+						"observed_at":     observedAt,
+					},
+				); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
 func (c *Client) CouncilVoiceTelemetry(ctx context.Context, domain string) (map[string]model.CouncilVoiceStats, error) {
 	stats := make(map[string]model.CouncilVoiceStats)
 	if c == nil || c.driver == nil || strings.TrimSpace(domain) == "" {

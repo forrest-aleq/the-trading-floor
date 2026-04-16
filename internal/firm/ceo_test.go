@@ -85,6 +85,34 @@ func TestCEOCrowdedFactorPenaltiesReduceCrowdedDeskWeights(t *testing.T) {
 	}
 }
 
+func TestFactorSnapshotsPreserveDeskContributionShare(t *testing.T) {
+	exposures := []factorExposure{
+		{
+			Factor:      "theme:rates_duration",
+			Gross:       400_000,
+			Net:         400_000,
+			GrossPctNAV: 40,
+			NetPctNAV:   40,
+			DeskCount:   2,
+			DeskContributions: map[string]factorContribution{
+				"desk-a": {DeskID: "desk-a", Domain: "macro", Gross: 300_000, Net: 300_000},
+				"desk-b": {DeskID: "desk-b", Domain: "tail", Gross: 100_000, Net: 100_000},
+			},
+		},
+	}
+
+	snapshots := factorSnapshots(exposures)
+	if len(snapshots) != 1 {
+		t.Fatalf("expected one factor snapshot, got %d", len(snapshots))
+	}
+	if got := snapshots[0].Contributions[0].GrossShare; got != 0.75 {
+		t.Fatalf("expected first contribution share 0.75, got %.2f", got)
+	}
+	if got := snapshots[0].Contributions[1].GrossShare; got != 0.25 {
+		t.Fatalf("expected second contribution share 0.25, got %.2f", got)
+	}
+}
+
 func openTestPosition(t *testing.T, bk *book.Book, deskID, id, symbol string, direction model.TradeDirection, qty, price float64) *model.Position {
 	t.Helper()
 

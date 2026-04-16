@@ -206,6 +206,23 @@ func main() {
 			}
 		})
 	}
+	if graph != nil {
+		peerBeliefs, err := graph.LoadDeskRelationshipBeliefs(ctx)
+		if err != nil {
+			slog.Warn("load desk relationship beliefs from graph failed", "error", err)
+		} else {
+			beliefGraph.LoadPeerBeliefs(peerBeliefs)
+			slog.Info("desk relationship beliefs hydrated", "count", len(peerBeliefs))
+		}
+
+		sourceBeliefs, err := graph.LoadSourceReliabilityBeliefs(ctx)
+		if err != nil {
+			slog.Warn("load source reliability beliefs from graph failed", "error", err)
+		} else {
+			beliefGraph.LoadSourceBeliefs(sourceBeliefs)
+			slog.Info("source reliability beliefs hydrated", "count", len(sourceBeliefs))
+		}
+	}
 	learnWorker := memory.NewLearnWorker(beliefGraph, engramStore)
 	scan := scanner.NewEngine(llmRouter, 70)
 	researchDesk := research.NewDesk(llmRouter, 0.65)

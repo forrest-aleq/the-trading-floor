@@ -154,6 +154,38 @@ func (g *Graph) Load(states []*model.CompetenceState) {
 	}
 }
 
+func (g *Graph) LoadPeerBeliefs(states []*model.DeskRelationshipBelief) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	for _, incoming := range states {
+		if incoming == nil || incoming.Key == "" {
+			continue
+		}
+		state := clonePeerState(incoming)
+		if state.OriginDesk == "" || state.ReceivingDesk == "" || state.Domain == "" || state.Regime == "" {
+			state.OriginDesk, state.ReceivingDesk, state.Domain, state.Regime = ParsePeerBeliefKey(state.Key)
+		}
+		g.peerStates[state.Key] = state
+	}
+}
+
+func (g *Graph) LoadSourceBeliefs(states []*model.SourceReliabilityBelief) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	for _, incoming := range states {
+		if incoming == nil || incoming.Key == "" {
+			continue
+		}
+		state := cloneSourceState(incoming)
+		if state.OwnerGroup == "" || state.SourceDomain == "" || state.SignalDomain == "" {
+			state.OwnerGroup, state.SourceDomain, state.SignalDomain, state.Language, state.Region = ParseSourceBeliefKey(state.Key)
+		}
+		g.sourceStates[state.Key] = state
+	}
+}
+
 func (g *Graph) Lookup(deskID, capability, context, regime string) (*model.CompetenceState, bool) {
 	key := CompetenceKey(deskID, capability, context, regime)
 	g.mu.RLock()

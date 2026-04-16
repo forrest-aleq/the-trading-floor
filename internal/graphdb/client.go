@@ -338,6 +338,126 @@ func (c *Client) UpsertSourceReliabilityBelief(ctx context.Context, state *model
 	})
 }
 
+func (c *Client) LoadDeskRelationshipBeliefs(ctx context.Context) ([]*model.DeskRelationshipBelief, error) {
+	if c == nil || c.driver == nil {
+		return nil, nil
+	}
+
+	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		rows, err := tx.Run(ctx, `
+			MATCH (b:DeskRelationshipBelief)
+			RETURN b.key AS key,
+			       b.origin_desk AS origin_desk,
+			       b.receiving_desk AS receiving_desk,
+			       b.domain AS domain,
+			       b.regime AS regime,
+			       coalesce(b.trust, 0.0) AS trust,
+			       coalesce(b.confidence, 0.0) AS confidence,
+			       coalesce(b.success_count, 0) AS success_count,
+			       coalesce(b.failure_count, 0) AS failure_count,
+			       b.updated_at AS updated_at
+			ORDER BY b.updated_at DESC`,
+			nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		beliefs := make([]*model.DeskRelationshipBelief, 0)
+		for rows.Next(ctx) {
+			record := rows.Record()
+			updatedAt, _ := record.Get("updated_at")
+			beliefs = append(beliefs, &model.DeskRelationshipBelief{
+				Key:           strings.TrimSpace(toString(recordValue(record, "key"))),
+				OriginDesk:    strings.TrimSpace(toString(recordValue(record, "origin_desk"))),
+				ReceivingDesk: strings.TrimSpace(toString(recordValue(record, "receiving_desk"))),
+				Domain:        strings.TrimSpace(toString(recordValue(record, "domain"))),
+				Regime:        strings.TrimSpace(toString(recordValue(record, "regime"))),
+				Trust:         toFloat(recordValue(record, "trust")),
+				Confidence:    toFloat(recordValue(record, "confidence")),
+				SuccessCount:  toInt(recordValue(record, "success_count")),
+				FailureCount:  toInt(recordValue(record, "failure_count")),
+				UpdatedAt:     toTime(updatedAt),
+			})
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return beliefs, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+	return result.([]*model.DeskRelationshipBelief), nil
+}
+
+func (c *Client) LoadSourceReliabilityBeliefs(ctx context.Context) ([]*model.SourceReliabilityBelief, error) {
+	if c == nil || c.driver == nil {
+		return nil, nil
+	}
+
+	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		rows, err := tx.Run(ctx, `
+			MATCH (b:SourceReliabilityBelief)
+			RETURN b.key AS key,
+			       b.source_domain AS source_domain,
+			       b.owner_group AS owner_group,
+			       b.signal_domain AS signal_domain,
+			       b.language AS language,
+			       b.region AS region,
+			       coalesce(b.trust, 0.0) AS trust,
+			       coalesce(b.confidence, 0.0) AS confidence,
+			       coalesce(b.success_count, 0) AS success_count,
+			       coalesce(b.failure_count, 0) AS failure_count,
+			       b.updated_at AS updated_at
+			ORDER BY b.updated_at DESC`,
+			nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		beliefs := make([]*model.SourceReliabilityBelief, 0)
+		for rows.Next(ctx) {
+			record := rows.Record()
+			updatedAt, _ := record.Get("updated_at")
+			beliefs = append(beliefs, &model.SourceReliabilityBelief{
+				Key:          strings.TrimSpace(toString(recordValue(record, "key"))),
+				SourceDomain: strings.TrimSpace(toString(recordValue(record, "source_domain"))),
+				OwnerGroup:   strings.TrimSpace(toString(recordValue(record, "owner_group"))),
+				SignalDomain: strings.TrimSpace(toString(recordValue(record, "signal_domain"))),
+				Language:     strings.TrimSpace(toString(recordValue(record, "language"))),
+				Region:       strings.TrimSpace(toString(recordValue(record, "region"))),
+				Trust:        toFloat(recordValue(record, "trust")),
+				Confidence:   toFloat(recordValue(record, "confidence")),
+				SuccessCount: toInt(recordValue(record, "success_count")),
+				FailureCount: toInt(recordValue(record, "failure_count")),
+				UpdatedAt:    toTime(updatedAt),
+			})
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return beliefs, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+	return result.([]*model.SourceReliabilityBelief), nil
+}
+
 func (c *Client) CouncilVoiceTelemetry(ctx context.Context, domain string) (map[string]model.CouncilVoiceStats, error) {
 	stats := make(map[string]model.CouncilVoiceStats)
 	if c == nil || c.driver == nil || strings.TrimSpace(domain) == "" {
@@ -1608,6 +1728,14 @@ func councilVoiceWeight(score float64) float64 {
 	return math.Max(0.75, math.Min(1.35, 1+(score*0.35)))
 }
 
+func recordValue(record *neo4j.Record, key string) any {
+	if record == nil {
+		return nil
+	}
+	value, _ := record.Get(key)
+	return value
+}
+
 func toString(value any) string {
 	switch typed := value.(type) {
 	case string:
@@ -1650,6 +1778,15 @@ func toFloat(value any) float64 {
 		return float64(typed)
 	default:
 		return 0
+	}
+}
+
+func toTime(value any) time.Time {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC()
+	default:
+		return time.Time{}
 	}
 }
 

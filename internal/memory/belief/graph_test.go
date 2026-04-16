@@ -127,3 +127,41 @@ func TestSourceBeliefUpdates(t *testing.T) {
 		t.Fatalf("expected one source belief record, got %d", len(graph.AllSourceBeliefs()))
 	}
 }
+
+func TestLoadPeerAndSourceBeliefs(t *testing.T) {
+	graph := NewGraph()
+	peerKey := PeerBeliefKey("desk-geo-a", "desk-macro-a", "macro", "medium:neutral:risk_on:normal")
+	sourceKey := SourceBeliefKey("thomson_reuters", "reuters.com", "macro", "ar", "mena")
+
+	graph.LoadPeerBeliefs([]*model.DeskRelationshipBelief{{
+		Key:           peerKey,
+		OriginDesk:    "desk-geo-a",
+		ReceivingDesk: "desk-macro-a",
+		Domain:        "macro",
+		Regime:        "medium:neutral:risk_on:normal",
+		Trust:         0.71,
+		Confidence:    0.63,
+		SuccessCount:  4,
+	}})
+	graph.LoadSourceBeliefs([]*model.SourceReliabilityBelief{{
+		Key:          sourceKey,
+		OwnerGroup:   "thomson_reuters",
+		SourceDomain: "reuters.com",
+		SignalDomain: "macro",
+		Language:     "ar",
+		Region:       "mena",
+		Trust:        0.82,
+		Confidence:   0.58,
+		SuccessCount: 3,
+	}})
+
+	peer, ok := graph.LookupPeer("desk-geo-a", "desk-macro-a", "macro", "medium:neutral:risk_on:normal")
+	if !ok || peer.Trust != 0.71 {
+		t.Fatalf("expected loaded peer belief, got %+v", peer)
+	}
+
+	source, ok := graph.LookupSource("thomson_reuters", "reuters.com", "macro", "ar", "mena")
+	if !ok || source.Trust != 0.82 {
+		t.Fatalf("expected loaded source belief, got %+v", source)
+	}
+}

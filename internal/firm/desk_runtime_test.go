@@ -3,6 +3,7 @@ package firm_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,11 +37,15 @@ func (s scriptedLLM) Complete(_ context.Context, req llm.Request) (*llm.Response
 
 type runtimeStubBroker struct {
 	connected atomic.Bool
+	err       error
 }
 
 func (b *runtimeStubBroker) IsConnected() bool { return b.connected.Load() }
 func (b *runtimeStubBroker) IsPaper() bool     { return true }
 func (b *runtimeStubBroker) PlaceOrder(_ context.Context, o model.Order) (*model.Fill, error) {
+	if b.err != nil {
+		return nil, b.err
+	}
 	return &model.Fill{
 		OrderID:    o.ID,
 		Instrument: o.Instrument,
@@ -319,6 +324,176 @@ func TestTreatmentDeskExecutesLiveWhenCompetenceIsKnown(t *testing.T) {
 	pos := fetchOpenPosition(t, bk)
 	if pos.Shadow {
 		t.Fatal("expected treatment desk to execute live once competence is known")
+	}
+}
+
+func TestDeskFallsBackToShadowWhenPaperOrderTimesOutAfterAcceptance(t *testing.T) {
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "AAPL", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        100.0,
+		"target_price":       110.0,
+		"stop_loss":          95.0,
+		"conviction":         0.8,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.01,
+		"strategy":           "event",
+		"evidence":           []string{"catalyst", "follow-through"},
+		"counter_args":       []string{"already priced"},
+		"kill_rules":         []map[string]any{{"condition": "price_below_stop", "threshold": 95.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"crowded"},
+		"missing_data":          []string{"flow"},
+		"historical_analogues":  []string{"prior event"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"AAPL","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.8,"category":"corporate","reasoning":"event"}`},
+		scriptedLLM{response: string(researchResp)},
+		scriptedLLM{response: string(prosecuteResp)},
+	)
+
+	graph := belief.NewGraph()
+	regimeKey := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "neutral",
+		Liquidity:  "normal",
+	}.Key()
+	graph.Load([]*model.CompetenceState{
+		{
+			Key:          belief.CompetenceKey("desk-A", "scan", "corporate", regimeKey),
+			DeskID:       "desk-A",
+			Capability:   "scan",
+			Context:      "corporate",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+		{
+			Key:          belief.CompetenceKey("desk-A", "event", "STK", regimeKey),
+			DeskID:       "desk-A",
+			Capability:   "event",
+			Context:      "STK",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+	})
+
+	broker := &runtimeStubBroker{
+		err: &execution.PendingFillError{
+			OrderID: 99,
+			Status:  "Submitted",
+			Cause:   errors.New("order accepted but not filled before execution timeout"),
+		},
+	}
+	desk, bk, _ := newRuntimeDeskWithBroker(t, "A", "corporate", router, nil, graph, nil, broker)
+	desk.Process(context.Background(), signal.Signal{
+		ID:        "sig-pending",
+		Source:    "test",
+		Type:      signal.TypeNews,
+		Category:  "corporate",
+		Timestamp: time.Now(),
+		Urgency:   0.8,
+		Raw:       []byte(`AAPL event catalyst forms`),
+	})
+
+	pos := fetchOpenPosition(t, bk)
+	if !pos.Shadow {
+		t.Fatal("expected shadow fallback for pending paper order")
+	}
+}
+
+func TestDeskFallsBackToShadowWhenPaperExecutionTimesOut(t *testing.T) {
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "TLT", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        100.0,
+		"target_price":       105.0,
+		"stop_loss":          97.0,
+		"conviction":         0.8,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.01,
+		"strategy":           "event",
+		"evidence":           []string{"policy catalyst"},
+		"counter_args":       []string{"timing risk"},
+		"kill_rules":         []map[string]any{{"condition": "price_below_stop", "threshold": 97.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"crowded"},
+		"missing_data":          []string{"flow"},
+		"historical_analogues":  []string{"prior event"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		scriptedLLM{response: `{"tradeable":true,"score":82,"instruments":[{"symbol":"TLT","sec_type":"STK","currency":"USD","exchange":"SMART"}],"direction":"long","urgency":0.7,"category":"macro","reasoning":"rates setup"}`},
+		scriptedLLM{response: string(researchResp)},
+		scriptedLLM{response: string(prosecuteResp)},
+	)
+
+	graph := belief.NewGraph()
+	regimeKey := model.Regime{
+		Volatility: "medium",
+		Trend:      "neutral",
+		Risk:       "neutral",
+		Liquidity:  "normal",
+	}.Key()
+	graph.Load([]*model.CompetenceState{
+		{
+			Key:          belief.CompetenceKey("desk-B", "scan", "macro", regimeKey),
+			DeskID:       "desk-B",
+			Capability:   "scan",
+			Context:      "macro",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+		{
+			Key:          belief.CompetenceKey("desk-B", "event", "STK", regimeKey),
+			DeskID:       "desk-B",
+			Capability:   "event",
+			Context:      "STK",
+			Regime:       regimeKey,
+			Trust:        0.86,
+			Confidence:   0.74,
+			SuccessCount: 120,
+			FailureCount: 20,
+			Autonomy:     model.Autonomous,
+		},
+	})
+
+	broker := &runtimeStubBroker{err: context.DeadlineExceeded}
+	desk, bk, _ := newRuntimeDeskWithBroker(t, "B", "macro", router, nil, graph, nil, broker)
+	desk.Process(context.Background(), signal.Signal{
+		ID:        "sig-paper-timeout",
+		Source:    "fed-speeches",
+		Type:      signal.TypeNews,
+		Category:  "macro",
+		Timestamp: time.Now(),
+		Urgency:   0.7,
+		Raw:       []byte(`Fed official comments on rate path`),
+	})
+
+	pos := fetchOpenPosition(t, bk)
+	if !pos.Shadow {
+		t.Fatal("expected shadow fallback for paper execution timeout")
 	}
 }
 
@@ -653,7 +828,15 @@ func newRuntimeDesk(t *testing.T, group string, router *llm.Router, engrams *mem
 func newRuntimeDeskWithOptions(t *testing.T, group, domain string, router *llm.Router, engrams *memory.EngramStore, graph *belief.Graph, publish func(context.Context, signal.Signal) error) (*firm.Desk, *book.Book, *belief.Graph) {
 	t.Helper()
 
-	broker := &runtimeStubBroker{}
+	return newRuntimeDeskWithBroker(t, group, domain, router, engrams, graph, publish, nil)
+}
+
+func newRuntimeDeskWithBroker(t *testing.T, group, domain string, router *llm.Router, engrams *memory.EngramStore, graph *belief.Graph, publish func(context.Context, signal.Signal) error, broker *runtimeStubBroker) (*firm.Desk, *book.Book, *belief.Graph) {
+	t.Helper()
+
+	if broker == nil {
+		broker = &runtimeStubBroker{}
+	}
 	broker.connected.Store(true)
 
 	execMgr := execution.NewManager(broker)

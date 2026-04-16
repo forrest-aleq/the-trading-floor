@@ -135,6 +135,9 @@ func selectDeskTargetsForSignal(desks []*Desk, sig signal.Signal) []*Desk {
 		candidates = append(candidates, deskCandidate{desk: desk, priority: priority})
 	}
 	if len(candidates) == 0 {
+		candidates = fallbackDeskCandidates(desks, sig)
+	}
+	if len(candidates) == 0 {
 		return nil
 	}
 
@@ -169,6 +172,28 @@ func selectDeskTargetsForSignal(desks []*Desk, sig signal.Signal) []*Desk {
 	}
 
 	return selected
+}
+
+func fallbackDeskCandidates(desks []*Desk, sig signal.Signal) []deskCandidate {
+	policy := activeRoutingPolicy()
+	candidates := make([]deskCandidate, 0, len(desks))
+	for _, desk := range desks {
+		if desk == nil {
+			continue
+		}
+		if originDesk := internalOriginDesk(sig); originDesk != "" && originDesk == desk.ID {
+			continue
+		}
+		if !ShouldDomainReviewSignal(desk.Domain, sig) {
+			continue
+		}
+		priority := 0
+		if rule, ok := policy.DeskRules[strings.TrimSpace(strings.ToLower(desk.ID))]; ok {
+			priority = rule.Priority
+		}
+		candidates = append(candidates, deskCandidate{desk: desk, priority: priority})
+	}
+	return candidates
 }
 
 type deskCandidate struct {

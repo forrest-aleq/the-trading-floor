@@ -405,6 +405,45 @@ func TestNormalizeResearchInstrumentParsesOptionContractSymbol(t *testing.T) {
 	}
 }
 
+func TestNormalizeResearchInstrumentDowngradesStaleDerivativeToUnderlying(t *testing.T) {
+	t.Setenv("RESEARCH_STALE_DERIVATIVE_POLICY", "")
+
+	inst := normalizeResearchInstrument(model.Instrument{
+		Symbol:   "TLT 2023-06-16 125PUT",
+		SecType:  "STK",
+		Currency: "USD",
+		Exchange: "SMART",
+	})
+
+	if inst.Symbol != "TLT" {
+		t.Fatalf("expected underlying symbol TLT, got %q", inst.Symbol)
+	}
+	if inst.SecType != "STK" {
+		t.Fatalf("expected stale derivative fallback to STK, got %q", inst.SecType)
+	}
+	if inst.Expiry != "" || inst.Right != "" || inst.Strike != 0 {
+		t.Fatalf("expected stale derivative fields to be cleared, got %+v", inst)
+	}
+}
+
+func TestNormalizeResearchInstrumentExtractsUnderlyingFromMalformedOptionSymbol(t *testing.T) {
+	t.Setenv("RESEARCH_STALE_DERIVATIVE_POLICY", "")
+
+	inst := normalizeResearchInstrument(model.Instrument{
+		Symbol:   "QQQ385C20231020 20231020 385C",
+		SecType:  "STK",
+		Currency: "USD",
+		Exchange: "SMART",
+	})
+
+	if inst.Symbol != "QQQ" {
+		t.Fatalf("expected underlying symbol QQQ, got %q", inst.Symbol)
+	}
+	if inst.SecType != "STK" {
+		t.Fatalf("expected malformed stale option to downgrade to STK, got %q", inst.SecType)
+	}
+}
+
 func TestBuildResearchPromptIncludesInstitutionalContext(t *testing.T) {
 	client := &researchStubClient{}
 	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)

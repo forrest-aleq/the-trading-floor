@@ -239,3 +239,39 @@ func TestSelectDeskTargetsForSignalAppliesPerDomainGroupLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectDeskTargetsFallsBackToBroadDomainCoverageWhenRulesMiss(t *testing.T) {
+	desks := []*Desk{
+		{ID: "macro-rates-a", Domain: "macro", ABGroup: "A"},
+		{ID: "macro-crossasset-a", Domain: "macro", ABGroup: "A"},
+		{ID: "macro-rates-b", Domain: "macro", ABGroup: "B"},
+		{ID: "macro-crossasset-b", Domain: "macro", ABGroup: "B"},
+		{ID: "tail-financial-a", Domain: "tail", ABGroup: "A"},
+		{ID: "tail-financial-b", Domain: "tail", ABGroup: "B"},
+	}
+
+	sig := signal.Signal{
+		Source:     "fred",
+		Type:       signal.TypeEconomic,
+		Category:   "macro",
+		Translated: "Economic release with no desk-specific keyword match.",
+		EvidenceMeta: &evidence.Metadata{
+			SourceOwnerGroup: "federal_reserve",
+		},
+	}
+
+	targets := selectDeskTargetsForSignal(desks, sig)
+	got := make([]string, 0, len(targets))
+	for _, desk := range targets {
+		got = append(got, desk.ID)
+	}
+	want := []string{"macro-rates-a", "macro-rates-b", "tail-financial-a", "tail-financial-b"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d targets, got %d (%v)", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("targets[%d] = %s, want %s (all=%v)", i, got[i], want[i], got)
+		}
+	}
+}

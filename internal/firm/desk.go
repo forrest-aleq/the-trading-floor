@@ -2,6 +2,7 @@ package firm
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"os"
@@ -429,20 +430,39 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 			"symbol", thesis.DisplaySymbol(),
 		)
 		if err != nil {
-			d.log.Error("execution failed", "thesis_id", thesis.ID, "error", err)
-			return
+			var pending *execution.PendingFillError
+			if errors.As(err, &pending) {
+				pos = d.book.OpenShadowPosition(thesis)
+				thesis.Status = model.ThesisNursery
+				d.log.Warn("execution timed out after broker acceptance; routed to shadow book",
+					"thesis_id", thesis.ID,
+					"symbol", thesis.DisplaySymbol(),
+					"order_status", pending.Status,
+				)
+			} else if d.execution != nil && d.execution.IsPaper() && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+				pos = d.book.OpenShadowPosition(thesis)
+				thesis.Status = model.ThesisNursery
+				d.log.Warn("paper execution timed out; routed to shadow book",
+					"thesis_id", thesis.ID,
+					"symbol", thesis.DisplaySymbol(),
+					"error", err,
+				)
+			} else {
+				d.log.Error("execution failed", "thesis_id", thesis.ID, "error", err)
+				return
+			}
+		} else {
+			span = span.WithStage("book")
+			ctx = trace.IntoContext(ctx, span)
+			pos = d.book.OpenPosition(fill, thesis)
+			thesis.Status = model.ThesisActive
 		}
-
-		span = span.WithStage("book")
-		ctx = trace.IntoContext(ctx, span)
-		pos = d.book.OpenPosition(fill, thesis)
-		thesis.Status = model.ThesisActive
 	}
 	d.rememberThesis(thesis)
 	d.persistThesis(ctx, thesis)
 	d.persistPosition(ctx, pos)
 
-	if d.onTrade != nil && autonomy.Mode != model.Restricted {
+	if d.onTrade != nil && pos != nil && !pos.Shadow {
 		d.onTrade()
 	}
 

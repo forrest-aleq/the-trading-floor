@@ -69,6 +69,25 @@ type HistoricalBar struct {
 	Close float64
 }
 
+type PendingOrderError struct {
+	OrderID int64
+	Status  string
+	Reason  string
+}
+
+func (e *PendingOrderError) Error() string {
+	if e == nil {
+		return "pending order"
+	}
+	if e.Reason != "" {
+		return e.Reason
+	}
+	if e.Status != "" {
+		return fmt.Sprintf("order %d pending with status %s", e.OrderID, e.Status)
+	}
+	return fmt.Sprintf("order %d pending", e.OrderID)
+}
+
 func NewClient(cfg Config) *Client {
 	return &Client{
 		conn: NewConnection(cfg),
@@ -172,11 +191,19 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 
 	select {
 	case <-waitCtx.Done():
+		if pending := pendingOrderError(trade, waitCtx.Err()); pending != nil {
+			c.cancelPaperTrade(trade)
+			return nil, pending
+		}
 		return nil, waitCtx.Err()
 	case <-trade.Done():
 	}
 
 	if !trade.OrderStatus.IsDone() {
+		if pending := pendingOrderError(trade, fmt.Errorf("order did not complete")); pending != nil {
+			c.cancelPaperTrade(trade)
+			return nil, pending
+		}
 		return nil, fmt.Errorf("order did not complete")
 	}
 
@@ -286,6 +313,45 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 		Commission:  totalCommission,
 		FilledAt:    filledAt,
 	}, nil
+}
+
+func pendingOrderError(trade *ibsync.Trade, cause error) *PendingOrderError {
+	if trade == nil || trade.Order == nil {
+		return nil
+	}
+	status := strings.TrimSpace(string(trade.OrderStatus.Status))
+	if !isPendingTradeStatus(status) {
+		return nil
+	}
+	reason := "order accepted but not filled before execution timeout"
+	if cause != nil {
+		reason += ": " + cause.Error()
+	}
+	return &PendingOrderError{
+		OrderID: trade.Order.OrderID,
+		Status:  status,
+		Reason:  reason,
+	}
+}
+
+func isPendingTradeStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "submitted", "presubmitted", "pendingsubmit", "apipending", "apisubmitted", "pendingcancel":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) cancelPaperTrade(trade *ibsync.Trade) {
+	if !c.IsPaper() || trade == nil || trade.Order == nil {
+		return
+	}
+	ib := c.conn.IB()
+	if ib == nil {
+		return
+	}
+	ib.CancelOrder(trade.Order, ibapi.NewOrderCancel())
 }
 
 func (c *Client) CancelOrder(ctx context.Context, orderID int64) error {

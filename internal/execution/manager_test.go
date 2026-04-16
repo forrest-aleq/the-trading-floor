@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,12 +16,16 @@ type testBroker struct {
 	connected atomic.Bool
 	calls     atomic.Int64
 	delay     time.Duration
+	err       error
 }
 
 func (b *testBroker) IsConnected() bool { return b.connected.Load() }
 func (b *testBroker) IsPaper() bool     { return true }
 func (b *testBroker) PlaceOrder(_ context.Context, order model.Order) (*model.Fill, error) {
 	b.calls.Add(1)
+	if b.err != nil {
+		return nil, b.err
+	}
 	if b.delay > 0 {
 		time.Sleep(b.delay)
 	}
@@ -144,5 +149,86 @@ func TestSubmittedCacheExpires(t *testing.T) {
 	}
 	if broker.calls.Load() != 2 {
 		t.Fatalf("expected cache expiry to force a second broker call, got %d", broker.calls.Load())
+	}
+}
+
+func TestSubmitReturnsPendingFillErrorForAcceptedUnfilledPaperOrder(t *testing.T) {
+	broker := &testBroker{
+		err: &ibkr.PendingOrderError{
+			OrderID: 42,
+			Status:  "Submitted",
+			Reason:  "order accepted but not filled before execution timeout",
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+
+	order := model.Order{
+		ID:         "order-pending",
+		ThesisID:   "thesis-pending",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   1,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	_, err := manager.Submit(context.Background(), &model.CapToken{}, order)
+	if err == nil {
+		t.Fatal("expected pending fill error")
+	}
+	var pending *PendingFillError
+	if !errors.As(err, &pending) {
+		t.Fatalf("expected PendingFillError, got %T", err)
+	}
+	if pending.OrderID != 42 {
+		t.Fatalf("expected order id 42, got %d", pending.OrderID)
+	}
+	if pending.Status != "Submitted" {
+		t.Fatalf("expected submitted status, got %q", pending.Status)
+	}
+}
+
+func TestSubmitPrefersBrokerPendingResultOverContextDeadline(t *testing.T) {
+	oldGrace := submitResultGrace
+	submitResultGrace = 100 * time.Millisecond
+	defer func() { submitResultGrace = oldGrace }()
+
+	broker := &testBroker{
+		delay: 35 * time.Millisecond,
+		err: &ibkr.PendingOrderError{
+			OrderID: 99,
+			Status:  "Submitted",
+			Reason:  "order accepted but not filled before execution timeout",
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+
+	order := model.Order{
+		ID:         "order-pending-timeout",
+		ThesisID:   "thesis-pending-timeout",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "SPY", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   1,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := manager.Submit(ctx, &model.CapToken{}, order)
+	if err == nil {
+		t.Fatal("expected pending fill error")
+	}
+	var pending *PendingFillError
+	if !errors.As(err, &pending) {
+		t.Fatalf("expected PendingFillError, got %T (%v)", err, err)
+	}
+	if pending.OrderID != 99 {
+		t.Fatalf("expected order id 99, got %d", pending.OrderID)
 	}
 }

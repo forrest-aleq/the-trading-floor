@@ -2,8 +2,10 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -34,6 +36,8 @@ type Manager struct {
 	lastCacheCleanup time.Time
 }
 
+var submitResultGrace = readManagerDurationEnv("EXECUTION_SUBMIT_RESULT_GRACE", 1500*time.Millisecond)
+
 func NewManager(ibkrClient Broker) *Manager {
 	return &Manager{
 		ibkr:            ibkrClient,
@@ -47,6 +51,32 @@ func NewManager(ibkrClient Broker) *Manager {
 type cachedFill struct {
 	fill *model.Fill
 	at   time.Time
+}
+
+type PendingFillError struct {
+	OrderID int64
+	Status  string
+	Cause   error
+}
+
+func (e *PendingFillError) Error() string {
+	if e == nil {
+		return "pending fill"
+	}
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	if e.Status != "" {
+		return fmt.Sprintf("pending fill with status %s", e.Status)
+	}
+	return "pending fill"
+}
+
+func (e *PendingFillError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
 }
 
 // Submit places an order through IBKR
@@ -75,6 +105,14 @@ func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model
 
 		fill, err := m.ibkr.PlaceOrder(ctx, order)
 		if err != nil {
+			var pending *ibkr.PendingOrderError
+			if errors.As(err, &pending) {
+				return nil, &PendingFillError{
+					OrderID: pending.OrderID,
+					Status:  pending.Status,
+					Cause:   err,
+				}
+			}
 			m.log.Error("order failed",
 				"thesis_id", order.ThesisID,
 				"error", err,
@@ -156,14 +194,40 @@ func (m *Manager) submitOnce(ctx context.Context, orderID string, fn func() (*mo
 
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
-	case result := <-resultCh:
-		if result.Err != nil {
-			return nil, result.Err
+		if submitResultGrace <= 0 {
+			return nil, ctx.Err()
 		}
-		fill, _ := result.Val.(*model.Fill)
-		return cloneFill(fill), nil
+		timer := time.NewTimer(submitResultGrace)
+		defer timer.Stop()
+		select {
+		case result := <-resultCh:
+			return consumeSubmitResult(result)
+		case <-timer.C:
+			return nil, ctx.Err()
+		}
+	case result := <-resultCh:
+		return consumeSubmitResult(result)
 	}
+}
+
+func consumeSubmitResult(result singleflight.Result) (*model.Fill, error) {
+	if result.Err != nil {
+		return nil, result.Err
+	}
+	fill, _ := result.Val.(*model.Fill)
+	return cloneFill(fill), nil
+}
+
+func readManagerDurationEnv(name string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func cloneFill(fill *model.Fill) *model.Fill {
@@ -222,6 +286,13 @@ func (m *Manager) pruneExpiredLocked(now time.Time) {
 // Cancel cancels a pending order
 func (m *Manager) Cancel(ctx context.Context, orderID int64) error {
 	return m.ibkr.CancelOrder(ctx, orderID)
+}
+
+func (m *Manager) IsPaper() bool {
+	if m == nil || m.ibkr == nil {
+		return false
+	}
+	return m.ibkr.IsPaper()
 }
 
 // GetPositions returns current IBKR positions for reconciliation

@@ -537,6 +537,9 @@ func normalizeResearchInstrument(inst model.Instrument) model.Instrument {
 	}
 	inst.Right = normalizeOptionRight(inst.Right)
 	inst.Expiry = normalizeContractExpiry(inst.Expiry)
+	if shouldDowngradeStaleDerivative(inst) {
+		inst = downgradeDerivativeToUnderlying(inst)
+	}
 	return inst
 }
 
@@ -563,7 +566,7 @@ func parseOptionContractString(raw string) (model.Instrument, bool) {
 	}
 
 	return model.Instrument{
-		Symbol:     strings.TrimSpace(parts[0]),
+		Symbol:     normalizeContractUnderlying(parts[0]),
 		SecType:    "OPT",
 		Currency:   "USD",
 		Exchange:   "SMART",
@@ -572,6 +575,76 @@ func parseOptionContractString(raw string) (model.Instrument, bool) {
 		Right:      right,
 		Multiplier: "100",
 	}, true
+}
+
+func shouldDowngradeStaleDerivative(inst model.Instrument) bool {
+	policy := strings.TrimSpace(strings.ToLower(os.Getenv("RESEARCH_STALE_DERIVATIVE_POLICY")))
+	if policy == "allow" {
+		return false
+	}
+	secType := strings.TrimSpace(strings.ToUpper(inst.SecType))
+	if secType != "OPT" && secType != "FOP" {
+		return false
+	}
+	expiry := normalizeContractExpiry(inst.Expiry)
+	if expiry == "" {
+		return false
+	}
+	parsed, err := time.Parse("20060102", expiry)
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC()
+	return parsed.Before(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC))
+}
+
+func downgradeDerivativeToUnderlying(inst model.Instrument) model.Instrument {
+	symbol := normalizeContractUnderlying(inst.Symbol)
+	if symbol == "" {
+		symbol = strings.TrimSpace(inst.Symbol)
+	}
+	currency := strings.TrimSpace(inst.Currency)
+	if currency == "" {
+		currency = "USD"
+	}
+	return model.Instrument{
+		ConID:    0,
+		Symbol:   symbol,
+		SecType:  "STK",
+		Exchange: normalizeExchange(inst.Exchange),
+		Currency: currency,
+	}
+}
+
+func normalizeContractUnderlying(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	token := strings.Fields(value)[0]
+	if token == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range token {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r == '.' || r == '-':
+			b.WriteRune(r)
+		default:
+			if b.Len() > 0 {
+				return b.String()
+			}
+			return token
+		}
+	}
+	if b.Len() == 0 {
+		return token
+	}
+	return b.String()
 }
 
 func parseOptionStrikeRight(strikeToken, rightToken string) (float64, string, bool) {

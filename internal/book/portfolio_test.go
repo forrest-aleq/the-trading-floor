@@ -124,3 +124,35 @@ func TestBookMarksMultiLegVerticalSpread(t *testing.T) {
 		t.Fatalf("expected gross exposure 750, got %.2f", snapshot.GrossExposure)
 	}
 }
+
+func TestOpenShadowPositionUsesPositiveFallbackPrice(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 1000)
+	thesis := &model.Thesis{
+		ID:           "shadow-1",
+		DeskID:       "desk-1",
+		Instrument:   model.Instrument{Symbol: "TLT", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:    model.Long,
+		PositionSize: 0.01,
+		MarketContext: &model.MarketContext{
+			CurrentPrice: 91.25,
+		},
+	}
+
+	pos := bk.OpenShadowPosition(thesis)
+	if pos.EntryPrice != 91.25 {
+		t.Fatalf("expected shadow entry price from market context, got %.2f", pos.EntryPrice)
+	}
+	if pos.CurrentPrice != 91.25 {
+		t.Fatalf("expected shadow current price from market context, got %.2f", pos.CurrentPrice)
+	}
+
+	thesis.EntryPrice = 0
+	thesis.MarketContext = nil
+	thesis.TargetPrice = 0
+	thesis.StopLoss = 0
+	thesis.ID = "shadow-2"
+	pos = bk.OpenShadowPosition(thesis)
+	if pos.EntryPrice <= 0 {
+		t.Fatalf("expected positive minimum fallback entry price, got %.4f", pos.EntryPrice)
+	}
+}

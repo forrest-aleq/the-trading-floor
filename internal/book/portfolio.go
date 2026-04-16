@@ -49,6 +49,8 @@ type Discrepancy struct {
 	IBKRAvgCost float64
 }
 
+const minShadowEntryPrice = 0.01
+
 func NewBook(positionSource PositionSource, initialCapital float64) *Book {
 	return &Book{
 		log:               slog.Default().With("component", "book"),
@@ -105,12 +107,13 @@ func (b *Book) OpenShadowPosition(thesis *model.Thesis) *model.Position {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	entryPrice := shadowEntryPrice(thesis)
 	fill := &model.Fill{
 		OrderID:    thesis.ID,
 		Instrument: thesis.Instrument,
 		Direction:  thesis.Direction,
 		Quantity:   thesis.PositionSize,
-		AvgPrice:   thesis.EntryPrice,
+		AvgPrice:   entryPrice,
 		FilledAt:   time.Now(),
 	}
 	pos := b.newPosition(fill, thesis)
@@ -131,6 +134,7 @@ func (b *Book) OpenShadowPosition(thesis *model.Thesis) *model.Position {
 }
 
 func (b *Book) newPosition(fill *model.Fill, thesis *model.Thesis) *model.Position {
+	entryPrice := resolvedPositionPrice(fill, thesis)
 	legs := make([]model.TradeLeg, 0)
 	switch {
 	case fill != nil && len(fill.Legs) > 0:
@@ -140,7 +144,7 @@ func (b *Book) newPosition(fill *model.Fill, thesis *model.Thesis) *model.Positi
 	}
 	for i := range legs {
 		if legs[i].EntryPrice <= 0 {
-			legs[i].EntryPrice = fill.AvgPrice
+			legs[i].EntryPrice = entryPrice
 		}
 		if legs[i].Quantity <= 0 {
 			legs[i].Quantity = legs[i].EffectiveQuantity(fill.Quantity)
@@ -156,8 +160,8 @@ func (b *Book) newPosition(fill *model.Fill, thesis *model.Thesis) *model.Positi
 		Legs:           legs,
 		Direction:      fill.Direction,
 		Quantity:       fill.Quantity,
-		EntryPrice:     fill.AvgPrice,
-		CurrentPrice:   fill.AvgPrice,
+		EntryPrice:     entryPrice,
+		CurrentPrice:   entryPrice,
 		IBKROrderID:    fill.IBKROrderID,
 		IBKRContractID: fill.PrimaryInstrument().ConID,
 		Status:         "open",
@@ -167,6 +171,30 @@ func (b *Book) newPosition(fill *model.Fill, thesis *model.Thesis) *model.Positi
 		pos.OpenedAt = time.Now()
 	}
 	return pos
+}
+
+func shadowEntryPrice(thesis *model.Thesis) float64 {
+	return resolvedPositionPrice(nil, thesis)
+}
+
+func resolvedPositionPrice(fill *model.Fill, thesis *model.Thesis) float64 {
+	candidates := []float64{}
+	if fill != nil {
+		candidates = append(candidates, fill.AvgPrice)
+	}
+	if thesis != nil {
+		candidates = append(candidates, thesis.EntryPrice)
+		if thesis.MarketContext != nil {
+			candidates = append(candidates, thesis.MarketContext.CurrentPrice)
+		}
+		candidates = append(candidates, thesis.TargetPrice, thesis.StopLoss)
+	}
+	for _, price := range candidates {
+		if price > 0 {
+			return price
+		}
+	}
+	return minShadowEntryPrice
 }
 
 func (b *Book) ClosePosition(positionID string, exitPrice float64, exitReason string) (*model.ThesisOutcome, error) {

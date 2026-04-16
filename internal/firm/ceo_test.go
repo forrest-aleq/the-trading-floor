@@ -1,0 +1,124 @@
+package firm
+
+import (
+	"testing"
+	"time"
+
+	"github.com/hnic/trading-floor/internal/book"
+	"github.com/hnic/trading-floor/pkg/model"
+)
+
+func TestCEOFactorExposuresAggregateAcrossDesks(t *testing.T) {
+	bk := book.NewBook(nil, 1_000_000)
+	ceo := NewCEO(bk, nil, nil)
+	ceo.SetDesks([]*Desk{
+		{ID: "desk-macro-a", Domain: "macro"},
+		{ID: "desk-tail-a", Domain: "tail"},
+	})
+
+	openTestPosition(t, bk, "desk-macro-a", "tlt-long", "TLT", model.Long, 1000, 100)
+	openTestPosition(t, bk, "desk-tail-a", "ief-long", "IEF", model.Long, 1000, 100)
+
+	exposures := ceo.factorExposures(1_000_000, bk.GetOpenPositions())
+	rates := requireFactorExposure(t, exposures, "theme:rates_duration")
+
+	if rates.DeskCount != 2 {
+		t.Fatalf("expected 2 desks contributing to rates duration, got %d", rates.DeskCount)
+	}
+	if got := rates.Gross; got != 200_000 {
+		t.Fatalf("expected rates gross 200000, got %.2f", got)
+	}
+	if got := rates.GrossPctNAV; got != 20 {
+		t.Fatalf("expected rates gross pct nav 20, got %.2f", got)
+	}
+	if _, ok := rates.DeskContributions["desk-macro-a"]; !ok {
+		t.Fatalf("expected macro desk contribution to be recorded")
+	}
+	if _, ok := rates.DeskContributions["desk-tail-a"]; !ok {
+		t.Fatalf("expected tail desk contribution to be recorded")
+	}
+}
+
+func TestCEOCrowdedFactorPenaltiesReduceCrowdedDeskWeights(t *testing.T) {
+	bk := book.NewBook(nil, 1_000_000)
+	ceo := NewCEO(bk, nil, nil)
+	ceo.SetDesks([]*Desk{
+		{ID: "desk-macro-a", Domain: "macro"},
+		{ID: "desk-tail-a", Domain: "tail"},
+		{ID: "desk-corp-a", Domain: "corporate"},
+	})
+
+	openTestPosition(t, bk, "desk-macro-a", "tlt-crowded", "TLT", model.Long, 2000, 100)
+	openTestPosition(t, bk, "desk-tail-a", "ief-crowded", "IEF", model.Long, 2000, 100)
+	openTestPosition(t, bk, "desk-corp-a", "xlf-uncrowded", "XLF", model.Long, 500, 100)
+
+	ceo.deskSharpe["desk-macro-a"] = []float64{0, 0, 0, 0, 0}
+	ceo.deskSharpe["desk-tail-a"] = []float64{0, 0, 0, 0, 0}
+	ceo.deskSharpe["desk-corp-a"] = []float64{0, 0, 0, 0, 0}
+
+	penalties := ceo.crowdedFactorPenalties(1_000_000, bk.GetOpenPositions())
+	if penalties["desk-macro-a"] <= 0 {
+		t.Fatalf("expected crowded macro desk penalty, got %.4f", penalties["desk-macro-a"])
+	}
+	if penalties["desk-tail-a"] <= 0 {
+		t.Fatalf("expected crowded tail desk penalty, got %.4f", penalties["desk-tail-a"])
+	}
+	if penalties["desk-corp-a"] != 0 {
+		t.Fatalf("expected uncrowded desk penalty 0, got %.4f", penalties["desk-corp-a"])
+	}
+
+	ceo.CapitalReallocation()
+
+	snapshot := bk.Snapshot()
+	macroCapital := snapshot.DeskCapital["desk-macro-a"]
+	tailCapital := snapshot.DeskCapital["desk-tail-a"]
+	corpCapital := snapshot.DeskCapital["desk-corp-a"]
+
+	if corpCapital <= macroCapital {
+		t.Fatalf("expected uncrowded desk capital %.2f to exceed macro %.2f", corpCapital, macroCapital)
+	}
+	if corpCapital <= tailCapital {
+		t.Fatalf("expected uncrowded desk capital %.2f to exceed tail %.2f", corpCapital, tailCapital)
+	}
+	if macroCapital != tailCapital {
+		t.Fatalf("expected crowded desks to receive equal capital, got macro %.2f tail %.2f", macroCapital, tailCapital)
+	}
+}
+
+func openTestPosition(t *testing.T, bk *book.Book, deskID, id, symbol string, direction model.TradeDirection, qty, price float64) *model.Position {
+	t.Helper()
+
+	inst := model.Instrument{
+		Symbol:   symbol,
+		SecType:  "STK",
+		Exchange: "SMART",
+		Currency: "USD",
+	}
+	return bk.OpenPosition(&model.Fill{
+		OrderID:    id,
+		Instrument: inst,
+		Direction:  direction,
+		Quantity:   qty,
+		AvgPrice:   price,
+		FilledAt:   time.Unix(1, 0),
+	}, &model.Thesis{
+		ID:         "thesis-" + id,
+		DeskID:     deskID,
+		Domain:     deskID,
+		Instrument: inst,
+		Direction:  direction,
+		EntryPrice: price,
+	})
+}
+
+func requireFactorExposure(t *testing.T, exposures []factorExposure, factor string) factorExposure {
+	t.Helper()
+
+	for _, exposure := range exposures {
+		if exposure.Factor == factor {
+			return exposure
+		}
+	}
+	t.Fatalf("expected factor exposure %s to be present", factor)
+	return factorExposure{}
+}

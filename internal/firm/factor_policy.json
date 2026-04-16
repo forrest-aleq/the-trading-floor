@@ -1,0 +1,32 @@
+{
+  "alert_gross_exposure_pct": 18.0,
+  "alert_net_exposure_pct": 12.0,
+  "hidden_overlap_desk_count": 2,
+  "reallocation_penalty": 0.45,
+  "min_weight_floor": 0.35,
+  "rules": [
+    {"id": "domain:geopolitical", "domains": ["geopolitical"], "weight": 1.0},
+    {"id": "domain:macro", "domains": ["macro"], "weight": 1.0},
+    {"id": "domain:corporate", "domains": ["corporate"], "weight": 1.0},
+    {"id": "domain:flows", "domains": ["flows"], "weight": 1.0},
+    {"id": "domain:tail", "domains": ["tail"], "weight": 1.0},
+    {"id": "domain:volatility", "domains": ["volatility"], "weight": 1.0},
+    {"id": "domain:sector", "domains": ["sector"], "weight": 1.0},
+    {"id": "domain:systematic", "domains": ["systematic"], "weight": 1.0},
+
+    {"id": "asset:equity", "sec_types": ["STK"], "weight": 0.35},
+    {"id": "asset:optionality", "sec_types": ["OPT", "FOP"], "weight": 0.35},
+    {"id": "asset:futures", "sec_types": ["FUT"], "weight": 0.35},
+    {"id": "asset:fx", "sec_types": ["CASH"], "weight": 0.35},
+    {"id": "asset:rates_credit", "sec_types": ["BOND"], "weight": 0.45},
+
+    {"id": "theme:us_equity_beta", "symbols": ["SPY", "QQQ", "DIA", "IWM"], "weight": 1.0},
+    {"id": "theme:rates_duration", "symbols": ["TLT", "IEF", "SHY", "ZB", "ZN", "ZF"], "weight": 1.0},
+    {"id": "theme:energy_oil", "symbols": ["USO", "XLE", "CL", "BZ", "XOM", "CVX"], "weight": 1.0},
+    {"id": "theme:financials_rates", "symbols": ["XLF", "KRE"], "weight": 0.9},
+    {"id": "theme:gold_real_rates", "symbols": ["GLD", "GC"], "weight": 0.9},
+    {"id": "theme:equity_volatility", "symbols": ["VIX", "UVXY", "SVIX"], "weight": 1.0},
+    {"id": "theme:usd", "symbols": ["DXY", "UUP"], "weight": 0.9},
+    {"id": "theme:crypto", "symbols": ["BTC", "IBIT", "ETH", "ETHE"], "weight": 0.9}
+  ]
+}

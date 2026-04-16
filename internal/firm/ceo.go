@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/hnic/trading-floor/internal/book"
@@ -15,13 +16,13 @@ import (
 // CEO is the referee — capital reallocation, cross-desk correlation monitoring,
 // regime shift detection. Does NOT trade, research, or route signals.
 type CEO struct {
-	log         *slog.Logger
-	book        *book.Book
-	beliefs     *belief.Graph
-	desks       []*Desk
-	floor       *Floor
-	interval    time.Duration
-	killSwitch  float64 // portfolio drawdown pct that triggers halt
+	log        *slog.Logger
+	book       *book.Book
+	beliefs    *belief.Graph
+	desks      []*Desk
+	floor      *Floor
+	interval   time.Duration
+	killSwitch float64 // portfolio drawdown pct that triggers halt
 
 	// Meta-beliefs: per-desk performance tracking
 	deskSharpe map[string][]float64 // rolling daily returns for Sharpe calc
@@ -63,6 +64,7 @@ func (c *CEO) Run(ctx context.Context) {
 
 func (c *CEO) evaluate(ctx context.Context) {
 	snapshot := c.book.Snapshot()
+	openPositions := c.book.GetOpenPositions()
 
 	// Kill switch: halt all trading if drawdown exceeds threshold
 	if snapshot.MaxDrawdown >= c.killSwitch {
@@ -75,7 +77,7 @@ func (c *CEO) evaluate(ctx context.Context) {
 	}
 
 	// Cross-desk correlation check
-	c.checkCorrelation(snapshot)
+	factors := c.checkCorrelation(snapshot, openPositions)
 
 	// Desk performance evaluation
 	c.evaluateDesks(snapshot)
@@ -90,13 +92,14 @@ func (c *CEO) evaluate(ctx context.Context) {
 		"daily_pnl", snapshot.DailyPnL,
 		"open_positions", snapshot.OpenPositions,
 		"total_trades", snapshot.TotalTrades,
+		"top_factors", summarizeTopFactors(factors, 3),
 	)
 }
 
 // checkCorrelation detects when too many desks lean the same direction.
-func (c *CEO) checkCorrelation(snap book.PortfolioSnapshot) {
+func (c *CEO) checkCorrelation(snap book.PortfolioSnapshot, positions []*model.Position) []factorExposure {
 	if snap.NAV <= 0 {
-		return
+		return nil
 	}
 
 	// Net exposure as pct of NAV
@@ -108,6 +111,24 @@ func (c *CEO) checkCorrelation(snap book.PortfolioSnapshot) {
 			"net_exposure", snap.NetExposure,
 		)
 	}
+
+	factors := c.factorExposures(snap.NAV, positions)
+	policy := activeFactorPolicy()
+	for _, factor := range factors {
+		if factor.GrossPctNAV < policy.AlertGrossExposurePct &&
+			math.Abs(factor.NetPctNAV) < policy.AlertNetExposurePct &&
+			factor.DeskCount < policy.HiddenOverlapDeskCount {
+			continue
+		}
+		c.log.Warn("factor concentration detected",
+			"factor", factor.Factor,
+			"gross_pct_nav", factor.GrossPctNAV,
+			"net_pct_nav", factor.NetPctNAV,
+			"desk_count", factor.DeskCount,
+			"desks", summarizeFactorDesks(factor),
+		)
+	}
+	return factors
 }
 
 // evaluateDesks scores each desk and logs recommendations.
@@ -182,11 +203,14 @@ func (c *CEO) ForceRegimeShift(newRegime model.Regime) {
 func (c *CEO) CapitalReallocation() {
 	snapshot := c.book.Snapshot()
 	totalCapital := snapshot.NAV
+	penalties := c.crowdedFactorPenalties(snapshot.NAV, c.book.GetOpenPositions())
+	policy := activeFactorPolicy()
 
 	type deskPerf struct {
-		id     string
-		sharpe float64
-		weight float64
+		id      string
+		sharpe  float64
+		weight  float64
+		penalty float64
 	}
 
 	var perfs []deskPerf
@@ -196,8 +220,10 @@ func (c *CEO) CapitalReallocation() {
 		returns := c.deskSharpe[desk.ID]
 		s := rollingSharpeSafe(returns)
 		// Floor: minimum 0.5 weight even for worst performers (prevents starvation)
-		w := math.Max(0.5, s+1.0)
-		perfs = append(perfs, deskPerf{id: desk.ID, sharpe: s, weight: w})
+		baseWeight := math.Max(0.5, s+1.0)
+		penalty := penalties[desk.ID]
+		w := math.Max(policy.MinWeightFloor, baseWeight*(1-penalty))
+		perfs = append(perfs, deskPerf{id: desk.ID, sharpe: s, weight: w, penalty: penalty})
 		totalSharpe += w
 	}
 
@@ -211,9 +237,44 @@ func (c *CEO) CapitalReallocation() {
 		c.log.Info("capital reallocated",
 			"desk", p.id,
 			"sharpe", p.sharpe,
+			"crowding_penalty", p.penalty,
 			"new_capital", newCapital,
 		)
 	}
+}
+
+func summarizeTopFactors(factors []factorExposure, limit int) []string {
+	if len(factors) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(factors) > limit {
+		factors = factors[:limit]
+	}
+	summary := make([]string, 0, len(factors))
+	for _, factor := range factors {
+		summary = append(summary, factor.Factor+":"+formatFactorPct(factor.GrossPctNAV))
+	}
+	return summary
+}
+
+func summarizeFactorDesks(factor factorExposure) []string {
+	desks := make([]string, 0, len(factor.DeskContributions))
+	for deskID, contrib := range factor.DeskContributions {
+		desks = append(desks, deskID+":"+formatFactorPct((contrib.Gross/maxFloat(factor.Gross, 1))*100))
+	}
+	sort.Strings(desks)
+	return desks
+}
+
+func formatFactorPct(value float64) string {
+	return strconv.FormatFloat(value, 'f', 1, 64) + "%"
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func rollingSharpeSafe(returns []float64) float64 {

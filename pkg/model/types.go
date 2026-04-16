@@ -585,6 +585,14 @@ func (p Position) GrossExposure() float64 {
 	return tradeCurrentGrossExposure(p.Legs, p.Instrument, p.CurrentPrice, p.Quantity)
 }
 
+func (p Position) SignedExposure() float64 {
+	exposure := p.GrossExposure()
+	if p.Direction == Short {
+		return -exposure
+	}
+	return exposure
+}
+
 func normalizeKeyPart(value string) string {
 	if value == "" {
 		return "_"

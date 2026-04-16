@@ -10,12 +10,13 @@ import (
 )
 
 func buildInternalSignal(origin signal.Signal, thesis *model.Thesis, originDesk string) (signal.Signal, bool) {
-	if thesis == nil || thesis.Conviction < 0.72 {
+	policy := activeCollaborationPolicy()
+	if thesis == nil || thesis.Conviction < policy.MinPublishConviction {
 		return signal.Signal{}, false
 	}
 	originIsInternal := isInternalSignal(origin)
 	originMessage, _ := model.DecodeColleagueMessage(origin.Raw)
-	if originIsInternal && originMessage.InternalDepth >= 2 {
+	if originIsInternal && originMessage.InternalDepth >= policy.MaxInternalDepth {
 		return signal.Signal{}, false
 	}
 
@@ -25,7 +26,7 @@ func buildInternalSignal(origin signal.Signal, thesis *model.Thesis, originDesk 
 	parentThesisID := ""
 	rootThesisID := thesis.ID
 	threadID := model.NewColleagueThreadID(thesis.ID)
-	requestedAction := "review"
+	requestedAction := policy.ProposalAction
 	depth := 1
 	if originIsInternal {
 		kind = model.ColleagueMessageReply
@@ -33,7 +34,7 @@ func buildInternalSignal(origin signal.Signal, thesis *model.Thesis, originDesk 
 		replyToMessageID = originMessage.MessageID
 		parentThesisID = firstNonEmptyInternal(originMessage.ThesisID, originMessage.ParentThesisID)
 		rootThesisID = firstNonEmptyInternal(originMessage.RootThesisID, originMessage.ThesisID, thesis.ID)
-		requestedAction = "synthesize"
+		requestedAction = policy.ReplyAction
 		depth = originMessage.InternalDepth + 1
 		if originMessage.OriginDomain != "" {
 			targets = []string{originMessage.OriginDomain}
@@ -103,25 +104,9 @@ func internalSignalSummary(kind model.ColleagueMessageKind, thesis *model.Thesis
 }
 
 func downstreamDomainsForDesk(domain string) []string {
+	policy := activeCollaborationPolicy()
 	set := newDomainSet()
-	switch strings.TrimSpace(strings.ToLower(domain)) {
-	case "geopolitical":
-		set.add("macro", "tail", "volatility", "sector")
-	case "macro":
-		set.add("volatility", "tail", "systematic", "sector")
-	case "corporate":
-		set.add("sector", "flows", "volatility")
-	case "flows":
-		set.add("volatility", "systematic", "sector")
-	case "tail":
-		set.add("macro", "volatility", "geopolitical", "systematic")
-	case "volatility":
-		set.add("flows", "tail", "systematic")
-	case "sector":
-		set.add("corporate", "flows", "systematic")
-	case "systematic":
-		set.add("flows", "volatility", "macro", "sector")
-	}
+	set.add(policy.DownstreamDomains[strings.TrimSpace(strings.ToLower(domain))]...)
 	return set.values()
 }
 

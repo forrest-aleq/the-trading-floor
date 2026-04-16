@@ -1,0 +1,16 @@
+{
+  "min_publish_conviction": 0.72,
+  "max_internal_depth": 2,
+  "proposal_action": "review",
+  "reply_action": "synthesize",
+  "downstream_domains": {
+    "geopolitical": ["macro", "tail", "volatility", "sector"],
+    "macro": ["volatility", "tail", "systematic", "sector"],
+    "corporate": ["sector", "flows", "volatility"],
+    "flows": ["volatility", "systematic", "sector"],
+    "tail": ["macro", "volatility", "geopolitical", "systematic"],
+    "volatility": ["flows", "tail", "systematic"],
+    "sector": ["corporate", "flows", "systematic"],
+    "systematic": ["flows", "volatility", "macro", "sector"]
+  }
+}

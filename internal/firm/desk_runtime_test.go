@@ -635,13 +635,13 @@ func TestDeskInjectsColleagueContextIntoScannerPrompt(t *testing.T) {
 		OriginalText: rootMessage.Summary,
 	})
 
-	if !strings.Contains(scannerPrompt, "COLLEAGUE_CONTEXT") {
+	if !strings.Contains(scannerPrompt, "Institutional context:") {
 		t.Fatalf("expected scanner prompt to include colleague context, got %q", scannerPrompt)
 	}
-	if !strings.Contains(scannerPrompt, "from_desk: desk-geo-a") {
+	if !strings.Contains(scannerPrompt, "colleague.from_desk=desk-geo-a") {
 		t.Fatalf("expected scanner prompt to include origin desk, got %q", scannerPrompt)
 	}
-	if !strings.Contains(scannerPrompt, "peer_trust:") {
+	if !strings.Contains(scannerPrompt, "colleague.peer_trust=") {
 		t.Fatalf("expected scanner prompt to include peer trust, got %q", scannerPrompt)
 	}
 }

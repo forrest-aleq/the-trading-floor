@@ -42,6 +42,7 @@ type Signal struct {
 	Raw                    json.RawMessage    `json:"raw,omitempty"`
 	OriginalText           string             `json:"original_text,omitempty"`
 	Translated             string             `json:"translated,omitempty"`
+	InstitutionalContext   string             `json:"institutional_context,omitempty"`
 	TranslationProvider    string             `json:"translation_provider,omitempty"`
 	TranslationConfidence  float64            `json:"translation_confidence,omitempty"`
 	Embedding              []float32          `json:"embedding,omitempty"`

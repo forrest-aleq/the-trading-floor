@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hnic/trading-floor/internal/llm"
+	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
@@ -243,6 +244,42 @@ func TestInvestigateRecoversWithStructuredRetryAfterPrimaryError(t *testing.T) {
 	}
 	if client.requests[1].Tier != llm.TierSpeed {
 		t.Fatalf("expected retry to downgrade to speed tier, got %v", client.requests[1].Tier)
+	}
+}
+
+func TestBuildResearchPromptIncludesInstitutionalContext(t *testing.T) {
+	client := &researchStubClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	sig := testSignal()
+	sig.InstitutionalContext = "Institutional context:\n  colleague.from_desk=desk-geo-a\n  colleague.peer_trust=0.74"
+	opp := testOpportunity()
+	opp.EvidenceMeta = &evidence.Metadata{
+		SourceTrust:          0.88,
+		LeadTimeAverageHours: 2.3,
+		LeadTimeObservations: 4,
+		LeadTimeScore:        0.42,
+		EvidenceScore:        0.81,
+		FreshnessStatus:      "fresh",
+		FreshnessAgeHours:    1.2,
+		FreshnessWindowHours: 24,
+		DistinctSources:      2,
+		DistinctOwnerGroups:  2,
+		DistinctLanguages:    2,
+		HasPrimarySource:     true,
+		ConfidenceVector:     &evidence.ConfidenceVector{FactConfidence: 0.82},
+	}
+
+	prompt := desk.buildResearchPrompt(opp, sig, nil, false)
+	for _, want := range []string{
+		"Institutional context:",
+		"colleague.from_desk=desk-geo-a",
+		"Historical lead time: avg 2.30h across 4 narratives (score 0.42)",
+		"Source trust: 0.88",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected research prompt to include %q, got %q", want, prompt)
+		}
 	}
 }
 

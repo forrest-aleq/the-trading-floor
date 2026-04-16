@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hnic/trading-floor/internal/institutional"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/marketcontext"
 	"github.com/hnic/trading-floor/pkg/evidence"
@@ -755,152 +756,30 @@ func (d *Desk) buildResearchPrompt(opp *model.Opportunity, sig signal.Signal, ma
 }
 
 func formatSignalForResearch(sig signal.Signal, compact bool) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("  Source: %s\n", sig.Source))
-	sb.WriteString(fmt.Sprintf("  Type/category: %s / %s\n", sig.Type, sig.Category))
-	if sig.Direction != "" {
-		sb.WriteString(fmt.Sprintf("  Signal direction: %s\n", sig.Direction))
-	}
-	if len(sig.Entities) > 0 {
-		limit := 8
-		if compact {
-			limit = 4
-		}
-		sb.WriteString(fmt.Sprintf("  Entities: %s\n", strings.Join(sampleEntities(sig.Entities, limit), ", ")))
-	}
-	if len(sig.Languages) > 0 {
-		sb.WriteString(fmt.Sprintf("  Original language: %s\n", strings.ToLower(sig.Languages[0])))
-	}
-	if len(sig.CorroboratingSources) > 0 {
-		limit := 6
-		if compact {
-			limit = 3
-		}
-		sb.WriteString(fmt.Sprintf("  Corroborating sources: %s\n", strings.Join(sampleStrings(sig.CorroboratingSources, limit), ", ")))
-	}
-	if len(sig.CorroboratingLanguages) > 0 {
-		limit := 6
-		if compact {
-			limit = 3
-		}
-		sb.WriteString(fmt.Sprintf("  Corroborating languages: %s\n", strings.Join(sampleStrings(sig.CorroboratingLanguages, limit), ", ")))
-	}
 	contentLimit := 900
+	relatedLimit := 6
+	entityLimit := 8
 	if compact {
 		contentLimit = 420
+		relatedLimit = 3
+		entityLimit = 4
 	}
-	content := signalContent(sig)
-	if content != "" {
-		sb.WriteString(fmt.Sprintf("  Content: %s\n", truncateForPrompt(content, contentLimit)))
-	}
-	return strings.TrimRight(sb.String(), "\n")
+	return institutional.BuildSignalContext(sig, institutional.SignalContextOptions{
+		Compact:              compact,
+		Indent:               "  ",
+		ContentLimit:         contentLimit,
+		RelatedLimit:         relatedLimit,
+		EntityLimit:          entityLimit,
+		IncludeEvidence:      false,
+		IncludeInstitutional: true,
+	})
 }
 
 func formatEvidenceMetadataForResearch(meta *evidence.Metadata, compact bool) string {
-	if meta == nil {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("  Source trust: %.2f\n", meta.SourceTrust))
-	sb.WriteString(fmt.Sprintf("  Source tier/type: %s / %s\n", meta.SourceTier, meta.SourceType))
-	if !compact {
-		sb.WriteString(fmt.Sprintf("  Source lineage: %s / %s\n", meta.SourceDomain, meta.SourceOwnerGroup))
-	}
-	if meta.OriginalLanguage != "" || meta.OriginRegion != "" {
-		sb.WriteString(fmt.Sprintf("  Original language / region: %s / %s\n", meta.OriginalLanguage, meta.OriginRegion))
-	}
-	if meta.TranslationProvider != "" || meta.TranslationConfidence > 0 {
-		sb.WriteString(fmt.Sprintf("  Translation: provider=%s confidence=%.2f\n", meta.TranslationProvider, meta.TranslationConfidence))
-	}
-	if meta.LeadTimeObservations > 0 {
-		sb.WriteString(fmt.Sprintf("  Historical lead time: avg %.2fh across %d narratives (score %.2f)\n",
-			meta.LeadTimeAverageHours, meta.LeadTimeObservations, meta.LeadTimeScore))
-	}
-	sb.WriteString(fmt.Sprintf("  Freshness: %s (age %.1fh, window %.1fh)\n", meta.FreshnessStatus, meta.FreshnessAgeHours, meta.FreshnessWindowHours))
-	sb.WriteString(fmt.Sprintf("  Distinct sources / owner groups / languages: %d / %d / %d\n",
-		meta.DistinctSources, meta.DistinctOwnerGroups, meta.DistinctLanguages))
-	sb.WriteString(fmt.Sprintf("  Has primary source: %t\n", meta.HasPrimarySource))
-	sb.WriteString(fmt.Sprintf("  Contradictions: %d (%s)\n", meta.ContradictionCount, meta.ContradictionSeverity))
-	sb.WriteString(fmt.Sprintf("  Evidence score: %.2f\n", meta.EvidenceScore))
-	if vector := meta.ConfidenceVector; vector != nil && vector.Present() {
-		sb.WriteString(fmt.Sprintf(
-			"  Confidence vector: fact=%.2f novelty=%.2f market_map=%.2f expression=%.2f execution=%.2f competence=%.2f",
-			vector.FactConfidence,
-			vector.NoveltyConfidence,
-			vector.MarketMappingConfidence,
-			vector.ExpressionConfidence,
-			vector.ExecutionConfidence,
-			vector.CompetenceConfidence,
-		))
-	}
-	return strings.TrimRight(sb.String(), "\n")
-}
-
-func signalContent(sig signal.Signal) string {
-	switch {
-	case strings.TrimSpace(sig.Translated) != "":
-		return strings.TrimSpace(sig.Translated)
-	case strings.TrimSpace(sig.OriginalText) != "":
-		return strings.TrimSpace(sig.OriginalText)
-	case len(sig.Raw) == 0:
-		return ""
-	}
-
-	var decoded string
-	if err := json.Unmarshal(sig.Raw, &decoded); err == nil {
-		return strings.TrimSpace(decoded)
-	}
-	return strings.TrimSpace(string(sig.Raw))
-}
-
-func sampleEntities(entities []signal.Entity, limit int) []string {
-	if len(entities) == 0 || limit <= 0 {
-		return nil
-	}
-	if len(entities) > limit {
-		entities = entities[:limit]
-	}
-	values := make([]string, 0, len(entities))
-	for _, entity := range entities {
-		label := strings.TrimSpace(entity.Name)
-		if label == "" {
-			continue
-		}
-		if kind := strings.TrimSpace(entity.Type); kind != "" {
-			label += ":" + kind
-		}
-		values = append(values, label)
-	}
-	return values
-}
-
-func sampleStrings(values []string, limit int) []string {
-	if len(values) == 0 || limit <= 0 {
-		return nil
-	}
-	if len(values) > limit {
-		values = values[:limit]
-	}
-	sampled := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		sampled = append(sampled, value)
-	}
-	return sampled
-}
-
-func truncateForPrompt(value string, max int) string {
-	value = strings.TrimSpace(value)
-	if max <= 0 || len(value) <= max {
-		return value
-	}
-	if max <= 3 {
-		return value[:max]
-	}
-	return value[:max-3] + "..."
+	return institutional.BuildEvidenceContext(meta, institutional.EvidenceContextOptions{
+		Compact: compact,
+		Indent:  "  ",
+	})
 }
 
 func minResearchRetryTokens(maxTokens int) int {

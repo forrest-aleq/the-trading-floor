@@ -14,6 +14,7 @@ import (
 	"github.com/hnic/trading-floor/internal/book"
 	"github.com/hnic/trading-floor/internal/execution"
 	"github.com/hnic/trading-floor/internal/graphdb"
+	"github.com/hnic/trading-floor/internal/institutional"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
@@ -537,26 +538,11 @@ func (d *Desk) augmentSignalWithCollaborationContext(sig signal.Signal) signal.S
 	if input == nil {
 		return sig
 	}
-	prefix := fmt.Sprintf(
-		"COLLEAGUE_CONTEXT\nfrom_desk: %s\nfrom_domain: %s\nmessage_kind: %s\nrequested_action: %s\npeer_trust: %.2f\npeer_confidence: %.2f\nsummary: %s\n\n",
-		input.OriginDesk,
-		input.OriginDomain,
-		input.Kind,
-		input.RequestedAction,
-		input.RelationshipTrust,
-		input.RelationshipConfidence,
-		input.Summary,
-	)
-	base := strings.TrimSpace(sig.Translated)
-	if base == "" {
-		base = strings.TrimSpace(sig.OriginalText)
-	}
-	if base == "" {
-		base = strings.TrimSpace(string(sig.Raw))
-	}
-	sig.Translated = prefix + base
-	if strings.TrimSpace(sig.OriginalText) == "" {
-		sig.OriginalText = sig.Translated
+	contextBlock := institutional.BuildCollaborationContext(input, "  ")
+	if sig.InstitutionalContext == "" {
+		sig.InstitutionalContext = contextBlock
+	} else if contextBlock != "" {
+		sig.InstitutionalContext = strings.TrimSpace(sig.InstitutionalContext) + "\n" + contextBlock
 	}
 	return sig
 }

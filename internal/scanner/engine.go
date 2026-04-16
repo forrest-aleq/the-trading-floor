@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hnic/trading-floor/internal/institutional"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
@@ -331,7 +332,7 @@ func (e *Engine) EvaluateDetailed(ctx context.Context, sig signal.Signal, domain
 			"error", err,
 			"signal_id", sig.ID,
 			"response_len", len(resp),
-			"response_excerpt", truncateForPrompt(resp, 320),
+			"response_excerpt", institutional.TruncateForPrompt(resp, 320),
 		)
 		return Evaluation{Reason: "parse_error"}
 	}
@@ -753,7 +754,7 @@ func inferThoughtRejectReason(raw string) string {
 			"lacks a precise directional setup",
 			"lacks a specific thesis",
 		) {
-			return truncateForPrompt(cleaned, 96)
+			return institutional.TruncateForPrompt(cleaned, 96)
 		}
 	}
 	return "incomplete thought trace defaulted to reject"
@@ -926,95 +927,13 @@ func formatSignal(sig signal.Signal) string {
 }
 
 func formatSignalWithLimit(sig signal.Signal, contentLimit, relatedLimit, entityLimit int) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Source: %s\n", sig.Source))
-	sb.WriteString(fmt.Sprintf("Type: %s\n", sig.Type))
-	sb.WriteString(fmt.Sprintf("Category: %s\n", sig.Category))
-	sb.WriteString(fmt.Sprintf("Urgency: %.2f\n", sig.Urgency))
-	if sig.ClusterID != "" {
-		sb.WriteString(fmt.Sprintf("Cluster: %s\n", sig.ClusterID))
-	}
-	if sig.NarrativeClusterID != "" {
-		sb.WriteString(fmt.Sprintf("Narrative: %s\n", sig.NarrativeClusterID))
-	}
-	if len(sig.Languages) > 0 {
-		sb.WriteString(fmt.Sprintf("Original language: %s\n", strings.ToLower(sig.Languages[0])))
-	}
-	if sig.TranslationProvider != "" || sig.TranslationConfidence > 0 {
-		sb.WriteString(fmt.Sprintf("Translation: provider=%s confidence=%.2f\n", sig.TranslationProvider, sig.TranslationConfidence))
-	}
-	if len(sig.RelatedSignalIDs) > 0 {
-		sb.WriteString(fmt.Sprintf("Related signals: %d (%s)\n", len(sig.RelatedSignalIDs), strings.Join(sampleStrings(sig.RelatedSignalIDs, relatedLimit), ", ")))
-	}
-	if len(sig.CorroboratingSources) > 0 {
-		sb.WriteString(fmt.Sprintf("Corroborating sources: %s\n", strings.Join(sampleStrings(sig.CorroboratingSources, relatedLimit), ", ")))
-	}
-	if len(sig.CorroboratingEntities) > 0 {
-		sb.WriteString(fmt.Sprintf("Corroborating entities: %s\n", strings.Join(sampleStrings(sig.CorroboratingEntities, relatedLimit), ", ")))
-	}
-	if len(sig.CorroboratingLanguages) > 0 {
-		sb.WriteString(fmt.Sprintf("Corroborating languages: %s\n", strings.Join(sampleStrings(sig.CorroboratingLanguages, relatedLimit), ", ")))
-	}
-	if sig.EvidenceMeta != nil {
-		sb.WriteString(fmt.Sprintf("Source trust: %.2f\n", sig.EvidenceMeta.SourceTrust))
-		if sig.EvidenceMeta.SourceTier != "" || sig.EvidenceMeta.SourceType != "" {
-			sb.WriteString(fmt.Sprintf("Source quality: tier=%s type=%s\n", sig.EvidenceMeta.SourceTier, sig.EvidenceMeta.SourceType))
-		}
-		if sig.EvidenceMeta.SourceDomain != "" || sig.EvidenceMeta.SourceOwnerGroup != "" {
-			sb.WriteString(fmt.Sprintf("Source lineage: domain=%s owner_group=%s\n", sig.EvidenceMeta.SourceDomain, sig.EvidenceMeta.SourceOwnerGroup))
-		}
-		if sig.EvidenceMeta.OriginRegion != "" {
-			sb.WriteString(fmt.Sprintf("Origin region: %s\n", sig.EvidenceMeta.OriginRegion))
-		}
-		if len(sig.EvidenceMeta.CorroboratingOwnerGroups) > 0 {
-			sb.WriteString(fmt.Sprintf("Independent owner groups: %s\n", strings.Join(sampleStrings(sig.EvidenceMeta.CorroboratingOwnerGroups, relatedLimit), ", ")))
-		}
-		if sig.EvidenceMeta.LeadTimeObservations > 0 {
-			sb.WriteString(fmt.Sprintf("Historical lead time: avg %.2fh across %d narratives (score %.2f)\n",
-				sig.EvidenceMeta.LeadTimeAverageHours,
-				sig.EvidenceMeta.LeadTimeObservations,
-				sig.EvidenceMeta.LeadTimeScore,
-			))
-		}
-		if sig.EvidenceMeta.DistinctLanguages > 0 {
-			sb.WriteString(fmt.Sprintf("Distinct languages: %d\n", sig.EvidenceMeta.DistinctLanguages))
-		}
-		if sig.EvidenceMeta.FreshnessStatus != "" {
-			sb.WriteString(fmt.Sprintf("Freshness: %s (age %.1fh / window %.1fh)\n", sig.EvidenceMeta.FreshnessStatus, sig.EvidenceMeta.FreshnessAgeHours, sig.EvidenceMeta.FreshnessWindowHours))
-		}
-		if sig.EvidenceMeta.ContradictionCount > 0 {
-			sb.WriteString(fmt.Sprintf("Contradictions: %d (%s)\n", sig.EvidenceMeta.ContradictionCount, sig.EvidenceMeta.ContradictionSeverity))
-		}
-		sb.WriteString(fmt.Sprintf("Evidence score: %.2f\n", sig.EvidenceMeta.EvidenceScore))
-		if vector := sig.EvidenceMeta.ConfidenceVector; vector != nil && vector.Present() {
-			sb.WriteString(fmt.Sprintf(
-				"Confidence vector: fact=%.2f novelty=%.2f market_map=%.2f expression=%.2f execution=%.2f competence=%.2f\n",
-				vector.FactConfidence,
-				vector.NoveltyConfidence,
-				vector.MarketMappingConfidence,
-				vector.ExpressionConfidence,
-				vector.ExecutionConfidence,
-				vector.CompetenceConfidence,
-			))
-		}
-	}
-	if sig.Translated != "" {
-		sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(sig.Translated, contentLimit)))
-	} else if len(sig.Raw) > 0 {
-		sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(string(sig.Raw), contentLimit)))
-	}
-	if len(sig.Entities) > 0 {
-		entities := sig.Entities
-		if len(entities) > entityLimit {
-			entities = entities[:entityLimit]
-		}
-		names := make([]string, len(entities))
-		for i, e := range entities {
-			names[i] = e.Name
-		}
-		sb.WriteString(fmt.Sprintf("Entities: %s\n", strings.Join(names, ", ")))
-	}
-	return sb.String()
+	return institutional.BuildSignalContext(sig, institutional.SignalContextOptions{
+		ContentLimit:         contentLimit,
+		RelatedLimit:         relatedLimit,
+		EntityLimit:          entityLimit,
+		IncludeEvidence:      true,
+		IncludeInstitutional: true,
+	})
 }
 
 func evidenceTrust(sig signal.Signal) float64 {
@@ -1031,24 +950,6 @@ func evidenceScore(sig signal.Signal) float64 {
 	return sig.EvidenceMeta.EvidenceScore
 }
 
-func sampleStrings(items []string, max int) []string {
-	if len(items) <= max {
-		return items
-	}
-	return items[:max]
-}
-
-func truncateForPrompt(text string, max int) string {
-	text = strings.TrimSpace(text)
-	if len(text) <= max {
-		return text
-	}
-	if max <= 3 {
-		return text[:max]
-	}
-	return text[:max-3] + "..."
-}
-
 func buildPrompt(domain, content string) string {
 	domainGuide := domainContext(domain)
 	prompt := fmt.Sprintf("Domain filter: %s\n", domain)
@@ -1062,36 +963,15 @@ func buildPrompt(domain, content string) string {
 func buildCompactPrompt(domain string, sig signal.Signal) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Domain: %s\n", domain))
-	sb.WriteString(fmt.Sprintf("Source: %s\n", sig.Source))
-	sb.WriteString(fmt.Sprintf("Type: %s\n", sig.Type))
-	sb.WriteString(fmt.Sprintf("Urgency: %.2f\n", sig.Urgency))
-	if len(sig.CorroboratingSources) > 0 {
-		sb.WriteString(fmt.Sprintf("Corroborating sources: %s\n", strings.Join(sampleStrings(sig.CorroboratingSources, 2), ", ")))
-	}
-	if sig.EvidenceMeta != nil {
-		sb.WriteString(fmt.Sprintf("Source trust: %.2f\n", sig.EvidenceMeta.SourceTrust))
-		sb.WriteString(fmt.Sprintf("Evidence score: %.2f\n", sig.EvidenceMeta.EvidenceScore))
-	}
-	if len(sig.Entities) > 0 {
-		names := make([]string, 0, 4)
-		for _, entity := range sig.Entities {
-			if entity.Name == "" {
-				continue
-			}
-			names = append(names, entity.Name)
-			if len(names) == 4 {
-				break
-			}
-		}
-		if len(names) > 0 {
-			sb.WriteString(fmt.Sprintf("Entities: %s\n", strings.Join(names, ", ")))
-		}
-	}
-	content := sig.Translated
-	if content == "" && len(sig.Raw) > 0 {
-		content = string(sig.Raw)
-	}
-	sb.WriteString(fmt.Sprintf("Content: %s\n", truncateForPrompt(content, 180)))
+	sb.WriteString(institutional.BuildSignalContext(sig, institutional.SignalContextOptions{
+		Compact:              true,
+		ContentLimit:         180,
+		RelatedLimit:         2,
+		EntityLimit:          4,
+		IncludeEvidence:      true,
+		IncludeInstitutional: true,
+	}))
+	sb.WriteByte('\n')
 	return sb.String()
 }
 

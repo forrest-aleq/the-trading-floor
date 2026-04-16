@@ -31,13 +31,7 @@ func BuildSignalContext(sig signal.Signal, opts SignalContextOptions) string {
 	}
 
 	if opts.IncludeInstitutional && strings.TrimSpace(sig.InstitutionalContext) != "" {
-		for _, line := range strings.Split(strings.TrimSpace(sig.InstitutionalContext), "\n") {
-			if sb.Len() > 0 {
-				sb.WriteByte('\n')
-			}
-			sb.WriteString(opts.Indent)
-			sb.WriteString(line)
-		}
+		appendIndentedBlock(&sb, opts.Indent, sig.InstitutionalContext)
 	}
 
 	write("Source: %s", sig.Source)
@@ -91,6 +85,64 @@ func BuildSignalContext(sig signal.Signal, opts SignalContextOptions) string {
 
 	if content := SignalContent(sig); content != "" && opts.ContentLimit != 0 {
 		write("Content: %s", TruncateForPrompt(content, opts.ContentLimit))
+	}
+
+	return sb.String()
+}
+
+type ThesisContextOptions struct {
+	Indent               string
+	IncludeInstitutional bool
+	IncludeEvidence      bool
+	IncludeCounterArgs   bool
+	IncludeQuant         bool
+	IncludeProsecution   bool
+}
+
+func BuildThesisContext(thesis *model.Thesis, opts ThesisContextOptions) string {
+	if thesis == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	write := func(line string, args ...any) {
+		if sb.Len() > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(opts.Indent)
+		sb.WriteString(fmt.Sprintf(line, args...))
+	}
+
+	primary := thesis.PrimaryInstrument()
+	write("Symbol: %s (%s)", thesis.DisplaySymbol(), primary.SecType)
+	write("Direction: %s", thesis.Direction)
+	write("Strategy: %s", thesis.Strategy)
+	if thesis.Structure != "" {
+		write("Structure: %s", thesis.Structure)
+	}
+	write("Conviction: %.2f", thesis.Conviction)
+	write("Entry: %.2f / Target: %.2f / Stop: %.2f", thesis.EntryPrice, thesis.TargetPrice, thesis.StopLoss)
+	if thesis.TimeHorizon > 0 {
+		write("Time horizon: %s", thesis.TimeHorizon)
+	}
+	if thesis.PositionSize > 0 {
+		write("Position size (notional %%): %.2f", thesis.PositionSize)
+	}
+
+	if opts.IncludeInstitutional {
+		appendIndentedBlock(&sb, opts.Indent, BuildThesisInstitutionalContext(thesis, "  "))
+	}
+	if opts.IncludeEvidence {
+		appendIndentedBlock(&sb, opts.Indent, BuildThesisEvidenceContext(thesis, "  "))
+	}
+	if opts.IncludeCounterArgs {
+		appendIndentedBlock(&sb, opts.Indent, BuildCounterArgumentContext(thesis.CounterArgs, "  "))
+	}
+	if opts.IncludeProsecution {
+		appendIndentedBlock(&sb, opts.Indent, BuildProsecutionContext(thesis.Prosecution, "  "))
+	}
+	if opts.IncludeQuant {
+		appendIndentedBlock(&sb, opts.Indent, BuildQuantMetricsContext(thesis.QuantMetrics, "  "))
 	}
 
 	return sb.String()
@@ -157,6 +209,144 @@ func BuildEvidenceContext(meta *evidence.Metadata, opts EvidenceContextOptions) 
 		)
 	}
 	return sb.String()
+}
+
+func BuildThesisInstitutionalContext(thesis *model.Thesis, indent string) string {
+	if thesis == nil {
+		return ""
+	}
+
+	lines := []string{"Institutional context:"}
+	if thesis.AutonomyMode != "" {
+		lines = append(lines, fmt.Sprintf("%sautonomy.mode=%s", indent, thesis.AutonomyMode))
+	}
+	if thesis.ScanTerritory != "" {
+		lines = append(lines, fmt.Sprintf("%sscan.territory=%s", indent, thesis.ScanTerritory))
+	}
+	if thesis.ExecutionTerritory != "" {
+		lines = append(lines, fmt.Sprintf("%sexecution.territory=%s", indent, thesis.ExecutionTerritory))
+	}
+	if thesis.CompetenceKey != "" {
+		lines = append(lines, fmt.Sprintf("%scompetence.key=%s", indent, thesis.CompetenceKey))
+	}
+	if thesis.CompetenceTrust > 0 {
+		lines = append(lines, fmt.Sprintf("%scompetence.trust=%.2f", indent, thesis.CompetenceTrust))
+	}
+	if thesis.CompetenceConfidence > 0 {
+		lines = append(lines, fmt.Sprintf("%scompetence.confidence=%.2f", indent, thesis.CompetenceConfidence))
+	}
+	if thesis.CollaborationInput != nil {
+		for _, line := range strings.Split(BuildCollaborationContext(thesis.CollaborationInput, indent), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || line == "Institutional context:" {
+				continue
+			}
+			lines = append(lines, line)
+		}
+	}
+
+	if len(lines) == 1 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+func BuildThesisEvidenceContext(thesis *model.Thesis, indent string) string {
+	if thesis == nil {
+		return ""
+	}
+
+	var blocks []string
+	if len(thesis.Evidence) > 0 {
+		lines := []string{"Evidence:"}
+		for i, item := range thesis.Evidence {
+			line := fmt.Sprintf("%s%d. %s (weight: %.1f)", indent, i+1, strings.TrimSpace(item.Content), item.Weight)
+			if item.Source != "" {
+				line += fmt.Sprintf(" [source=%s]", item.Source)
+			}
+			if item.SignalID != "" {
+				line += fmt.Sprintf(" [signal_id=%s]", item.SignalID)
+			}
+			lines = append(lines, line)
+		}
+		blocks = append(blocks, strings.Join(lines, "\n"))
+	}
+	if thesis.EvidenceMeta != nil {
+		blocks = append(blocks, BuildEvidenceContext(thesis.EvidenceMeta, EvidenceContextOptions{
+			Indent:  indent,
+			Compact: false,
+		}))
+	}
+	return joinBlocks(blocks...)
+}
+
+func BuildCounterArgumentContext(args []string, indent string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	lines := []string{"Counter arguments:"}
+	for i, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s%d. %s", indent, i+1, arg))
+	}
+	if len(lines) == 1 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+func BuildProsecutionContext(p *model.Prosecution, indent string) string {
+	if p == nil {
+		return "Prosecution verdict: not prosecuted"
+	}
+	lines := []string{
+		fmt.Sprintf("Prosecution verdict: %s", strings.TrimSpace(p.Verdict)),
+		fmt.Sprintf("%sconfidence_adjustment=%.2f", indent, p.Confidence),
+	}
+	if len(p.BearArgs) > 0 {
+		lines = append(lines, fmt.Sprintf("%sbear_args=%s", indent, strings.Join(SampleStrings(p.BearArgs, 5), "; ")))
+	}
+	if len(p.Analogues) > 0 {
+		lines = append(lines, fmt.Sprintf("%shistorical_analogues=%s", indent, strings.Join(SampleStrings(p.Analogues, 4), "; ")))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func BuildQuantMetricsContext(metrics *model.QuantMetrics, indent string) string {
+	if metrics == nil {
+		return "Quant metrics:\n" + indent + "unavailable"
+	}
+
+	lines := []string{
+		"Quant metrics:",
+		fmt.Sprintf("%smethod=%s", indent, strings.TrimSpace(metrics.Method)),
+		fmt.Sprintf("%sdefined_risk=%t", indent, metrics.DefinedRisk),
+	}
+	if metrics.MaxLoss > 0 {
+		lines = append(lines, fmt.Sprintf("%smax_loss=%.2f", indent, metrics.MaxLoss))
+	}
+	if metrics.MaxGain > 0 {
+		lines = append(lines, fmt.Sprintf("%smax_gain=%.2f", indent, metrics.MaxGain))
+	}
+	if metrics.Breakeven != 0 {
+		lines = append(lines, fmt.Sprintf("%sbreakeven=%.2f", indent, metrics.Breakeven))
+	}
+	if metrics.MarginEstimate > 0 {
+		lines = append(lines, fmt.Sprintf("%smargin_estimate=%.2f", indent, metrics.MarginEstimate))
+	}
+	if metrics.RewardToRisk > 0 {
+		lines = append(lines, fmt.Sprintf("%sreward_to_risk=%.2f", indent, metrics.RewardToRisk))
+	}
+	if metrics.NetDeltaBias != 0 {
+		lines = append(lines, fmt.Sprintf("%snet_delta_bias=%.2f", indent, metrics.NetDeltaBias))
+	}
+	if len(metrics.Warnings) > 0 {
+		lines = append(lines, fmt.Sprintf("%swarnings=%s", indent, strings.Join(SampleStrings(metrics.Warnings, 5), "; ")))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func BuildCollaborationContext(input *model.CollaborationInput, indent string) string {
@@ -243,4 +433,30 @@ func TruncateForPrompt(value string, max int) string {
 		return value[:max]
 	}
 	return value[:max-3] + "..."
+}
+
+func appendIndentedBlock(sb *strings.Builder, indent, block string) {
+	block = strings.TrimSpace(block)
+	if block == "" {
+		return
+	}
+	for _, line := range strings.Split(block, "\n") {
+		if sb.Len() > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(indent)
+		sb.WriteString(line)
+	}
+}
+
+func joinBlocks(blocks ...string) string {
+	filtered := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		filtered = append(filtered, block)
+	}
+	return strings.Join(filtered, "\n")
 }

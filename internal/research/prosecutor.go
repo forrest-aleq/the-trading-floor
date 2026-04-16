@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/hnic/trading-floor/internal/institutional"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/pkg/model"
 )
@@ -89,32 +90,7 @@ JSON schema:
 
 // Challenge attempts to kill a thesis
 func (p *Prosecutor) Challenge(ctx context.Context, thesis *model.Thesis) *model.Prosecution {
-	prompt := fmt.Sprintf(`Thesis to prosecute:
-
-Symbol: %s (%s)
-Direction: %s
-Strategy: %s
-Conviction: %.2f
-Entry: %.2f / Target: %.2f / Stop: %.2f
-Time Horizon: %s
-
-Evidence:
-%s
-
-Counter Arguments Already Considered:
-%s
-
-Quant Metrics:
-%s`,
-		thesis.Instrument.Symbol, thesis.Instrument.SecType,
-		thesis.Direction, thesis.Strategy,
-		thesis.Conviction,
-		thesis.EntryPrice, thesis.TargetPrice, thesis.StopLoss,
-		thesis.TimeHorizon,
-		formatEvidence(thesis.Evidence),
-		formatCounterArgs(thesis.CounterArgs),
-		formatQuantMetrics(thesis.QuantMetrics),
-	)
+	prompt := p.buildProsecutionPrompt(thesis)
 
 	resp, err := p.askProsecutionWithFallbackMode(ctx, prompt)
 	if err != nil {
@@ -192,6 +168,15 @@ Quant Metrics:
 	return prosecution
 }
 
+func (p *Prosecutor) buildProsecutionPrompt(thesis *model.Thesis) string {
+	return "Thesis to prosecute:\n\n" + institutional.BuildThesisContext(thesis, institutional.ThesisContextOptions{
+		IncludeInstitutional: true,
+		IncludeEvidence:      true,
+		IncludeCounterArgs:   true,
+		IncludeQuant:         true,
+	})
+}
+
 func (p *Prosecutor) askProsecutionWithFallbackMode(ctx context.Context, prompt string) (string, error) {
 	resp, retried, err := askStructuredWithRetry(ctx, p.llm, llm.TierCritical, p.responseMode, prosecutionPrompt, prosecutionThoughtPrefix, prompt, prosecutionMaxTokens, 0.2)
 	if retried {
@@ -233,47 +218,4 @@ type prosecutionResult struct {
 	CrowdedScore         float64  `json:"crowded_score"`
 	ConfidenceAdjustment float64  `json:"confidence_adjustment"`
 	Reasoning            string   `json:"reasoning"`
-}
-
-func formatEvidence(evidence []model.Evidence) string {
-	var s string
-	for i, e := range evidence {
-		s += fmt.Sprintf("  %d. %s (weight: %.1f)\n", i+1, e.Content, e.Weight)
-	}
-	return s
-}
-
-func formatCounterArgs(args []string) string {
-	var s string
-	for i, a := range args {
-		s += fmt.Sprintf("  %d. %s\n", i+1, a)
-	}
-	return s
-}
-
-func formatQuantMetrics(metrics *model.QuantMetrics) string {
-	if metrics == nil {
-		return "  unavailable\n"
-	}
-
-	s := fmt.Sprintf("  Method: %s\n  Defined risk: %t\n", metrics.Method, metrics.DefinedRisk)
-	if metrics.MaxLoss > 0 {
-		s += fmt.Sprintf("  Max loss: %.2f\n", metrics.MaxLoss)
-	}
-	if metrics.MaxGain > 0 {
-		s += fmt.Sprintf("  Max gain: %.2f\n", metrics.MaxGain)
-	}
-	if metrics.Breakeven != 0 {
-		s += fmt.Sprintf("  Breakeven: %.2f\n", metrics.Breakeven)
-	}
-	if metrics.MarginEstimate > 0 {
-		s += fmt.Sprintf("  Margin estimate: %.2f\n", metrics.MarginEstimate)
-	}
-	if metrics.RewardToRisk > 0 {
-		s += fmt.Sprintf("  Reward/risk: %.2f\n", metrics.RewardToRisk)
-	}
-	if len(metrics.Warnings) > 0 {
-		s += fmt.Sprintf("  Warnings: %v\n", metrics.Warnings)
-	}
-	return s
 }

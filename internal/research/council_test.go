@@ -250,6 +250,34 @@ func TestCouncilPerspectiveStructuredRetryRecoversBeforeCompilerFallback(t *test
 	}
 }
 
+func TestBuildCouncilPromptIncludesInstitutionalContext(t *testing.T) {
+	council := NewCouncil(nil)
+	thesis := thesisWithInstitutionalContext()
+	thesis.Prosecution = &model.Prosecution{
+		Verdict:    "weakened",
+		BearArgs:   []string{"crowded expression", "timing risk"},
+		Analogues:  []string{"jackson hole whipsaw"},
+		Confidence: -0.08,
+	}
+
+	prompt := council.buildCouncilThesisPrompt(thesis)
+
+	for _, want := range []string{
+		"Institutional context:",
+		"colleague.from_desk=geo-desk-a",
+		"competence.key=macro::rates::hawkish_fed",
+		"Evidence:",
+		"Source trust: 0.88",
+		"Prosecution verdict: weakened",
+		"bear_args=crowded expression; timing risk",
+		"Quant metrics:",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected council prompt to include %q, got %q", want, prompt)
+		}
+	}
+}
+
 func validCouncilPerspectiveJSON() string {
 	return `{
   "perspective": "timing and liquidity are acceptable",

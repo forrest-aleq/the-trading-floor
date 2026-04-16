@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hnic/trading-floor/internal/institutional"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/pkg/model"
 )
@@ -141,32 +142,7 @@ func (c *Council) SetVoiceTelemetryProvider(provider VoiceTelemetryProvider) {
 // Debate convenes all archetypes to evaluate a thesis in parallel.
 func (c *Council) Debate(ctx context.Context, thesis *model.Thesis) *model.CouncilVerdict {
 	telemetry := c.voiceTelemetry(ctx, thesis.Domain)
-	thesisPrompt := fmt.Sprintf(`Thesis under council review:
-
-Symbol: %s (%s)
-Direction: %s
-Strategy: %s
-Conviction: %.2f
-Entry: %.2f / Target: %.2f / Stop: %.2f
-Time Horizon: %s
-Position Size (notional %%): %.2f
-
-Evidence: %s
-Counter Arguments: %s
-Prosecution Verdict: %s
-Quant Metrics:
-%s`,
-		thesis.Instrument.Symbol, thesis.Instrument.SecType,
-		thesis.Direction, thesis.Strategy,
-		thesis.Conviction,
-		thesis.EntryPrice, thesis.TargetPrice, thesis.StopLoss,
-		thesis.TimeHorizon,
-		thesis.PositionSize,
-		formatEvidence(thesis.Evidence),
-		formatCounterArgs(thesis.CounterArgs),
-		prosecutionVerdict(thesis.Prosecution),
-		formatQuantMetrics(thesis.QuantMetrics),
-	)
+	thesisPrompt := c.buildCouncilThesisPrompt(thesis)
 
 	var mu sync.Mutex
 	var results []perspectiveResult
@@ -222,6 +198,16 @@ Quant Metrics:
 	wg.Wait()
 
 	return c.synthesize(thesis, results)
+}
+
+func (c *Council) buildCouncilThesisPrompt(thesis *model.Thesis) string {
+	return "Thesis under council review:\n\n" + institutional.BuildThesisContext(thesis, institutional.ThesisContextOptions{
+		IncludeInstitutional: true,
+		IncludeEvidence:      true,
+		IncludeCounterArgs:   true,
+		IncludeProsecution:   true,
+		IncludeQuant:         true,
+	})
 }
 
 func (c *Council) requestPerspectiveJSON(ctx context.Context, archetype, systemPrompt, thesisPrompt string) (string, error) {
@@ -372,13 +358,6 @@ func (c *Council) synthesize(thesis *model.Thesis, results []perspectiveResult) 
 		WeightedVoteScore:  voteScore,
 		TotalWeight:        totalWeight,
 	}
-}
-
-func prosecutionVerdict(p *model.Prosecution) string {
-	if p == nil {
-		return "not prosecuted"
-	}
-	return p.Verdict
 }
 
 func (c *Council) voiceTelemetry(ctx context.Context, domain string) map[string]model.CouncilVoiceStats {

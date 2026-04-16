@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hnic/trading-floor/internal/llm"
+	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
@@ -161,6 +162,26 @@ func TestProsecutorStructuredRetryRecoversBeforeCompilerFallback(t *testing.T) {
 	}
 }
 
+func TestBuildProsecutionPromptIncludesInstitutionalContext(t *testing.T) {
+	prosecutor := NewProsecutor(nil)
+	prompt := prosecutor.buildProsecutionPrompt(thesisWithInstitutionalContext())
+
+	for _, want := range []string{
+		"Institutional context:",
+		"autonomy.mode=supervised",
+		"competence.key=macro::rates::hawkish_fed",
+		"competence.trust=0.74",
+		"colleague.from_desk=geo-desk-a",
+		"Source trust: 0.88",
+		"Counter arguments:",
+		"Quant metrics:",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected prosecution prompt to include %q, got %q", want, prompt)
+		}
+	}
+}
+
 func structuredTestThesis() *model.Thesis {
 	return &model.Thesis{
 		ID: "thesis-structured",
@@ -204,4 +225,37 @@ func validProsecutionJSON() string {
   "confidence_adjustment": -0.05,
   "reasoning": "the thesis survives but needs caution"
 }`
+}
+
+func thesisWithInstitutionalContext() *model.Thesis {
+	thesis := structuredTestThesis()
+	thesis.AutonomyMode = model.Supervised
+	thesis.CompetenceKey = "macro::rates::hawkish_fed"
+	thesis.CompetenceTrust = 0.74
+	thesis.CompetenceConfidence = 0.61
+	thesis.ExecutionTerritory = "adjacent"
+	thesis.CollaborationInput = &model.CollaborationInput{
+		OriginDesk:             "geo-desk-a",
+		OriginDomain:           "geopolitical",
+		Kind:                   model.ColleagueMessageProposal,
+		RequestedAction:        "pressure_test_rates_impact",
+		Summary:                "Iran risk is leaking into oil and rates expectations.",
+		RelationshipTrust:      0.83,
+		RelationshipConfidence: 0.57,
+	}
+	thesis.EvidenceMeta = &evidence.Metadata{
+		SourceTrust:          0.88,
+		SourceTier:           "tier_1",
+		SourceType:           "primary",
+		OriginalLanguage:     "en",
+		OriginRegion:         "us",
+		FreshnessStatus:      "fresh",
+		FreshnessAgeHours:    0.5,
+		FreshnessWindowHours: 12,
+		DistinctSources:      3,
+		DistinctOwnerGroups:  2,
+		DistinctLanguages:    1,
+		EvidenceScore:        0.79,
+	}
+	return thesis
 }

@@ -695,12 +695,21 @@ func (d *Desk) maybePublishInternalSignal(ctx context.Context, origin signal.Sig
 }
 
 func (d *Desk) normalizePositionSize(thesis *model.Thesis) {
-	if thesis == nil || thesis.PositionSize <= 0 || thesis.EntryPrice <= 0 || d.Capital <= 0 {
+	if thesis == nil || thesis.PositionSize <= 0 || d.Capital <= 0 {
+		return
+	}
+	referencePrice := thesisReferencePrice(thesis)
+	if referencePrice <= 0 {
 		return
 	}
 
 	targetNotional := d.Capital * thesis.PositionSize
+	originalEntry := thesis.EntryPrice
+	if originalEntry <= 0 {
+		thesis.EntryPrice = referencePrice
+	}
 	unitNotional := thesis.GrossEntryNotional(1)
+	thesis.EntryPrice = originalEntry
 	if targetNotional <= 0 || unitNotional <= 0 {
 		return
 	}
@@ -711,6 +720,23 @@ func (d *Desk) normalizePositionSize(thesis *model.Thesis) {
 		quantity = math.Max(1, math.Floor(quantity))
 	}
 	thesis.PositionSize = quantity
+}
+
+func thesisReferencePrice(thesis *model.Thesis) float64 {
+	if thesis == nil {
+		return 0
+	}
+	candidates := []float64{thesis.EntryPrice}
+	if thesis.MarketContext != nil {
+		candidates = append(candidates, thesis.MarketContext.CurrentPrice)
+	}
+	candidates = append(candidates, thesis.TargetPrice, thesis.StopLoss)
+	for _, price := range candidates {
+		if price > 0 {
+			return price
+		}
+	}
+	return 0
 }
 
 type autonomyDecision struct {

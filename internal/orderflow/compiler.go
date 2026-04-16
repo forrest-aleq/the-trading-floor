@@ -51,6 +51,8 @@ func (c *Compiler) CompileEntry(input EntryInput) (*model.Order, error) {
 		orderType = model.OrderLimit
 	}
 
+	notional := thesisNotional(thesis, quantity)
+
 	order := &model.Order{
 		ID:          thesis.ID,
 		ThesisID:    thesis.ID,
@@ -64,7 +66,7 @@ func (c *Compiler) CompileEntry(input EntryInput) (*model.Order, error) {
 		LimitPrice:  thesis.EntryPrice,
 		StopPrice:   thesis.StopLoss,
 		TimeInForce: firstNonEmpty(input.ExitTIF, defaultTimeInForce),
-		Notional:    thesis.GrossEntryNotional(quantity),
+		Notional:    notional,
 	}
 	return order, nil
 }
@@ -119,4 +121,34 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func thesisNotional(thesis *model.Thesis, quantity float64) float64 {
+	if thesis == nil {
+		return 0
+	}
+	originalEntry := thesis.EntryPrice
+	if originalEntry <= 0 {
+		thesis.EntryPrice = thesisReferencePrice(thesis)
+	}
+	notional := thesis.GrossEntryNotional(quantity)
+	thesis.EntryPrice = originalEntry
+	return notional
+}
+
+func thesisReferencePrice(thesis *model.Thesis) float64 {
+	if thesis == nil {
+		return 0
+	}
+	candidates := []float64{thesis.EntryPrice}
+	if thesis.MarketContext != nil {
+		candidates = append(candidates, thesis.MarketContext.CurrentPrice)
+	}
+	candidates = append(candidates, thesis.TargetPrice, thesis.StopLoss)
+	for _, price := range candidates {
+		if price > 0 {
+			return price
+		}
+	}
+	return 0
 }

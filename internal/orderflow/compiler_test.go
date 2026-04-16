@@ -40,6 +40,9 @@ func TestCompileEntryFallsBackToMarketOrder(t *testing.T) {
 		Instrument:   model.Instrument{Symbol: "TLT", SecType: "STK", Currency: "USD"},
 		Direction:    model.Short,
 		PositionSize: 5,
+		MarketContext: &model.MarketContext{
+			CurrentPrice: 90,
+		},
 	}
 
 	order, err := compiler.CompileEntry(EntryInput{DeskID: "desk-b", Thesis: thesis})
@@ -48,6 +51,9 @@ func TestCompileEntryFallsBackToMarketOrder(t *testing.T) {
 	}
 	if order.OrderType != model.OrderMarket {
 		t.Fatalf("expected market order, got %s", order.OrderType)
+	}
+	if order.Notional <= 0 {
+		t.Fatalf("expected positive notional from market context, got %.2f", order.Notional)
 	}
 }
 

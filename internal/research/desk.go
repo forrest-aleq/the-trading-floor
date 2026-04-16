@@ -537,10 +537,75 @@ func normalizeResearchInstrument(inst model.Instrument) model.Instrument {
 	}
 	inst.Right = normalizeOptionRight(inst.Right)
 	inst.Expiry = normalizeContractExpiry(inst.Expiry)
+	if shouldDowngradeMalformedDerivativeLikeInstrument(inst) {
+		inst = downgradeDerivativeToUnderlying(inst)
+	}
 	if shouldDowngradeStaleDerivative(inst) {
 		inst = downgradeDerivativeToUnderlying(inst)
 	}
 	return inst
+}
+
+func shouldDowngradeMalformedDerivativeLikeInstrument(inst model.Instrument) bool {
+	secType := strings.ToUpper(strings.TrimSpace(inst.SecType))
+	if secType == "OPT" || secType == "FOP" {
+		return inst.Expiry == "" || inst.Strike <= 0 || strings.TrimSpace(inst.Right) == ""
+	}
+
+	symbol := strings.TrimSpace(inst.Symbol)
+	if symbol == "" || !strings.Contains(symbol, " ") {
+		return false
+	}
+	if inst.Expiry != "" || inst.Strike > 0 || strings.TrimSpace(inst.Right) != "" {
+		return false
+	}
+
+	underlying := normalizeContractUnderlying(symbol)
+	if underlying == "" || strings.EqualFold(strings.TrimSpace(underlying), symbol) {
+		return false
+	}
+
+	parts := strings.Fields(symbol)
+	for _, token := range parts[1:] {
+		if looksDerivativeLikeToken(token) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksDerivativeLikeToken(token string) bool {
+	token = strings.ToUpper(strings.TrimSpace(token))
+	if token == "" {
+		return false
+	}
+	if normalizeContractExpiry(token) != "" {
+		return true
+	}
+	if parseDerivativeStrikeToken(token) {
+		return true
+	}
+	switch token {
+	case "CALL", "PUT", "C", "P":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseDerivativeStrikeToken(token string) bool {
+	for _, suffix := range []string{"CALL", "PUT", "C", "P"} {
+		if !strings.HasSuffix(token, suffix) {
+			continue
+		}
+		strikeText := strings.TrimSpace(token[:len(token)-len(suffix)])
+		if strikeText == "" {
+			return false
+		}
+		strike, err := strconv.ParseFloat(strikeText, 64)
+		return err == nil && strike > 0
+	}
+	return false
 }
 
 func parseOptionContractString(raw string) (model.Instrument, bool) {

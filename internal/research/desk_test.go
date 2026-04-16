@@ -444,6 +444,25 @@ func TestNormalizeResearchInstrumentExtractsUnderlyingFromMalformedOptionSymbol(
 	}
 }
 
+func TestNormalizeResearchInstrumentDowngradesIncompleteDerivativeLikeSymbolToUnderlying(t *testing.T) {
+	inst := normalizeResearchInstrument(model.Instrument{
+		Symbol:   "VIX 25C",
+		SecType:  "STK",
+		Currency: "USD",
+		Exchange: "SMART",
+	})
+
+	if inst.Symbol != "VIX" {
+		t.Fatalf("expected underlying symbol VIX, got %q", inst.Symbol)
+	}
+	if inst.SecType != "STK" {
+		t.Fatalf("expected incomplete derivative-like symbol to downgrade to STK, got %q", inst.SecType)
+	}
+	if inst.Expiry != "" || inst.Right != "" || inst.Strike != 0 {
+		t.Fatalf("expected derivative fields to be cleared, got %+v", inst)
+	}
+}
+
 func TestBuildResearchPromptIncludesInstitutionalContext(t *testing.T) {
 	client := &researchStubClient{}
 	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)

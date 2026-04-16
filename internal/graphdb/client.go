@@ -272,6 +272,142 @@ func (c *Client) RecordSignalSeen(ctx context.Context, signalID, deskID, domain 
 	})
 }
 
+func (c *Client) RecordCollaborationInput(ctx context.Context, thesis *model.Thesis, sig signal.Signal, receivingDeskID, receivingDomain string) error {
+	if c == nil || c.driver == nil || thesis == nil || strings.TrimSpace(thesis.ID) == "" {
+		return nil
+	}
+	message, ok := model.DecodeColleagueMessage(sig.Raw)
+	if !ok || strings.TrimSpace(message.ThreadID) == "" {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	return c.executeWrite(ctx, func(tx neo4j.ManagedTransaction) error {
+		if err := runQuery(ctx, tx, `
+			MERGE (receiver:Desk {id: $desk_id})
+			SET receiver.domain = CASE WHEN $domain = '' THEN receiver.domain ELSE $domain END,
+			    receiver.updated_at = $updated_at`,
+			map[string]any{
+				"desk_id":    strings.TrimSpace(receivingDeskID),
+				"domain":     strings.TrimSpace(receivingDomain),
+				"updated_at": now,
+			},
+		); err != nil {
+			return err
+		}
+
+		if err := runQuery(ctx, tx, `
+			MERGE (thread:ConversationThread {id: $thread_id})
+			SET thread.updated_at = $updated_at`,
+			map[string]any{
+				"thread_id":  message.ThreadID,
+				"updated_at": now,
+			},
+		); err != nil {
+			return err
+		}
+
+		if err := runQuery(ctx, tx, `
+			MATCH (t:Thesis {id: $thesis_id})
+			MATCH (thread:ConversationThread {id: $thread_id})
+			MERGE (t)-[r:PART_OF_THREAD]->(thread)
+			SET r.decision_time = $decision_time`,
+			map[string]any{
+				"thesis_id":     thesis.ID,
+				"thread_id":     message.ThreadID,
+				"decision_time": now,
+			},
+		); err != nil {
+			return err
+		}
+
+		if message.MessageID != "" {
+			if err := runQuery(ctx, tx, `
+				MERGE (m:ColleagueMessage {id: $message_id})
+				SET m.updated_at = $updated_at`,
+				map[string]any{
+					"message_id": message.MessageID,
+					"updated_at": now,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MATCH (m:ColleagueMessage {id: $message_id})
+				MATCH (t:Thesis {id: $thesis_id})
+				MERGE (m)-[r:INFORMED]->(t)
+				SET r.observed_time = $observed_time,
+				    r.decision_time = $decision_time`,
+				map[string]any{
+					"message_id":    message.MessageID,
+					"thesis_id":     thesis.ID,
+					"observed_time": normalizeTime(sig.Timestamp, now),
+					"decision_time": now,
+				},
+			); err != nil {
+				return err
+			}
+		}
+
+		if message.OriginDesk != "" {
+			if err := runQuery(ctx, tx, `
+				MERGE (origin:Desk {id: $origin_desk})
+				SET origin.domain = CASE WHEN $origin_domain = '' THEN origin.domain ELSE $origin_domain END,
+				    origin.updated_at = $updated_at`,
+				map[string]any{
+					"origin_desk":   message.OriginDesk,
+					"origin_domain": message.OriginDomain,
+					"updated_at":    now,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MATCH (origin:Desk {id: $origin_desk})
+				MATCH (receiver:Desk {id: $receiver_desk})
+				MERGE (origin)-[r:INFORMED_COLLEAGUE]->(receiver)
+				SET r.thread_id = $thread_id,
+				    r.last_message_id = $message_id,
+				    r.observed_time = $observed_time,
+				    r.decision_time = $decision_time`,
+				map[string]any{
+					"origin_desk":   message.OriginDesk,
+					"receiver_desk": strings.TrimSpace(receivingDeskID),
+					"thread_id":     message.ThreadID,
+					"message_id":    message.MessageID,
+					"observed_time": normalizeTime(sig.Timestamp, now),
+					"decision_time": now,
+				},
+			); err != nil {
+				return err
+			}
+		}
+
+		if message.ThesisID != "" {
+			if err := runQuery(ctx, tx, `
+				MATCH (parent:Thesis {id: $parent_thesis_id})
+				MATCH (child:Thesis {id: $child_thesis_id})
+				MERGE (parent)-[r:INFORMED]->(child)
+				SET r.thread_id = $thread_id,
+				    r.message_id = $message_id,
+				    r.observed_time = $observed_time,
+				    r.decision_time = $decision_time`,
+				map[string]any{
+					"parent_thesis_id": message.ThesisID,
+					"child_thesis_id":  thesis.ID,
+					"thread_id":        message.ThreadID,
+					"message_id":       message.MessageID,
+					"observed_time":    normalizeTime(sig.Timestamp, now),
+					"decision_time":    now,
+				},
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (c *Client) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 	if c == nil || c.driver == nil || strings.TrimSpace(sig.ID) == "" {
 		return nil
@@ -363,6 +499,9 @@ func (c *Client) UpsertSignal(ctx context.Context, sig signal.Signal) error {
 			return err
 		}
 		if err := c.linkSignalNarrative(ctx, tx, sig, now); err != nil {
+			return err
+		}
+		if err := c.linkColleagueSignal(ctx, tx, sig, now); err != nil {
 			return err
 		}
 		return c.linkEvidenceAssessment(ctx, tx, "Signal", sig.ID, sig.EvidenceMeta, now)

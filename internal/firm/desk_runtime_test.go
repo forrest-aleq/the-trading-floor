@@ -378,14 +378,110 @@ func TestDeskPublishesInternalSignalForStrongApprovedThesis(t *testing.T) {
 	if published[0].Source != "internal/desk-A" {
 		t.Fatalf("unexpected internal signal source: %s", published[0].Source)
 	}
-	var payload struct {
-		TargetDomains []string `json:"target_domains"`
-	}
-	if err := json.Unmarshal(published[0].Raw, &payload); err != nil {
-		t.Fatalf("decode internal signal payload: %v", err)
+	payload, ok := model.DecodeColleagueMessage(published[0].Raw)
+	if !ok {
+		t.Fatal("expected structured colleague payload")
 	}
 	if len(payload.TargetDomains) == 0 {
 		t.Fatalf("expected internal signal to carry target domains, got %+v", published[0])
+	}
+	if payload.ThreadID == "" || payload.MessageID == "" {
+		t.Fatalf("expected collaboration metadata, got %+v", payload)
+	}
+	if payload.Kind != model.ColleagueMessageProposal {
+		t.Fatalf("expected proposal payload, got %s", payload.Kind)
+	}
+}
+
+func TestDeskRepliesToInternalColleagueSignal(t *testing.T) {
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "TLT", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        100.0,
+		"target_price":       106.0,
+		"stop_loss":          97.0,
+		"conviction":         0.83,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.01,
+		"strategy":           "event",
+		"evidence":           []string{"rates impact", "macro spillover"},
+		"counter_args":       []string{"already priced"},
+		"kill_rules":         []map[string]any{{"condition": "price_below_stop", "threshold": 97.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"timing"},
+		"missing_data":          []string{"flow"},
+		"historical_analogues":  []string{"prior rate shock"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"TLT","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.9,"category":"macro","reasoning":"macro spillover"}`},
+		scriptedLLM{fn: func(req llm.Request) string {
+			if req.JSONMode || strings.Contains(strings.ToLower(req.Messages[0].Content), "trading research desk") {
+				return string(researchResp)
+			}
+			return "sub-team analysis with concrete supporting detail"
+		}},
+		scriptedLLM{response: string(prosecuteResp)},
+	)
+
+	rootMessage := model.ColleagueMessage{
+		ThreadID:        model.NewColleagueThreadID("thesis-root"),
+		MessageID:       model.NewColleagueMessageID("thesis-root"),
+		OriginDesk:      "desk-geo-a",
+		OriginDomain:    "geopolitical",
+		OriginSignalID:  "sig-root",
+		ThesisID:        "thesis-root",
+		RootThesisID:    "thesis-root",
+		TargetDomains:   []string{"macro", "tail"},
+		Strategy:        "event",
+		Structure:       "single",
+		Conviction:      0.84,
+		InternalDepth:   1,
+		Kind:            model.ColleagueMessageProposal,
+		RequestedAction: "review",
+		Summary:         "Internal thesis from geopolitical desk: XLE long structure=single strategy=event conviction=0.84",
+		DisplaySymbol:   "XLE",
+	}
+
+	var published []signal.Signal
+	macroDesk, _, _ := newRuntimeDeskWithOptions(t, "A", "macro", router, nil, nil, func(_ context.Context, sig signal.Signal) error {
+		published = append(published, sig)
+		return nil
+	})
+	macroDesk.Process(context.Background(), signal.Signal{
+		ID:           "sig-internal-received",
+		Source:       "internal/desk-geo-a",
+		Type:         signal.TypeAlternative,
+		Category:     "geopolitical",
+		Timestamp:    time.Now(),
+		Urgency:      0.9,
+		Raw:          rootMessage.Encode(),
+		Translated:   rootMessage.Summary,
+		OriginalText: rootMessage.Summary,
+	})
+
+	if len(published) != 1 {
+		t.Fatalf("expected one reply signal to be published, got %d", len(published))
+	}
+	payload, ok := model.DecodeColleagueMessage(published[0].Raw)
+	if !ok {
+		t.Fatal("expected structured colleague reply payload")
+	}
+	if payload.Kind != model.ColleagueMessageReply {
+		t.Fatalf("expected reply payload, got %s", payload.Kind)
+	}
+	if payload.ThreadID != rootMessage.ThreadID {
+		t.Fatalf("expected reply to stay on thread %s, got %s", rootMessage.ThreadID, payload.ThreadID)
+	}
+	if payload.ReplyToMessageID != rootMessage.MessageID {
+		t.Fatalf("expected reply_to_message_id %s, got %s", rootMessage.MessageID, payload.ReplyToMessageID)
+	}
+	if len(payload.TargetDomains) != 1 || payload.TargetDomains[0] != "geopolitical" {
+		t.Fatalf("expected reply to route back to geopolitical, got %#v", payload.TargetDomains)
 	}
 }
 

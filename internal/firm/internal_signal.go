@@ -1,7 +1,6 @@
 package firm
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -14,36 +13,58 @@ func buildInternalSignal(origin signal.Signal, thesis *model.Thesis, originDesk 
 	if thesis == nil || thesis.Conviction < 0.72 {
 		return signal.Signal{}, false
 	}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(origin.Source)), "internal/") && internalSignalDepth(origin) >= 1 {
+	originIsInternal := isInternalSignal(origin)
+	originMessage, _ := model.DecodeColleagueMessage(origin.Raw)
+	if originIsInternal && originMessage.InternalDepth >= 2 {
 		return signal.Signal{}, false
 	}
 
 	targets := downstreamDomainsForDesk(thesis.Domain)
+	kind := model.ColleagueMessageProposal
+	replyToMessageID := ""
+	parentThesisID := ""
+	rootThesisID := thesis.ID
+	threadID := model.NewColleagueThreadID(thesis.ID)
+	requestedAction := "review"
+	depth := 1
+	if originIsInternal {
+		kind = model.ColleagueMessageReply
+		threadID = firstNonEmptyInternal(originMessage.ThreadID, model.NewColleagueThreadID(thesis.ID))
+		replyToMessageID = originMessage.MessageID
+		parentThesisID = firstNonEmptyInternal(originMessage.ThesisID, originMessage.ParentThesisID)
+		rootThesisID = firstNonEmptyInternal(originMessage.RootThesisID, originMessage.ThesisID, thesis.ID)
+		requestedAction = "synthesize"
+		depth = originMessage.InternalDepth + 1
+		if originMessage.OriginDomain != "" {
+			targets = []string{originMessage.OriginDomain}
+		}
+	}
 	if len(targets) == 0 {
 		return signal.Signal{}, false
 	}
 
-	text := fmt.Sprintf(
-		"Internal thesis from %s desk: %s %s structure=%s strategy=%s conviction=%.2f",
-		thesis.Domain,
-		thesis.DisplaySymbol(),
-		thesis.Direction,
-		firstNonEmptyInternal(thesis.Structure, "single"),
-		thesis.Strategy,
-		thesis.Conviction,
-	)
-	payload := map[string]any{
-		"origin_desk":      originDesk,
-		"origin_domain":    thesis.Domain,
-		"origin_signal_id": origin.ID,
-		"thesis_id":        thesis.ID,
-		"target_domains":   targets,
-		"structure":        thesis.Structure,
-		"strategy":         thesis.Strategy,
-		"conviction":       thesis.Conviction,
-		"internal_depth":   internalSignalDepth(origin) + 1,
+	text := internalSignalSummary(kind, thesis)
+	payload := model.ColleagueMessage{
+		ThreadID:         threadID,
+		MessageID:        model.NewColleagueMessageID(thesis.ID),
+		ReplyToMessageID: replyToMessageID,
+		OriginDesk:       originDesk,
+		OriginDomain:     thesis.Domain,
+		OriginSignalID:   origin.ID,
+		ThesisID:         thesis.ID,
+		ParentThesisID:   parentThesisID,
+		RootThesisID:     rootThesisID,
+		TargetDomains:    targets,
+		Structure:        firstNonEmptyInternal(thesis.Structure, "single"),
+		Strategy:         thesis.Strategy,
+		Conviction:       thesis.Conviction,
+		InternalDepth:    depth,
+		Kind:             kind,
+		RequestedAction:  requestedAction,
+		Subject:          firstNonEmptyInternal(thesis.DisplaySymbol(), thesis.Domain),
+		Summary:          text,
+		DisplaySymbol:    thesis.DisplaySymbol(),
 	}
-	raw, _ := json.Marshal(payload)
 
 	return signal.Signal{
 		ID:                    "internal-" + thesis.ID,
@@ -56,12 +77,29 @@ func buildInternalSignal(origin signal.Signal, thesis *model.Thesis, originDesk 
 		Direction:             signalDirectionFromTradeDirection(thesis.Direction),
 		Entities:              internalSignalEntities(thesis),
 		Languages:             []string{"en"},
-		Raw:                   raw,
+		Raw:                   payload.Encode(),
 		OriginalText:          text,
 		Translated:            text,
 		TranslationProvider:   "internal_identity",
 		TranslationConfidence: 1,
 	}, true
+}
+
+func internalSignalSummary(kind model.ColleagueMessageKind, thesis *model.Thesis) string {
+	verb := "Internal thesis"
+	if kind == model.ColleagueMessageReply {
+		verb = "Colleague reply"
+	}
+	return fmt.Sprintf(
+		"%s from %s desk: %s %s structure=%s strategy=%s conviction=%.2f",
+		verb,
+		thesis.Domain,
+		thesis.DisplaySymbol(),
+		thesis.Direction,
+		firstNonEmptyInternal(thesis.Structure, "single"),
+		thesis.Strategy,
+		thesis.Conviction,
+	)
 }
 
 func downstreamDomainsForDesk(domain string) []string {
@@ -88,13 +126,8 @@ func downstreamDomainsForDesk(domain string) []string {
 }
 
 func internalTargetDomains(sig signal.Signal) []string {
-	if len(sig.Raw) == 0 {
-		return nil
-	}
-	var payload struct {
-		TargetDomains []string `json:"target_domains"`
-	}
-	if err := json.Unmarshal(sig.Raw, &payload); err != nil {
+	payload, ok := model.DecodeColleagueMessage(sig.Raw)
+	if !ok {
 		return nil
 	}
 	set := newDomainSet()
@@ -103,32 +136,26 @@ func internalTargetDomains(sig signal.Signal) []string {
 }
 
 func internalOriginDesk(sig signal.Signal) string {
-	if len(sig.Raw) == 0 {
-		return ""
-	}
-	var payload struct {
-		OriginDesk string `json:"origin_desk"`
-	}
-	if err := json.Unmarshal(sig.Raw, &payload); err != nil {
+	payload, ok := model.DecodeColleagueMessage(sig.Raw)
+	if !ok {
 		return ""
 	}
 	return strings.TrimSpace(payload.OriginDesk)
 }
 
 func internalSignalDepth(sig signal.Signal) int {
-	if len(sig.Raw) == 0 {
+	payload, ok := model.DecodeColleagueMessage(sig.Raw)
+	if !ok {
 		return 0
 	}
-	var payload struct {
-		Depth int `json:"internal_depth"`
-	}
-	if err := json.Unmarshal(sig.Raw, &payload); err != nil {
+	if payload.InternalDepth < 0 {
 		return 0
 	}
-	if payload.Depth < 0 {
-		return 0
-	}
-	return payload.Depth
+	return payload.InternalDepth
+}
+
+func isInternalSignal(sig signal.Signal) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(sig.Source)), "internal/")
 }
 
 func internalSignalEntities(thesis *model.Thesis) []signal.Entity {

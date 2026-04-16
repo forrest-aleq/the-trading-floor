@@ -248,6 +248,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	}
 
 	d.persistThesis(ctx, thesis)
+	d.recordCollaborationInput(ctx, thesis, sig)
 
 	if thesis.Conviction < d.minConviction {
 		d.log.Info("thesis below conviction threshold",
@@ -740,6 +741,15 @@ func (d *Desk) persistThesis(ctx context.Context, thesis *model.Thesis) {
 	}
 	if err := d.graph.UpsertThesis(ctx, thesis); err != nil {
 		d.log.Warn("persist thesis to graph failed", "thesis_id", thesis.ID, "error", err)
+	}
+}
+
+func (d *Desk) recordCollaborationInput(ctx context.Context, thesis *model.Thesis, sig signal.Signal) {
+	if thesis == nil || !isInternalSignal(sig) {
+		return
+	}
+	if err := d.graph.RecordCollaborationInput(ctx, thesis, sig, d.ID, d.Domain); err != nil {
+		d.log.Warn("persist collaboration input to graph failed", "thesis_id", thesis.ID, "signal_id", sig.ID, "error", err)
 	}
 }
 

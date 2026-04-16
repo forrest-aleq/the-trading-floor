@@ -52,6 +52,8 @@ func schemaStatements() []string {
 		"CREATE CONSTRAINT domain_id IF NOT EXISTS FOR (n:Domain) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT region_id IF NOT EXISTS FOR (n:Region) REQUIRE n.id IS UNIQUE",
 		"CREATE CONSTRAINT narrative_cluster_id IF NOT EXISTS FOR (n:NarrativeCluster) REQUIRE n.id IS UNIQUE",
+		"CREATE CONSTRAINT conversation_thread_id IF NOT EXISTS FOR (n:ConversationThread) REQUIRE n.id IS UNIQUE",
+		"CREATE CONSTRAINT colleague_message_id IF NOT EXISTS FOR (n:ColleagueMessage) REQUIRE n.id IS UNIQUE",
 		"CREATE INDEX source_name IF NOT EXISTS FOR (n:Source) ON (n.name)",
 		"CREATE INDEX entity_name IF NOT EXISTS FOR (n:Entity) ON (n.name)",
 		"CREATE INDEX thesis_status IF NOT EXISTS FOR (n:Thesis) ON (n.status)",
@@ -452,6 +454,191 @@ func (c *Client) linkSignalNarrative(ctx context.Context, tx neo4j.ManagedTransa
 			"decision_time": now,
 		},
 	)
+}
+
+func (c *Client) linkColleagueSignal(ctx context.Context, tx neo4j.ManagedTransaction, sig signal.Signal, now time.Time) error {
+	message, ok := model.DecodeColleagueMessage(sig.Raw)
+	if !ok || strings.TrimSpace(message.ThreadID) == "" || strings.TrimSpace(message.MessageID) == "" {
+		return nil
+	}
+
+	if err := runQuery(ctx, tx, `
+		MERGE (thread:ConversationThread {id: $id})
+		SET thread.root_thesis_id = $root_thesis_id,
+		    thread.root_domain = $root_domain,
+		    thread.updated_at = $updated_at`,
+		map[string]any{
+			"id":             message.ThreadID,
+			"root_thesis_id": firstNonEmpty(message.RootThesisID, message.ThesisID),
+			"root_domain":    strings.TrimSpace(message.OriginDomain),
+			"updated_at":     now,
+		},
+	); err != nil {
+		return err
+	}
+
+	if err := runQuery(ctx, tx, `
+		MERGE (m:ColleagueMessage {id: $id})
+		SET m.kind = $kind,
+		    m.origin_desk = $origin_desk,
+		    m.origin_domain = $origin_domain,
+		    m.origin_signal_id = $origin_signal_id,
+		    m.thesis_id = $thesis_id,
+		    m.parent_thesis_id = $parent_thesis_id,
+		    m.root_thesis_id = $root_thesis_id,
+		    m.strategy = $strategy,
+		    m.structure = $structure,
+		    m.conviction = $conviction,
+		    m.depth = $depth,
+		    m.requested_action = $requested_action,
+		    m.subject = $subject,
+		    m.summary = $summary,
+		    m.display_symbol = $display_symbol,
+		    m.updated_at = $updated_at`,
+		map[string]any{
+			"id":               message.MessageID,
+			"kind":             string(message.Kind),
+			"origin_desk":      message.OriginDesk,
+			"origin_domain":    message.OriginDomain,
+			"origin_signal_id": message.OriginSignalID,
+			"thesis_id":        message.ThesisID,
+			"parent_thesis_id": message.ParentThesisID,
+			"root_thesis_id":   message.RootThesisID,
+			"strategy":         message.Strategy,
+			"structure":        message.Structure,
+			"conviction":       message.Conviction,
+			"depth":            message.InternalDepth,
+			"requested_action": message.RequestedAction,
+			"subject":          message.Subject,
+			"summary":          message.Summary,
+			"display_symbol":   message.DisplaySymbol,
+			"updated_at":       now,
+		},
+	); err != nil {
+		return err
+	}
+
+	if err := runQuery(ctx, tx, `
+		MATCH (s:Signal {id: $signal_id})
+		MATCH (m:ColleagueMessage {id: $message_id})
+		MERGE (s)-[r:EMBODIES_MESSAGE]->(m)
+		SET r.observed_time = $observed_time,
+		    r.decision_time = $decision_time`,
+		map[string]any{
+			"signal_id":     sig.ID,
+			"message_id":    message.MessageID,
+			"observed_time": normalizeTime(sig.Timestamp, now),
+			"decision_time": now,
+		},
+	); err != nil {
+		return err
+	}
+
+	if err := runQuery(ctx, tx, `
+		MATCH (m:ColleagueMessage {id: $message_id})
+		MATCH (thread:ConversationThread {id: $thread_id})
+		MERGE (m)-[r:IN_THREAD]->(thread)
+		SET r.observed_time = $observed_time,
+		    r.decision_time = $decision_time`,
+		map[string]any{
+			"message_id":    message.MessageID,
+			"thread_id":     message.ThreadID,
+			"observed_time": normalizeTime(sig.Timestamp, now),
+			"decision_time": now,
+		},
+	); err != nil {
+		return err
+	}
+
+	if message.OriginDesk != "" {
+		if err := runQuery(ctx, tx, `
+			MERGE (d:Desk {id: $desk_id})
+			SET d.domain = CASE WHEN $domain = '' THEN d.domain ELSE $domain END,
+			    d.updated_at = $updated_at`,
+			map[string]any{
+				"desk_id":    message.OriginDesk,
+				"domain":     message.OriginDomain,
+				"updated_at": now,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MATCH (d:Desk {id: $desk_id})
+			MATCH (m:ColleagueMessage {id: $message_id})
+			MERGE (d)-[r:AUTHORED]->(m)
+			SET r.observed_time = $observed_time,
+			    r.decision_time = $decision_time`,
+			map[string]any{
+				"desk_id":       message.OriginDesk,
+				"message_id":    message.MessageID,
+				"observed_time": normalizeTime(sig.Timestamp, now),
+				"decision_time": now,
+			},
+		); err != nil {
+			return err
+		}
+	}
+
+	if message.ReplyToMessageID != "" {
+		if err := runQuery(ctx, tx, `
+			MATCH (m:ColleagueMessage {id: $message_id})
+			MATCH (prev:ColleagueMessage {id: $reply_to_message_id})
+			MERGE (m)-[r:REPLIES_TO]->(prev)
+			SET r.decision_time = $decision_time`,
+			map[string]any{
+				"message_id":          message.MessageID,
+				"reply_to_message_id": message.ReplyToMessageID,
+				"decision_time":       now,
+			},
+		); err != nil {
+			return err
+		}
+	}
+
+	if message.ThesisID != "" {
+		if err := runQuery(ctx, tx, `
+			MATCH (m:ColleagueMessage {id: $message_id})
+			MATCH (t:Thesis {id: $thesis_id})
+			MERGE (m)-[r:ABOUT]->(t)
+			SET r.decision_time = $decision_time`,
+			map[string]any{
+				"message_id":    message.MessageID,
+				"thesis_id":     message.ThesisID,
+				"decision_time": now,
+			},
+		); err != nil {
+			return err
+		}
+	}
+
+	for _, domain := range message.TargetDomains {
+		if err := runQuery(ctx, tx, `
+			MERGE (d:Domain {id: $domain})
+			SET d.updated_at = $updated_at`,
+			map[string]any{
+				"domain":     domain,
+				"updated_at": now,
+			},
+		); err != nil {
+			return err
+		}
+		if err := runQuery(ctx, tx, `
+			MATCH (m:ColleagueMessage {id: $message_id})
+			MATCH (d:Domain {id: $domain})
+			MERGE (m)-[r:TARGETS]->(d)
+			SET r.decision_time = $decision_time`,
+			map[string]any{
+				"message_id":    message.MessageID,
+				"domain":        domain,
+				"decision_time": now,
+			},
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (c *Client) linkEvidenceAssessment(ctx context.Context, tx neo4j.ManagedTransaction, nodeLabel, nodeID string, meta *evidence.Metadata, now time.Time) error {

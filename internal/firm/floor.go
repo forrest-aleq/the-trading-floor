@@ -37,6 +37,7 @@ type Floor struct {
 	taskQueue chan deskTask
 
 	workerCount      int
+	taskTimeout      time.Duration
 	enqueueTimeout   time.Duration
 	slowTaskWarnAt   time.Duration
 	signalsProcessed atomic.Int64
@@ -52,6 +53,7 @@ type Floor struct {
 func NewFloor(wireMgr *wire.Manager, sessionID string) *Floor {
 	workerCount := readEnvInt("FLOOR_WORKERS", 4)
 	queueSize := readEnvInt("FLOOR_TASK_QUEUE_SIZE", 2048)
+	taskTimeout := readEnvDuration("FLOOR_TASK_TIMEOUT", 90*time.Second)
 	enqueueTimeout := readEnvDuration("FLOOR_TASK_ENQUEUE_TIMEOUT", 250*time.Millisecond)
 	slowTaskWarnAt := readEnvDuration("FLOOR_SLOW_TASK_WARN_AT", 45*time.Second)
 
@@ -61,6 +63,7 @@ func NewFloor(wireMgr *wire.Manager, sessionID string) *Floor {
 		sessionID:      sessionID,
 		taskQueue:      make(chan deskTask, queueSize),
 		workerCount:    workerCount,
+		taskTimeout:    taskTimeout,
 		enqueueTimeout: enqueueTimeout,
 		slowTaskWarnAt: slowTaskWarnAt,
 	}
@@ -149,6 +152,7 @@ func (f *Floor) startWorkers(ctx context.Context) {
 		}
 		f.log.Info("desk workers started",
 			"workers", f.workerCount,
+			"task_timeout", f.taskTimeout,
 			"queue_capacity", cap(f.taskQueue),
 			"enqueue_timeout", f.enqueueTimeout,
 			"slow_task_warn_at", f.slowTaskWarnAt,
@@ -168,13 +172,29 @@ func (f *Floor) workerLoop(ctx context.Context, workerID int) {
 			f.activeTasks.Add(1)
 
 			span := trace.New(f.sessionID, task.desk.ID, task.sig.ID)
-			deskCtx := trace.IntoContext(ctx, span)
+			taskCtx := ctx
+			cancel := func() {}
+			if f.taskTimeout > 0 {
+				taskCtx, cancel = context.WithTimeout(ctx, f.taskTimeout)
+			}
+			deskCtx := trace.IntoContext(taskCtx, span)
 			task.desk.Process(deskCtx, task.sig)
+			cancel()
 
 			f.activeTasks.Add(-1)
 			f.tasksCompleted.Add(1)
 
 			duration := time.Since(started).Round(time.Millisecond)
+			if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+				log.Warn("desk task timed out",
+					"desk_id", task.desk.ID,
+					"signal_id", task.sig.ID,
+					"source", task.sig.Source,
+					"duration", duration.String(),
+					"task_timeout", f.taskTimeout.String(),
+				)
+				continue
+			}
 			if duration >= f.slowTaskWarnAt {
 				log.Warn("desk task slow",
 					"desk_id", task.desk.ID,

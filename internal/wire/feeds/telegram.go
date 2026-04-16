@@ -156,7 +156,7 @@ func (f *TelegramFeed) fetchAndSend(ctx context.Context, src TelegramSource, out
 			Source:       "telegram/" + src.Name,
 			Type:         signal.TypeSocial,
 			Category:     src.Category,
-			Timestamp:    signalTimestamp(item.PubDate),
+			Timestamp:    signalTimestamp(item.PubDate, item.Link, item.GUID, item.Title),
 			Urgency:      0.75,
 			Entities:     entities,
 			Languages:    []string{src.Language},

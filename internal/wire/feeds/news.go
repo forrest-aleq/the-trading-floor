@@ -108,7 +108,7 @@ func (f *NewsFeed) fetchAndSend(ctx context.Context, src RSSSource, out chan<- s
 	now := time.Now()
 
 	for _, item := range items {
-		publishedAt := signalTimestamp(item.PubDate)
+		publishedAt := signalTimestamp(item.PubDate, item.Link, item.GUID, item.Title)
 		if f.maxItemAge > 0 && now.Sub(publishedAt) > f.maxItemAge {
 			continue
 		}

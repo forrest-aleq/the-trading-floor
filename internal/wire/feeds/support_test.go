@@ -39,3 +39,19 @@ func TestReadFeedDurationFallsBackOnInvalidInput(t *testing.T) {
 		t.Fatalf("expected fallback duration, got %s", got)
 	}
 }
+
+func TestSignalTimestampParsesSingleDigitRFC1123Day(t *testing.T) {
+	got := signalTimestamp("Tue, 7 Apr 2026 21:50:00 GMT")
+	want := time.Date(2026, time.April, 7, 21, 50, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("expected %s, got %s", want.Format(time.RFC3339), got.Format(time.RFC3339))
+	}
+}
+
+func TestSignalTimestampInfersDateFromHintsWhenPubDateMissing(t *testing.T) {
+	got := signalTimestamp("", "https://www.federalreserve.gov/newsevents/speech/jefferson20260407a.htm")
+	want := time.Date(2026, time.April, 7, 0, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("expected %s, got %s", want.Format(time.RFC3339), got.Format(time.RFC3339))
+	}
+}

@@ -162,7 +162,7 @@ func (f *AlternativeFeed) fetchAndSend(ctx context.Context, src AlternativeSourc
 			Source:     "alternative/" + src.Name,
 			Type:       signal.TypeAlternative,
 			Category:   defaultString(strings.TrimSpace(src.Category), "alternative"),
-			Timestamp:  signalTimestamp(item.PublishedAt),
+			Timestamp:  signalTimestamp(item.PublishedAt, item.Link, item.Title),
 			Urgency:    0.65,
 			Entities:   entities,
 			Raw:        raw,

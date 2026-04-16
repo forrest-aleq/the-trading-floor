@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -148,9 +149,16 @@ func (s *sourceState) RecordSuccess() {
 	s.suppressed = time.Time{}
 }
 
-func signalTimestamp(raw string) time.Time {
+var embeddedDatePattern = regexp.MustCompile(`(20\d{2})(\d{2})(\d{2})`)
+
+func signalTimestamp(raw string, hints ...string) time.Time {
 	if ts, ok := parsePublishedTime(raw); ok {
 		return ts.UTC()
+	}
+	for _, hint := range hints {
+		if ts, ok := inferPublishedTime(hint); ok {
+			return ts.UTC()
+		}
 	}
 	return time.Now().UTC()
 }
@@ -166,9 +174,11 @@ func parsePublishedTime(raw string) (time.Time, bool) {
 		time.RFC3339,
 		time.RFC1123Z,
 		time.RFC1123,
+		"Mon, 2 Jan 2006 15:04:05 MST",
 		time.RFC822Z,
 		time.RFC822,
 		"Mon, 02 Jan 2006 15:04:05 MST",
+		"Mon, 2 Jan 2006 15:04 MST",
 		"2006-01-02 15:04:05",
 		"2006-01-02T15:04:05-0700",
 		time.DateOnly,
@@ -180,6 +190,22 @@ func parsePublishedTime(raw string) (time.Time, bool) {
 	}
 
 	return time.Time{}, false
+}
+
+func inferPublishedTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	match := embeddedDatePattern.FindStringSubmatch(raw)
+	if len(match) != 4 {
+		return time.Time{}, false
+	}
+	ts, err := time.ParseInLocation("20060102", match[1]+match[2]+match[3], time.UTC)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
 }
 
 func readFeedInt(name string, fallback int) int {

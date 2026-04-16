@@ -16,6 +16,7 @@ import (
 	"github.com/hnic/trading-floor/internal/backtest"
 	"github.com/hnic/trading-floor/internal/execution/ibkr"
 	"github.com/hnic/trading-floor/internal/firm"
+	"github.com/hnic/trading-floor/internal/institutional"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
@@ -23,6 +24,7 @@ import (
 	"github.com/hnic/trading-floor/internal/scanner"
 	"github.com/hnic/trading-floor/internal/store"
 	"github.com/hnic/trading-floor/pkg/model"
+	"github.com/hnic/trading-floor/pkg/signal"
 )
 
 type options struct {
@@ -38,39 +40,51 @@ type options struct {
 }
 
 type replaySummary struct {
-	Mode                string                 `json:"mode"`
-	SignalsLoaded       int                    `json:"signals_loaded"`
-	SignalsReplayed     int                    `json:"signals_replayed"`
-	DomainEvaluations   int                    `json:"domain_evaluations"`
-	Opportunities       int                    `json:"opportunities"`
-	Theses              int                    `json:"theses"`
-	Backtested          int                    `json:"backtested"`
-	ProfitableOutcomes  int                    `json:"profitable_outcomes"`
-	TotalPnL            float64                `json:"total_pnl"`
-	HistoricalAvailable bool                   `json:"historical_available"`
-	BeliefsGenerated    int                    `json:"beliefs_generated,omitempty"`
-	EngramsGenerated    int                    `json:"engrams_generated,omitempty"`
-	MinScore            float64                `json:"min_score"`
-	MinConviction       float64                `json:"min_conviction"`
-	ScanRejects         map[string]int         `json:"scan_rejects,omitempty"`
-	ResearchRejects     map[string]int         `json:"research_rejects,omitempty"`
-	ResearchErrors      map[string]int         `json:"research_errors,omitempty"`
-	BacktestErrors      map[string]int         `json:"backtest_errors,omitempty"`
-	Warnings            []string               `json:"warnings,omitempty"`
-	Domains             map[string]domainStats `json:"domains"`
-	Since               string                 `json:"since"`
-	GeneratedAt         time.Time              `json:"generated_at"`
+	Mode                    string                 `json:"mode"`
+	SignalsLoaded           int                    `json:"signals_loaded"`
+	SignalsReplayed         int                    `json:"signals_replayed"`
+	DomainEvaluations       int                    `json:"domain_evaluations"`
+	Opportunities           int                    `json:"opportunities"`
+	Theses                  int                    `json:"theses"`
+	CollaborativeTheses     int                    `json:"collaborative_theses,omitempty"`
+	SoloTheses              int                    `json:"solo_theses,omitempty"`
+	Backtested              int                    `json:"backtested"`
+	CollaborativeBacktested int                    `json:"collaborative_backtested,omitempty"`
+	SoloBacktested          int                    `json:"solo_backtested,omitempty"`
+	ProfitableOutcomes      int                    `json:"profitable_outcomes"`
+	TotalPnL                float64                `json:"total_pnl"`
+	CollaborativePnL        float64                `json:"collaborative_pnl,omitempty"`
+	SoloPnL                 float64                `json:"solo_pnl,omitempty"`
+	HistoricalAvailable     bool                   `json:"historical_available"`
+	BeliefsGenerated        int                    `json:"beliefs_generated,omitempty"`
+	EngramsGenerated        int                    `json:"engrams_generated,omitempty"`
+	MinScore                float64                `json:"min_score"`
+	MinConviction           float64                `json:"min_conviction"`
+	ScanRejects             map[string]int         `json:"scan_rejects,omitempty"`
+	ResearchRejects         map[string]int         `json:"research_rejects,omitempty"`
+	ResearchErrors          map[string]int         `json:"research_errors,omitempty"`
+	BacktestErrors          map[string]int         `json:"backtest_errors,omitempty"`
+	Warnings                []string               `json:"warnings,omitempty"`
+	Domains                 map[string]domainStats `json:"domains"`
+	Since                   string                 `json:"since"`
+	GeneratedAt             time.Time              `json:"generated_at"`
 }
 
 type domainStats struct {
-	Signals            int            `json:"signals"`
-	Opportunities      int            `json:"opportunities"`
-	Theses             int            `json:"theses"`
-	Backtested         int            `json:"backtested"`
-	ProfitableOutcomes int            `json:"profitable_outcomes"`
-	TotalPnL           float64        `json:"total_pnl"`
-	ScanRejects        map[string]int `json:"scan_rejects,omitempty"`
-	ResearchRejects    map[string]int `json:"research_rejects,omitempty"`
+	Signals                 int            `json:"signals"`
+	Opportunities           int            `json:"opportunities"`
+	Theses                  int            `json:"theses"`
+	CollaborativeTheses     int            `json:"collaborative_theses,omitempty"`
+	SoloTheses              int            `json:"solo_theses,omitempty"`
+	Backtested              int            `json:"backtested"`
+	CollaborativeBacktested int            `json:"collaborative_backtested,omitempty"`
+	SoloBacktested          int            `json:"solo_backtested,omitempty"`
+	ProfitableOutcomes      int            `json:"profitable_outcomes"`
+	TotalPnL                float64        `json:"total_pnl"`
+	CollaborativePnL        float64        `json:"collaborative_pnl,omitempty"`
+	SoloPnL                 float64        `json:"solo_pnl,omitempty"`
+	ScanRejects             map[string]int `json:"scan_rejects,omitempty"`
+	ResearchRejects         map[string]int `json:"research_rejects,omitempty"`
 }
 
 func main() {
@@ -150,9 +164,12 @@ func main() {
 			stats.Signals++
 			summary.DomainEvaluations++
 
+			collaborationInput := replayCollaborationInput(sig, beliefGraph, domain)
+			evaluatedSignal := institutional.AugmentSignalWithCollaborationContext(sig, collaborationInput)
+
 			signalCtx, cancel := context.WithTimeout(ctx, opts.signalTimeout)
-			scanCtx := scanner.WithEvaluationTime(signalCtx, sig.Timestamp)
-			scanResult := scan.EvaluateDetailed(scanCtx, sig, domain)
+			scanCtx := scanner.WithEvaluationTime(signalCtx, evaluatedSignal.Timestamp)
+			scanResult := scan.EvaluateDetailed(scanCtx, evaluatedSignal, domain)
 			cancel()
 			if !scanResult.Accepted || scanResult.Opportunity == nil {
 				recordScanReject(&summary, &stats, scanResult.Reason)
@@ -166,7 +183,7 @@ func main() {
 
 			if opts.mode == "research" || opts.mode == "backtest" {
 				researchCtx, cancel := context.WithTimeout(ctx, opts.signalTimeout)
-				investigation, err := researchDesk.InvestigateDetailed(researchCtx, opp, sig, backfillDeskID(domain))
+				investigation, err := researchDesk.InvestigateDetailed(researchCtx, opp, evaluatedSignal, backfillDeskID(domain))
 				cancel()
 				if err != nil {
 					recordResearchReject(&summary, &stats, investigation.Reason)
@@ -181,12 +198,20 @@ func main() {
 				}
 				thesis := investigation.Thesis
 				if thesis != nil {
+					institutional.ApplyCollaborationInput(thesis, collaborationInput, 0.55, 0.18)
 					stats.Theses++
 					summary.Theses++
+					if thesis.CollaborationInput != nil {
+						stats.CollaborativeTheses++
+						summary.CollaborativeTheses++
+					} else {
+						stats.SoloTheses++
+						summary.SoloTheses++
+					}
 					if opts.mode == "backtest" && historical != nil {
 						evaluated := cloneThesis(thesis)
 						backtest.NormalizePositionSize(evaluated, opts.capital)
-						plan := backtest.BuildHistoricalPlan(sig.Timestamp, evaluated)
+						plan := backtest.BuildHistoricalPlan(evaluatedSignal.Timestamp, evaluated)
 
 						historyCtx, cancel := context.WithTimeout(ctx, opts.signalTimeout)
 						bars, err := historical.HistoricalBars(historyCtx, evaluated.PrimaryInstrument(), plan.EndTime, plan.Duration, plan.BarSize, plan.WhatToShow, plan.UseRTH)
@@ -207,6 +232,17 @@ func main() {
 						summary.Backtested++
 						stats.TotalPnL += outcome.RealizedPnL
 						summary.TotalPnL += outcome.RealizedPnL
+						if thesis.CollaborationInput != nil {
+							stats.CollaborativeBacktested++
+							summary.CollaborativeBacktested++
+							stats.CollaborativePnL += outcome.RealizedPnL
+							summary.CollaborativePnL += outcome.RealizedPnL
+						} else {
+							stats.SoloBacktested++
+							summary.SoloBacktested++
+							stats.SoloPnL += outcome.RealizedPnL
+							summary.SoloPnL += outcome.RealizedPnL
+						}
 						if outcome.Profitable {
 							stats.ProfitableOutcomes++
 							summary.ProfitableOutcomes++
@@ -354,6 +390,21 @@ func backfillDeskID(domain string) string {
 	return fmt.Sprintf("backfill-%s", strings.TrimSpace(strings.ToLower(domain)))
 }
 
+func replayCollaborationInput(sig signal.Signal, graph *belief.Graph, domain string) *model.CollaborationInput {
+	deskID := backfillDeskID(domain)
+	regime := defaultReplayRegime()
+	return institutional.CollaborationInputForSignal(sig, func(originDesk, originDomain string) (float64, float64, bool) {
+		if graph == nil || originDesk == "" {
+			return 0, 0, false
+		}
+		peer, ok := graph.LookupPeer(originDesk, deskID, replayFirstNonEmpty(strings.TrimSpace(domain), originDomain), regime.Key())
+		if !ok {
+			return 0, 0, false
+		}
+		return peer.Trust, peer.Confidence, true
+	})
+}
+
 func classifyReplayError(err error) string {
 	if err == nil {
 		return ""
@@ -392,6 +443,16 @@ func cloneThesis(thesis *model.Thesis) *model.Thesis {
 	cloned.CounterArgs = append([]string(nil), thesis.CounterArgs...)
 	cloned.Legs = append([]model.TradeLeg(nil), thesis.Legs...)
 	return &cloned
+}
+
+func replayFirstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func defaultReplayRegime() model.Regime {

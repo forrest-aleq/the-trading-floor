@@ -2,7 +2,6 @@ package firm
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"math"
 	"os"
@@ -490,73 +489,26 @@ func readDeskFloatEnv(name string, fallback float64) float64 {
 }
 
 func (d *Desk) applyCollaborationContext(sig signal.Signal, thesis *model.Thesis) {
-	if thesis == nil {
-		return
-	}
 	input := d.collaborationInputForSignal(sig)
-	if input == nil {
-		return
-	}
-	if input.RelationshipTrust > 0 {
-		adjustment := (input.RelationshipTrust - 0.55) * deskColleagueWeight
-		thesis.Conviction = math.Max(0, math.Min(1, thesis.Conviction+adjustment))
-	}
-	thesis.CollaborationInput = input
-	if input.Summary != "" && !hasEvidenceSource(thesis, "colleague:"+input.OriginDesk) {
-		weight := math.Max(0.25, math.Min(0.95, input.RelationshipTrust))
-		thesis.Evidence = append(thesis.Evidence, model.Evidence{
-			Source:  "colleague:" + input.OriginDesk,
-			Content: fmt.Sprintf("Internal %s from %s desk. requested_action=%s peer_trust=%.2f peer_confidence=%.2f summary=%s", input.Kind, input.OriginDesk, input.RequestedAction, input.RelationshipTrust, input.RelationshipConfidence, input.Summary),
-			Weight:  weight,
-		})
-	}
+	institutional.ApplyCollaborationInput(thesis, input, 0.55, deskColleagueWeight)
 }
 
 func (d *Desk) collaborationInputForSignal(sig signal.Signal) *model.CollaborationInput {
-	if !isInternalSignal(sig) {
-		return nil
-	}
-	message, ok := model.DecodeColleagueMessage(sig.Raw)
-	if !ok {
-		return nil
-	}
-	input := model.CollaborationInputFromMessage(message)
-	if input == nil {
-		return nil
-	}
-	if d.beliefs != nil && input.OriginDesk != "" {
-		if peer, ok := d.beliefs.LookupPeer(input.OriginDesk, d.ID, firstNonEmptyInternal(d.Domain, input.OriginDomain), d.regime.Key()); ok {
-			input.RelationshipTrust = peer.Trust
-			input.RelationshipConfidence = peer.Confidence
+	return institutional.CollaborationInputForSignal(sig, func(originDesk, originDomain string) (float64, float64, bool) {
+		if d.beliefs == nil || originDesk == "" {
+			return 0, 0, false
 		}
-	}
-	return input
+		peer, ok := d.beliefs.LookupPeer(originDesk, d.ID, firstNonEmptyInternal(d.Domain, originDomain), d.regime.Key())
+		if !ok {
+			return 0, 0, false
+		}
+		return peer.Trust, peer.Confidence, true
+	})
 }
 
 func (d *Desk) augmentSignalWithCollaborationContext(sig signal.Signal) signal.Signal {
 	input := d.collaborationInputForSignal(sig)
-	if input == nil {
-		return sig
-	}
-	contextBlock := institutional.BuildCollaborationContext(input, "  ")
-	if sig.InstitutionalContext == "" {
-		sig.InstitutionalContext = contextBlock
-	} else if contextBlock != "" {
-		sig.InstitutionalContext = strings.TrimSpace(sig.InstitutionalContext) + "\n" + contextBlock
-	}
-	return sig
-}
-
-func hasEvidenceSource(thesis *model.Thesis, source string) bool {
-	if thesis == nil || source == "" {
-		return false
-	}
-	for _, item := range thesis.Evidence {
-		if item.Source == source {
-			return true
-		}
-	}
-	return false
+	return institutional.AugmentSignalWithCollaborationContext(sig, input)
 }
 
 func (d *Desk) ProcessOutcome(ctx context.Context, thesis *model.Thesis, outcome *model.ThesisOutcome) {

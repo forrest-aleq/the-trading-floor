@@ -850,6 +850,65 @@ func (c *Client) RecordPortfolioSnapshot(ctx context.Context, snapshot *model.Po
 	})
 }
 
+func (c *Client) LoadRecentPortfolioFactorHistory(ctx context.Context, portfolioID string, limit int) (map[string]model.PortfolioFactorHistory, error) {
+	if c == nil || c.driver == nil || strings.TrimSpace(portfolioID) == "" || limit <= 0 {
+		return nil, nil
+	}
+
+	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		rows, err := tx.Run(ctx, `
+			MATCH (:Portfolio {id: $portfolio_id})-[:HAS_SNAPSHOT]->(snap:PortfolioSnapshot)
+			WITH snap
+			ORDER BY snap.observed_at DESC
+			LIMIT $limit
+			MATCH (snap)-[:HAS_FACTOR_EXPOSURE]->(exp:PortfolioFactorExposure)-[:FOR_FACTOR]->(f:Factor)
+			RETURN f.id AS factor,
+			       count(exp) AS observations,
+			       coalesce(avg(exp.gross_pct_nav), 0.0) AS average_gross_pct_nav,
+			       coalesce(max(exp.gross_pct_nav), 0.0) AS max_gross_pct_nav,
+			       coalesce(avg(exp.desk_count), 0.0) AS average_desk_count,
+			       max(exp.observed_at) AS last_observed_at
+			ORDER BY average_gross_pct_nav DESC, observations DESC`,
+			map[string]any{
+				"portfolio_id": strings.TrimSpace(portfolioID),
+				"limit":        limit,
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		history := make(map[string]model.PortfolioFactorHistory)
+		for rows.Next(ctx) {
+			record := rows.Record()
+			lastObservedAt, _ := record.Get("last_observed_at")
+			entry := model.PortfolioFactorHistory{
+				Factor:             strings.TrimSpace(toString(recordValue(record, "factor"))),
+				Observations:       toInt(recordValue(record, "observations")),
+				AverageGrossPctNAV: toFloat(recordValue(record, "average_gross_pct_nav")),
+				MaxGrossPctNAV:     toFloat(recordValue(record, "max_gross_pct_nav")),
+				AverageDeskCount:   toFloat(recordValue(record, "average_desk_count")),
+				LastObservedAt:     toTime(lastObservedAt),
+			}
+			if entry.Factor != "" {
+				history[entry.Factor] = entry
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return history, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	typed, _ := result.(map[string]model.PortfolioFactorHistory)
+	return typed, nil
+}
+
 func (c *Client) CouncilVoiceTelemetry(ctx context.Context, domain string) (map[string]model.CouncilVoiceStats, error) {
 	stats := make(map[string]model.CouncilVoiceStats)
 	if c == nil || c.driver == nil || strings.TrimSpace(domain) == "" {

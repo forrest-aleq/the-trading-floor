@@ -117,6 +117,7 @@ func (c *CEO) checkCorrelation(snap book.PortfolioSnapshot, positions []*model.P
 
 	factors := c.factorExposures(snap.NAV, positions)
 	policy := activeFactorPolicy()
+	history := c.recentFactorHistory(context.Background(), policy)
 	for _, factor := range factors {
 		if factor.GrossPctNAV < policy.AlertGrossExposurePct &&
 			math.Abs(factor.NetPctNAV) < policy.AlertNetExposurePct &&
@@ -128,6 +129,8 @@ func (c *CEO) checkCorrelation(snap book.PortfolioSnapshot, positions []*model.P
 			"gross_pct_nav", factor.GrossPctNAV,
 			"net_pct_nav", factor.NetPctNAV,
 			"desk_count", factor.DeskCount,
+			"history_observations", history[factor.Factor].Observations,
+			"history_avg_gross_pct_nav", history[factor.Factor].AverageGrossPctNAV,
 			"desks", summarizeFactorDesks(factor),
 		)
 	}
@@ -313,10 +316,7 @@ func (c *CEO) recordPortfolioFactors(ctx context.Context, snap book.PortfolioSna
 	}
 
 	observedAt := time.Now().UTC()
-	portfolioID := strings.TrimSpace(os.Getenv("PORTFOLIO_GRAPH_ID"))
-	if portfolioID == "" {
-		portfolioID = "primary"
-	}
+	portfolioID := c.portfolioGraphID()
 	snapshotID := portfolioID + ":" + strconv.FormatInt(observedAt.UnixNano(), 10)
 	graphSnapshot := model.PortfolioGraphSnapshot{
 		ID:            snapshotID,
@@ -338,4 +338,12 @@ func (c *CEO) recordPortfolioFactors(ctx context.Context, snap book.PortfolioSna
 			"error", err,
 		)
 	}
+}
+
+func (c *CEO) portfolioGraphID() string {
+	portfolioID := strings.TrimSpace(os.Getenv("PORTFOLIO_GRAPH_ID"))
+	if portfolioID == "" {
+		portfolioID = "primary"
+	}
+	return portfolioID
 }

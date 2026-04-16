@@ -1,6 +1,7 @@
 package firm
 
 import (
+	"context"
 	"math"
 	"sort"
 	"strings"
@@ -141,6 +142,7 @@ func (c *CEO) deskDomains() map[string]string {
 func (c *CEO) crowdedFactorPenalties(nav float64, positions []*model.Position) map[string]float64 {
 	policy := activeFactorPolicy()
 	exposures := c.factorExposures(nav, positions)
+	history := c.recentFactorHistory(context.Background(), policy)
 	penalties := make(map[string]float64)
 	if nav <= 0 {
 		return penalties
@@ -151,12 +153,13 @@ func (c *CEO) crowdedFactorPenalties(nav float64, positions []*model.Position) m
 			continue
 		}
 		crowdStrength := clampFactor((factor.GrossPctNAV - policy.AlertGrossExposurePct) / policy.AlertGrossExposurePct)
+		historyStrength := factorHistoryPenalty(policy, history[factor.Factor])
 		for deskID, contrib := range factor.DeskContributions {
 			if factor.Gross <= 0 {
 				continue
 			}
 			share := contrib.Gross / factor.Gross
-			penalties[deskID] += share * crowdStrength * policy.ReallocationPenalty
+			penalties[deskID] += share * (crowdStrength*policy.ReallocationPenalty + historyStrength)
 		}
 	}
 
@@ -168,6 +171,29 @@ func (c *CEO) crowdedFactorPenalties(nav float64, positions []*model.Position) m
 
 func clampFactor(value float64) float64 {
 	return math.Max(0, math.Min(1, value))
+}
+
+func factorHistoryPenalty(policy factorPolicy, history model.PortfolioFactorHistory) float64 {
+	if history.Observations < policy.HistoryFloorSnapshots {
+		return 0
+	}
+	if history.AverageGrossPctNAV <= policy.AlertGrossExposurePct {
+		return 0
+	}
+	intensity := clampFactor((history.AverageGrossPctNAV - policy.AlertGrossExposurePct) / policy.AlertGrossExposurePct)
+	return intensity * policy.HistoryPenalty
+}
+
+func (c *CEO) recentFactorHistory(ctx context.Context, policy factorPolicy) map[string]model.PortfolioFactorHistory {
+	if c == nil || c.floor == nil || c.floor.graph == nil {
+		return nil
+	}
+	history, err := c.floor.graph.LoadRecentPortfolioFactorHistory(ctx, c.portfolioGraphID(), policy.HistoryLookbackSnapshots)
+	if err != nil {
+		c.log.Warn("load portfolio factor history failed", "error", err)
+		return nil
+	}
+	return history
 }
 
 func factorSnapshots(exposures []factorExposure) []model.PortfolioFactorSnapshot {

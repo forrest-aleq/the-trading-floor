@@ -13,12 +13,15 @@ import (
 var embeddedFactorPolicy []byte
 
 type factorPolicy struct {
-	AlertGrossExposurePct  float64      `json:"alert_gross_exposure_pct"`
-	AlertNetExposurePct    float64      `json:"alert_net_exposure_pct"`
-	HiddenOverlapDeskCount int          `json:"hidden_overlap_desk_count"`
-	ReallocationPenalty    float64      `json:"reallocation_penalty"`
-	MinWeightFloor         float64      `json:"min_weight_floor"`
-	Rules                  []factorRule `json:"rules"`
+	AlertGrossExposurePct    float64      `json:"alert_gross_exposure_pct"`
+	AlertNetExposurePct      float64      `json:"alert_net_exposure_pct"`
+	HiddenOverlapDeskCount   int          `json:"hidden_overlap_desk_count"`
+	HistoryLookbackSnapshots int          `json:"history_lookback_snapshots"`
+	HistoryFloorSnapshots    int          `json:"history_floor_snapshots"`
+	HistoryPenalty           float64      `json:"history_penalty"`
+	ReallocationPenalty      float64      `json:"reallocation_penalty"`
+	MinWeightFloor           float64      `json:"min_weight_floor"`
+	Rules                    []factorRule `json:"rules"`
 }
 
 type factorRule struct {
@@ -76,6 +79,12 @@ func validateFactorPolicy(policy factorPolicy) error {
 		return fmt.Errorf("factor policy alert_net_exposure_pct must be positive")
 	case policy.HiddenOverlapDeskCount <= 0:
 		return fmt.Errorf("factor policy hidden_overlap_desk_count must be positive")
+	case policy.HistoryLookbackSnapshots <= 0:
+		return fmt.Errorf("factor policy history_lookback_snapshots must be positive")
+	case policy.HistoryFloorSnapshots <= 0:
+		return fmt.Errorf("factor policy history_floor_snapshots must be positive")
+	case policy.HistoryPenalty < 0 || policy.HistoryPenalty > 1:
+		return fmt.Errorf("factor policy history_penalty must be within [0,1]")
 	case policy.ReallocationPenalty < 0 || policy.ReallocationPenalty > 1:
 		return fmt.Errorf("factor policy reallocation_penalty must be within [0,1]")
 	case policy.MinWeightFloor <= 0 || policy.MinWeightFloor > 1:

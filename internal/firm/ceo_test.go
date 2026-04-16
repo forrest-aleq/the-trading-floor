@@ -113,6 +113,26 @@ func TestFactorSnapshotsPreserveDeskContributionShare(t *testing.T) {
 	}
 }
 
+func TestFactorHistoryPenaltyRequiresRepeatedCrowding(t *testing.T) {
+	policy := activeFactorPolicy()
+
+	if got := factorHistoryPenalty(policy, model.PortfolioFactorHistory{
+		Factor:             "theme:rates_duration",
+		Observations:       policy.HistoryFloorSnapshots - 1,
+		AverageGrossPctNAV: 40,
+	}); got != 0 {
+		t.Fatalf("expected no history penalty before minimum observations, got %.2f", got)
+	}
+
+	if got := factorHistoryPenalty(policy, model.PortfolioFactorHistory{
+		Factor:             "theme:rates_duration",
+		Observations:       policy.HistoryFloorSnapshots + 2,
+		AverageGrossPctNAV: 40,
+	}); got <= 0 {
+		t.Fatalf("expected positive history penalty for repeated crowding, got %.2f", got)
+	}
+}
+
 func openTestPosition(t *testing.T, bk *book.Book, deskID, id, symbol string, direction model.TradeDirection, qty, price float64) *model.Position {
 	t.Helper()
 

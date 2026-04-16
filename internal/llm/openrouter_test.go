@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestOpenRouterClientSupportsStructuredJSON(t *testing.T) {
@@ -155,5 +156,22 @@ func TestApplyLocalQwenJSONControlsHandlesOllamaQwenModels(t *testing.T) {
 	got := applyLocalQwenJSONControls("http://127.0.0.1:11434/v1", "qwen3:8b", true, messages)
 	if got[0].Content != "/no_think\nReturn JSON only." {
 		t.Fatalf("unexpected system message %q", got[0].Content)
+	}
+}
+
+func TestOpenRouterClientUsesContextDeadlineAsHTTPTimeout(t *testing.T) {
+	client := &OpenRouterClient{
+		http: &http.Client{Timeout: 120 * time.Second},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	derived := client.httpClientFor(ctx)
+	if derived.Timeout <= 0 {
+		t.Fatal("expected positive derived timeout")
+	}
+	if derived.Timeout > 50*time.Millisecond {
+		t.Fatalf("expected derived timeout to respect context deadline, got %s", derived.Timeout)
 	}
 }

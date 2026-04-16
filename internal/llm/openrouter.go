@@ -191,7 +191,7 @@ func (c *OpenRouterClient) doChatCompletionOnce(ctx context.Context, body []byte
 		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 
-	resp, err := c.http.Do(httpReq)
+	resp, err := c.httpClientFor(ctx).Do(httpReq)
 	if err != nil {
 		return nil, 0, fmt.Errorf("http request: %w", err)
 	}
@@ -207,6 +207,32 @@ func (c *OpenRouterClient) doChatCompletionOnce(ctx context.Context, body []byte
 	}
 
 	return respBody, resp.StatusCode, nil
+}
+
+func (c *OpenRouterClient) httpClientFor(ctx context.Context) *http.Client {
+	if c.http == nil {
+		return http.DefaultClient
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return c.http
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return c.http
+	}
+
+	timeout := c.http.Timeout
+	if timeout <= 0 || remaining < timeout {
+		timeout = remaining
+	}
+	if timeout == c.http.Timeout {
+		return c.http
+	}
+
+	clone := *c.http
+	clone.Timeout = timeout
+	return &clone
 }
 
 func (c *OpenRouterClient) supportsStructuredJSON() bool {

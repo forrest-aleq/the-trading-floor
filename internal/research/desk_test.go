@@ -178,6 +178,42 @@ func (s *researchMissingPositionSizeClient) Complete(_ context.Context, req llm.
 	}, nil
 }
 
+type researchStringNumericClient struct {
+	requests []llm.Request
+}
+
+func (s *researchStringNumericClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: `{
+  "structure": "single",
+  "instrument": {"symbol": "TLT 2026-05-18 130PUT", "sec_type": "STK", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": "130", "right": "PUT"},
+  "legs": [],
+  "direction": "long",
+  "entry_price": "2.75",
+  "target_price": "4.50",
+  "stop_loss": "1.80",
+  "conviction": "0.76",
+  "time_horizon_hours": "48",
+  "position_size_pct": "0.01",
+  "strategy": "macro",
+  "surprise_assessment": {
+    "truth_score": "0.8",
+    "novelty_score": "0.7",
+    "priced_in_score": "0.3",
+    "reaction_gap_score": "0.6",
+    "unmoved_asset_score": "0.5",
+    "summary": "rates repricing is incomplete"
+  },
+  "evidence": ["hawkish policy rhetoric"],
+  "counter_args": ["positioning may already be crowded"],
+  "kill_rules": [{"condition": "price_below_stop", "threshold": "1.8", "action": "close"}],
+  "reasoning": "hawkish repricing favors duration rebound after overshoot"
+}`,
+		Model: "analysis",
+	}, nil
+}
+
 func TestInvestigateCompilerFallbackRecoversStructuredThesis(t *testing.T) {
 	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
 	t.Setenv("RESEARCH_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
@@ -336,6 +372,28 @@ func TestInvestigateDefaultsMissingPositionSize(t *testing.T) {
 	}
 	if thesis.PositionSize != 0.015 {
 		t.Fatalf("expected default position size 0.015, got %.4f", thesis.PositionSize)
+	}
+}
+
+func TestInvestigateAcceptsStringEncodedNumericFields(t *testing.T) {
+	client := &researchStringNumericClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected thesis, got %v", err)
+	}
+	if thesis.PrimaryInstrument().SecType != "OPT" {
+		t.Fatalf("expected normalized option instrument, got %q", thesis.PrimaryInstrument().SecType)
+	}
+	if thesis.PrimaryInstrument().Strike != 130 {
+		t.Fatalf("expected parsed strike 130, got %.2f", thesis.PrimaryInstrument().Strike)
+	}
+	if thesis.EntryPrice != 2.75 {
+		t.Fatalf("expected parsed entry price 2.75, got %.2f", thesis.EntryPrice)
+	}
+	if thesis.TimeHorizon != 48*time.Hour {
+		t.Fatalf("expected 48h time horizon, got %s", thesis.TimeHorizon)
 	}
 }
 

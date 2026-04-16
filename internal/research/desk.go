@@ -19,6 +19,85 @@ import (
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
+type flexibleFloat64 float64
+
+func (f *flexibleFloat64) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "" || raw == "null" {
+		*f = 0
+		return nil
+	}
+	if strings.HasPrefix(raw, "\"") {
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return err
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			*f = 0
+			return nil
+		}
+		parsed, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return err
+		}
+		*f = flexibleFloat64(parsed)
+		return nil
+	}
+	var parsed float64
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	*f = flexibleFloat64(parsed)
+	return nil
+}
+
+func (f flexibleFloat64) Float64() float64 {
+	return float64(f)
+}
+
+type flexibleInt int
+
+func (i *flexibleInt) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "" || raw == "null" {
+		*i = 0
+		return nil
+	}
+	if strings.HasPrefix(raw, "\"") {
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return err
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			*i = 0
+			return nil
+		}
+		parsed, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return err
+		}
+		*i = flexibleInt(int(parsed))
+		return nil
+	}
+	var parsedInt int
+	if err := json.Unmarshal(data, &parsedInt); err == nil {
+		*i = flexibleInt(parsedInt)
+		return nil
+	}
+	var parsedFloat float64
+	if err := json.Unmarshal(data, &parsedFloat); err != nil {
+		return err
+	}
+	*i = flexibleInt(int(parsedFloat))
+	return nil
+}
+
+func (i flexibleInt) Int() int {
+	return int(i)
+}
+
 // Desk orchestrates thesis formation through the trio conversation
 type Desk struct {
 	log            *slog.Logger
@@ -157,8 +236,8 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 		}
 	}
 
-	killRules := parseKillRules(result.KillRules, result.StopLoss)
-	legs := normalizeTradeLegs(result.Legs, result.EntryPrice)
+	killRules := parseKillRules(result.KillRules, result.StopLoss.Float64())
+	legs := normalizeTradeLegs(result.Legs, result.EntryPrice.Float64())
 	structure := normalizeStructure(result.Structure, legs)
 	primary := model.Instrument{
 		Symbol:   result.Instrument.Symbol,
@@ -166,7 +245,7 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 		Currency: result.Instrument.Currency,
 		Exchange: normalizeExchange(result.Instrument.Exchange),
 		Expiry:   result.Instrument.Expiry,
-		Strike:   result.Instrument.Strike,
+		Strike:   result.Instrument.Strike.Float64(),
 		Right:    result.Instrument.Right,
 	}
 	primary = normalizeResearchInstrument(primary)
@@ -186,15 +265,15 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 		Instrument:         primary,
 		Legs:               legs,
 		Direction:          model.TradeDirection(result.Direction),
-		Conviction:         normalizeResearchConviction(result.Conviction, opp),
+		Conviction:         normalizeResearchConviction(result.Conviction.Float64(), opp),
 		Health:             0.85, // Initial health
 		Evidence:           evidence,
 		CounterArgs:        result.CounterArgs,
-		EntryPrice:         result.EntryPrice,
-		TargetPrice:        result.TargetPrice,
-		StopLoss:           result.StopLoss,
-		PositionSize:       normalizePositionSizePct(result.PositionSizePct),
-		TimeHorizon:        time.Duration(result.TimeHorizonHours) * time.Hour,
+		EntryPrice:         result.EntryPrice.Float64(),
+		TargetPrice:        result.TargetPrice.Float64(),
+		StopLoss:           result.StopLoss.Float64(),
+		PositionSize:       normalizePositionSizePct(result.PositionSizePct.Float64()),
+		TimeHorizon:        time.Duration(result.TimeHorizonHours.Int()) * time.Hour,
 		KillRules:          killRules,
 		Status:             model.ThesisEmbryo,
 		EvidenceMeta:       opp.EvidenceMeta.Clone(),
@@ -315,43 +394,43 @@ func (d *Desk) compileResearchJSON(ctx context.Context, originalPrompt, rawRespo
 type researchResult struct {
 	Structure  string `json:"structure"`
 	Instrument struct {
-		Symbol   string  `json:"symbol"`
-		SecType  string  `json:"sec_type"`
-		Currency string  `json:"currency"`
-		Exchange string  `json:"exchange"`
-		Expiry   string  `json:"expiry"`
-		Strike   float64 `json:"strike"`
-		Right    string  `json:"right"`
+		Symbol   string          `json:"symbol"`
+		SecType  string          `json:"sec_type"`
+		Currency string          `json:"currency"`
+		Exchange string          `json:"exchange"`
+		Expiry   string          `json:"expiry"`
+		Strike   flexibleFloat64 `json:"strike"`
+		Right    string          `json:"right"`
 	} `json:"instrument"`
 	Legs []struct {
 		Instrument struct {
-			Symbol   string  `json:"symbol"`
-			SecType  string  `json:"sec_type"`
-			Currency string  `json:"currency"`
-			Exchange string  `json:"exchange"`
-			Expiry   string  `json:"expiry"`
-			Strike   float64 `json:"strike"`
-			Right    string  `json:"right"`
+			Symbol   string          `json:"symbol"`
+			SecType  string          `json:"sec_type"`
+			Currency string          `json:"currency"`
+			Exchange string          `json:"exchange"`
+			Expiry   string          `json:"expiry"`
+			Strike   flexibleFloat64 `json:"strike"`
+			Right    string          `json:"right"`
 		} `json:"instrument"`
-		Direction  string  `json:"direction"`
-		Ratio      float64 `json:"ratio"`
-		EntryPrice float64 `json:"entry_price"`
+		Direction  string          `json:"direction"`
+		Ratio      flexibleFloat64 `json:"ratio"`
+		EntryPrice flexibleFloat64 `json:"entry_price"`
 	} `json:"legs"`
-	Direction          string  `json:"direction"`
-	EntryPrice         float64 `json:"entry_price"`
-	TargetPrice        float64 `json:"target_price"`
-	StopLoss           float64 `json:"stop_loss"`
-	Conviction         float64 `json:"conviction"`
-	TimeHorizonHours   int     `json:"time_horizon_hours"`
-	PositionSizePct    float64 `json:"position_size_pct"`
-	Strategy           string  `json:"strategy"`
+	Direction          string          `json:"direction"`
+	EntryPrice         flexibleFloat64 `json:"entry_price"`
+	TargetPrice        flexibleFloat64 `json:"target_price"`
+	StopLoss           flexibleFloat64 `json:"stop_loss"`
+	Conviction         flexibleFloat64 `json:"conviction"`
+	TimeHorizonHours   flexibleInt     `json:"time_horizon_hours"`
+	PositionSizePct    flexibleFloat64 `json:"position_size_pct"`
+	Strategy           string          `json:"strategy"`
 	SurpriseAssessment struct {
-		TruthScore        float64 `json:"truth_score"`
-		NoveltyScore      float64 `json:"novelty_score"`
-		PricedInScore     float64 `json:"priced_in_score"`
-		ReactionGapScore  float64 `json:"reaction_gap_score"`
-		UnmovedAssetScore float64 `json:"unmoved_asset_score"`
-		Summary           string  `json:"summary"`
+		TruthScore        flexibleFloat64 `json:"truth_score"`
+		NoveltyScore      flexibleFloat64 `json:"novelty_score"`
+		PricedInScore     flexibleFloat64 `json:"priced_in_score"`
+		ReactionGapScore  flexibleFloat64 `json:"reaction_gap_score"`
+		UnmovedAssetScore flexibleFloat64 `json:"unmoved_asset_score"`
+		Summary           string          `json:"summary"`
 	} `json:"surprise_assessment"`
 	Evidence    []string        `json:"evidence"`
 	CounterArgs []string        `json:"counter_args"`
@@ -369,17 +448,17 @@ func instrumentNames(instruments []model.Instrument) []string {
 
 func normalizeTradeLegs(raw []struct {
 	Instrument struct {
-		Symbol   string  `json:"symbol"`
-		SecType  string  `json:"sec_type"`
-		Currency string  `json:"currency"`
-		Exchange string  `json:"exchange"`
-		Expiry   string  `json:"expiry"`
-		Strike   float64 `json:"strike"`
-		Right    string  `json:"right"`
+		Symbol   string          `json:"symbol"`
+		SecType  string          `json:"sec_type"`
+		Currency string          `json:"currency"`
+		Exchange string          `json:"exchange"`
+		Expiry   string          `json:"expiry"`
+		Strike   flexibleFloat64 `json:"strike"`
+		Right    string          `json:"right"`
 	} `json:"instrument"`
-	Direction  string  `json:"direction"`
-	Ratio      float64 `json:"ratio"`
-	EntryPrice float64 `json:"entry_price"`
+	Direction  string          `json:"direction"`
+	Ratio      flexibleFloat64 `json:"ratio"`
+	EntryPrice flexibleFloat64 `json:"entry_price"`
 }, fallbackEntry float64) []model.TradeLeg {
 	if len(raw) == 0 {
 		return nil
@@ -394,11 +473,11 @@ func normalizeTradeLegs(raw []struct {
 		if direction != model.Short {
 			direction = model.Long
 		}
-		ratio := leg.Ratio
+		ratio := leg.Ratio.Float64()
 		if ratio <= 0 {
 			ratio = 1
 		}
-		entryPrice := leg.EntryPrice
+		entryPrice := leg.EntryPrice.Float64()
 		if entryPrice <= 0 {
 			entryPrice = fallbackEntry
 		}
@@ -408,7 +487,7 @@ func normalizeTradeLegs(raw []struct {
 			Currency: leg.Instrument.Currency,
 			Exchange: normalizeExchange(leg.Instrument.Exchange),
 			Expiry:   leg.Instrument.Expiry,
-			Strike:   leg.Instrument.Strike,
+			Strike:   leg.Instrument.Strike.Float64(),
 			Right:    leg.Instrument.Right,
 		})
 		legs = append(legs, model.TradeLeg{
@@ -889,11 +968,11 @@ func clampUnit(value float64) float64 {
 
 func buildSurpriseAssessment(result researchResult) *model.SurpriseAssessment {
 	assessment := &model.SurpriseAssessment{
-		TruthScore:        clampUnit(result.SurpriseAssessment.TruthScore),
-		NoveltyScore:      clampUnit(result.SurpriseAssessment.NoveltyScore),
-		PricedInScore:     clampUnit(result.SurpriseAssessment.PricedInScore),
-		ReactionGapScore:  clampUnit(result.SurpriseAssessment.ReactionGapScore),
-		UnmovedAssetScore: clampUnit(result.SurpriseAssessment.UnmovedAssetScore),
+		TruthScore:        clampUnit(result.SurpriseAssessment.TruthScore.Float64()),
+		NoveltyScore:      clampUnit(result.SurpriseAssessment.NoveltyScore.Float64()),
+		PricedInScore:     clampUnit(result.SurpriseAssessment.PricedInScore.Float64()),
+		ReactionGapScore:  clampUnit(result.SurpriseAssessment.ReactionGapScore.Float64()),
+		UnmovedAssetScore: clampUnit(result.SurpriseAssessment.UnmovedAssetScore.Float64()),
 		Summary:           strings.TrimSpace(result.SurpriseAssessment.Summary),
 	}
 	if assessment.TruthScore == 0 &&

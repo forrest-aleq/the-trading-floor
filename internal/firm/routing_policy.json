@@ -28,5 +28,241 @@
     "earnings_provider": ["corporate", "sector"],
     "interactive_brokers": ["systematic", "volatility"]
   },
+  "domain_group_max_matches": {
+    "geopolitical": 1,
+    "macro": 1,
+    "corporate": 1,
+    "flows": 1,
+    "tail": 1,
+    "volatility": 1,
+    "sector": 1,
+    "systematic": 1
+  },
+  "desk_rules": {
+    "geo-cascade-a": {
+      "priority": 95,
+      "categories": ["geopolitical", "tail"],
+      "keywords_any": ["supply chain", "shipping", "tariff", "sanction", "export control", "port", "freight", "cargo", "tanker", "strait", "chokepoint", "logistics", "pipeline"]
+    },
+    "geo-event-a": {
+      "priority": 100,
+      "categories": ["geopolitical", "tail"],
+      "keywords_any": ["missile", "drone", "strike", "attack", "war", "ceasefire", "troops", "protest", "election", "summit", "president", "minister", "parliament", "government", "sanction", "iran", "china", "russia", "israel", "taiwan"]
+    },
+    "geo-secondorder-a": {
+      "priority": 92,
+      "categories": ["geopolitical", "macro", "tail"],
+      "keywords_any": ["spillover", "retaliation", "knock-on", "contagion", "insurance", "freight rates", "supply shock", "repricing", "second-order"]
+    },
+    "geo-cascade-b": {
+      "priority": 95,
+      "categories": ["geopolitical", "tail"],
+      "keywords_any": ["supply chain", "shipping", "tariff", "sanction", "export control", "port", "freight", "cargo", "tanker", "strait", "chokepoint", "logistics", "pipeline"]
+    },
+    "geo-event-b": {
+      "priority": 100,
+      "categories": ["geopolitical", "tail"],
+      "keywords_any": ["missile", "drone", "strike", "attack", "war", "ceasefire", "troops", "protest", "election", "summit", "president", "minister", "parliament", "government", "sanction", "iran", "china", "russia", "israel", "taiwan"]
+    },
+
+    "macro-rates-a": {
+      "priority": 100,
+      "categories": ["macro", "tail", "market"],
+      "keywords_any": ["rate", "yield", "treasury", "fomc", "fed", "duration", "curve", "auction", "cuts", "hikes", "hawkish", "dovish", "jobless claims", "claims", "yield curve", "real rates"]
+    },
+    "macro-crossasset-a": {
+      "priority": 96,
+      "categories": ["macro", "market", "flows"],
+      "keywords_any": ["dollar", "fx", "credit", "commodity", "cross-asset", "carry", "risk appetite", "spread", "funding", "correlation", "global macro", "gdp", "gross domestic product", "growth", "confidence", "stagflation", "productivity", "consumption"]
+    },
+    "macro-inflation-a": {
+      "priority": 98,
+      "categories": ["macro"],
+      "signal_types": ["economic"],
+      "keywords_any": ["inflation", "cpi", "ppi", "core pce", "wage", "payroll", "payrolls", "labor", "employment", "unemployment", "retail sales", "consumption", "nonfarm payrolls", "unemployment rate"]
+    },
+    "macro-rates-b": {
+      "priority": 100,
+      "categories": ["macro", "tail", "market"],
+      "keywords_any": ["rate", "yield", "treasury", "fomc", "fed", "duration", "curve", "auction", "cuts", "hikes", "hawkish", "dovish", "jobless claims", "claims", "yield curve", "real rates"]
+    },
+    "macro-crossasset-b": {
+      "priority": 96,
+      "categories": ["macro", "market", "flows"],
+      "keywords_any": ["dollar", "fx", "credit", "commodity", "cross-asset", "carry", "risk appetite", "spread", "funding", "correlation", "global macro", "gdp", "gross domestic product", "growth", "confidence", "stagflation", "productivity", "consumption"]
+    },
+
+    "corp-earnings-a": {
+      "priority": 100,
+      "categories": ["corporate", "sector"],
+      "keywords_any": ["earnings", "eps", "guidance", "revenue", "margin", "backlog", "forecast", "outlook", "beat", "miss", "quarter", "data center", "bookings"],
+      "exclude_keywords": ["merger", "acquisition", "buyout", "8-k", "10-q", "10-k", "13d", "13g", "proxy"]
+    },
+    "corp-filings-a": {
+      "priority": 96,
+      "categories": ["corporate"],
+      "signal_types": ["filing"],
+      "keywords_any": ["8-k", "10-q", "10-k", "13d", "13g", "form 4", "proxy", "registration", "s-1", "424b", "sec filing"]
+    },
+    "corp-mna-a": {
+      "priority": 94,
+      "categories": ["corporate"],
+      "keywords_any": ["merger", "acquisition", "acquire", "takeover", "buyout", "deal talks", "strategic alternatives", "spin-off", "activist", "tender offer", "sale process"]
+    },
+    "corp-earnings-b": {
+      "priority": 100,
+      "categories": ["corporate", "sector"],
+      "keywords_any": ["earnings", "eps", "guidance", "revenue", "margin", "backlog", "forecast", "outlook", "beat", "miss", "quarter", "data center", "bookings"],
+      "exclude_keywords": ["merger", "acquisition", "buyout", "8-k", "10-q", "10-k", "13d", "13g", "proxy"]
+    },
+    "corp-filings-b": {
+      "priority": 96,
+      "categories": ["corporate"],
+      "signal_types": ["filing"],
+      "keywords_any": ["8-k", "10-q", "10-k", "13d", "13g", "form 4", "proxy", "registration", "s-1", "424b", "sec filing"]
+    },
+
+    "flow-options-a": {
+      "priority": 100,
+      "categories": ["flows", "volatility", "market"],
+      "signal_types": ["social", "flow", "price"],
+      "keywords_any": ["option", "call sweep", "put sweep", "open interest", "implied vol", "skew", "dealer", "gamma", "volatility"]
+    },
+    "flow-contrarian-a": {
+      "priority": 95,
+      "categories": ["flows", "social"],
+      "signal_types": ["social", "flow"],
+      "keywords_any": ["panic", "euphoria", "oversold", "overbought", "crowded", "capitulation", "sentiment extreme", "everyone", "nobody"]
+    },
+    "flow-squeeze-a": {
+      "priority": 98,
+      "categories": ["flows", "volatility"],
+      "signal_types": ["social", "flow", "price"],
+      "keywords_any": ["squeeze", "short interest", "gamma squeeze", "borrow", "hard-to-borrow", "htb", "covering", "forced buy-in"]
+    },
+    "flow-options-b": {
+      "priority": 100,
+      "categories": ["flows", "volatility", "market"],
+      "signal_types": ["social", "flow", "price"],
+      "keywords_any": ["option", "call sweep", "put sweep", "open interest", "implied vol", "skew", "dealer", "gamma", "volatility"]
+    },
+    "flow-contrarian-b": {
+      "priority": 95,
+      "categories": ["flows", "social"],
+      "signal_types": ["social", "flow"],
+      "keywords_any": ["panic", "euphoria", "oversold", "overbought", "crowded", "capitulation", "sentiment extreme", "everyone", "nobody"]
+    },
+
+    "tail-geo-a": {
+      "priority": 100,
+      "categories": ["tail", "geopolitical", "macro"],
+      "keywords_any": ["nuclear", "cyberattack", "embargo", "default", "bank run", "contagion", "strait", "blackout", "pipeline", "tail risk", "systemic"]
+    },
+    "tail-financial-a": {
+      "priority": 96,
+      "categories": ["tail", "macro", "market"],
+      "keywords_any": ["liquidity", "funding stress", "bank run", "default", "counterparty", "repo", "margin call", "downgrade", "redemption", "basis blowout"]
+    },
+    "tail-structure-b": {
+      "priority": 94,
+      "categories": ["tail", "market", "volatility"],
+      "keywords_any": ["exchange outage", "circuit breaker", "flash crash", "liquidity vacuum", "market structure", "auction failure", "vol control", "dealer positioning"]
+    },
+    "tail-geo-b": {
+      "priority": 100,
+      "categories": ["tail", "geopolitical", "macro"],
+      "keywords_any": ["nuclear", "cyberattack", "embargo", "default", "bank run", "contagion", "strait", "blackout", "pipeline", "tail risk", "systemic"]
+    },
+    "tail-financial-b": {
+      "priority": 96,
+      "categories": ["tail", "macro", "market"],
+      "keywords_any": ["liquidity", "funding stress", "bank run", "default", "counterparty", "repo", "margin call", "downgrade", "redemption", "basis blowout"]
+    },
+
+    "vol-premium-a": {
+      "priority": 100,
+      "categories": ["volatility", "market", "flows"],
+      "keywords_any": ["implied vol", "realized vol", "variance premium", "vol premium", "contango", "backwardation", "carry"]
+    },
+    "vol-event-a": {
+      "priority": 98,
+      "categories": ["volatility", "corporate", "macro"],
+      "keywords_any": ["event vol", "earnings", "cpi", "fomc", "decision", "meeting", "approval", "launch", "court ruling", "guidance"]
+    },
+    "vol-termstructure-b": {
+      "priority": 100,
+      "categories": ["volatility", "market"],
+      "keywords_any": ["term structure", "calendar", "forward vol", "curve steepening", "curve inversion", "vix futures"]
+    },
+    "vol-premium-b": {
+      "priority": 100,
+      "categories": ["volatility", "market", "flows"],
+      "keywords_any": ["implied vol", "realized vol", "variance premium", "vol premium", "contango", "backwardation", "carry"]
+    },
+    "vol-event-b": {
+      "priority": 98,
+      "categories": ["volatility", "corporate", "macro"],
+      "keywords_any": ["event vol", "earnings", "cpi", "fomc", "decision", "meeting", "approval", "launch", "court ruling", "guidance"]
+    },
+
+    "sector-tech-a": {
+      "priority": 100,
+      "categories": ["sector", "corporate", "market"],
+      "keywords_any": ["ai", "semiconductor", "chip", "cloud", "software", "data center", "hyperscaler", "gpu", "server", "saas", "cybersecurity"],
+      "exclude_keywords": ["fda", "trial", "drug", "oil", "gas", "lng", "refinery"]
+    },
+    "sector-biotech-a": {
+      "priority": 100,
+      "categories": ["sector", "corporate"],
+      "keywords_any": ["fda", "trial", "phase 1", "phase 2", "phase 3", "drug", "therapy", "biotech", "clinical", "approval", "patient", "endpoint"]
+    },
+    "sector-energy-b": {
+      "priority": 100,
+      "categories": ["sector", "macro", "geopolitical"],
+      "keywords_any": ["oil", "gas", "lng", "opec", "refinery", "drilling", "pipeline", "tanker", "energy", "power", "utility"]
+    },
+    "sector-tech-b": {
+      "priority": 100,
+      "categories": ["sector", "corporate", "market"],
+      "keywords_any": ["ai", "semiconductor", "chip", "cloud", "software", "data center", "hyperscaler", "gpu", "server", "saas", "cybersecurity"],
+      "exclude_keywords": ["fda", "trial", "drug", "oil", "gas", "lng", "refinery"]
+    },
+    "sector-biotech-b": {
+      "priority": 100,
+      "categories": ["sector", "corporate"],
+      "keywords_any": ["fda", "trial", "phase 1", "phase 2", "phase 3", "drug", "therapy", "biotech", "clinical", "approval", "patient", "endpoint"]
+    },
+
+    "sys-momentum-a": {
+      "priority": 100,
+      "categories": ["market", "flows", "sector"],
+      "signal_types": ["price", "flow", "news"],
+      "keywords_any": ["breakout", "trend", "momentum", "new high", "new low", "follow-through", "trend acceleration"]
+    },
+    "sys-meanrev-a": {
+      "priority": 100,
+      "categories": ["market", "flows", "sector"],
+      "signal_types": ["price", "flow", "news"],
+      "keywords_any": ["reversion", "oversold", "dislocation", "gap fill", "bounce", "snapback", "mean reversion"]
+    },
+    "sys-statarb-b": {
+      "priority": 100,
+      "categories": ["market", "flows", "macro"],
+      "signal_types": ["price", "flow", "news"],
+      "keywords_any": ["pairs", "dispersion", "basis", "relative value", "stat arb", "convergence", "divergence"]
+    },
+    "sys-momentum-b": {
+      "priority": 100,
+      "categories": ["market", "flows", "sector"],
+      "signal_types": ["price", "flow", "news"],
+      "keywords_any": ["breakout", "trend", "momentum", "new high", "new low", "follow-through", "trend acceleration"]
+    },
+    "sys-meanrev-b": {
+      "priority": 100,
+      "categories": ["market", "flows", "sector"],
+      "signal_types": ["price", "flow", "news"],
+      "keywords_any": ["reversion", "oversold", "dislocation", "gap fill", "bounce", "snapback", "mean reversion"]
+    }
+  },
   "fallback_domains": ["macro", "systematic"]
 }

@@ -25,9 +25,10 @@ type OpenRouterClient struct {
 }
 
 type OpenRouterConfig struct {
-	APIKey  string // OPENROUTER_API_KEY or ANTHROPIC_API_KEY
-	BaseURL string // https://openrouter.ai/api/v1 or foundry URL
-	Model   string // e.g. "anthropic/claude-sonnet-4-20250514", "qwen/qwen3.5-72b"
+	APIKey         string // OPENROUTER_API_KEY or ANTHROPIC_API_KEY
+	BaseURL        string // https://openrouter.ai/api/v1 or foundry URL
+	Model          string // e.g. "anthropic/claude-sonnet-4-20250514", "qwen/qwen3.5-72b"
+	MaxConcurrency int
 }
 
 func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
@@ -45,7 +46,7 @@ func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
 		http: &http.Client{
 			Timeout: 120 * time.Second,
 		},
-		limiter: makeLimiter(cfg.BaseURL),
+		limiter: makeLimiter(cfg.BaseURL, cfg.MaxConcurrency),
 	}
 }
 
@@ -246,11 +247,13 @@ func applyLocalQwenJSONControls(baseURL, model string, jsonMode bool, messages [
 	return messages
 }
 
-func makeLimiter(baseURL string) chan struct{} {
-	maxConcurrent := 0
-	if raw := strings.TrimSpace(os.Getenv("LLM_MAX_CONCURRENCY")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
-			maxConcurrent = parsed
+func makeLimiter(baseURL string, configured int) chan struct{} {
+	maxConcurrent := configured
+	if maxConcurrent <= 0 {
+		if raw := strings.TrimSpace(os.Getenv("LLM_MAX_CONCURRENCY")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				maxConcurrent = parsed
+			}
 		}
 	}
 	if maxConcurrent == 0 && isLocalLLM(baseURL) {
@@ -360,24 +363,42 @@ func DefaultRouter() *Router {
 			criticalModel = "anthropic/claude-sonnet-4-20250514"
 		}
 	}
+	speedConcurrency := readConcurrencyEnv("LLM_SPEED_MAX_CONCURRENCY")
+	analysisConcurrency := readConcurrencyEnv("LLM_ANALYSIS_MAX_CONCURRENCY")
+	criticalConcurrency := readConcurrencyEnv("LLM_CRITICAL_MAX_CONCURRENCY")
 
 	speed := NewOpenRouterClient(OpenRouterConfig{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-		Model:   speedModel,
+		APIKey:         apiKey,
+		BaseURL:        baseURL,
+		Model:          speedModel,
+		MaxConcurrency: speedConcurrency,
 	})
 
 	analysis := NewOpenRouterClient(OpenRouterConfig{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-		Model:   analysisModel,
+		APIKey:         apiKey,
+		BaseURL:        baseURL,
+		Model:          analysisModel,
+		MaxConcurrency: analysisConcurrency,
 	})
 
 	critical := NewOpenRouterClient(OpenRouterConfig{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-		Model:   criticalModel,
+		APIKey:         apiKey,
+		BaseURL:        baseURL,
+		Model:          criticalModel,
+		MaxConcurrency: criticalConcurrency,
 	})
 
 	return NewRouter(speed, analysis, critical)
+}
+
+func readConcurrencyEnv(name string) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
 }

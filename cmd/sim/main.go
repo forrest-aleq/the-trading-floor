@@ -34,6 +34,10 @@ func main() {
 }
 
 func runSimulation() error {
+	firm.ReloadRuntimeConfig()
+	research.ReloadRuntimeConfig()
+	scanner.ReloadRuntimeConfig()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 

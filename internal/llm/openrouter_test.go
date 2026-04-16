@@ -105,12 +105,22 @@ func TestOpenRouterClientPreservesReasoningFromLocalProviders(t *testing.T) {
 }
 
 func TestMakeLimiterDefaultsToTwoForLocalLLM(t *testing.T) {
-	limiter := makeLimiter("http://127.0.0.1:1234/v1")
+	limiter := makeLimiter("http://127.0.0.1:1234/v1", 0)
 	if limiter == nil {
 		t.Fatal("expected limiter for local LLM")
 	}
 	if cap(limiter) != 2 {
 		t.Fatalf("expected local limiter capacity 2, got %d", cap(limiter))
+	}
+}
+
+func TestMakeLimiterUsesConfiguredCapacity(t *testing.T) {
+	limiter := makeLimiter("http://127.0.0.1:1234/v1", 5)
+	if limiter == nil {
+		t.Fatal("expected limiter for local LLM")
+	}
+	if cap(limiter) != 5 {
+		t.Fatalf("expected configured limiter capacity 5, got %d", cap(limiter))
 	}
 }
 

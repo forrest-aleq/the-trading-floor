@@ -232,6 +232,22 @@ func TestEvaluateRetriesCompactPromptOnContextWindowError(t *testing.T) {
 	}
 }
 
+func TestDetectScannerResponseModeUsesStructuredForLocalQwen(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "")
+	t.Setenv("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+	if got := detectScannerResponseMode("qwen3:8b"); got != scannerResponseModeStructured {
+		t.Fatalf("expected local qwen scanner to prefer structured mode, got %s", got)
+	}
+}
+
+func TestDetectScannerResponseModeKeepsThoughtModeForRemoteQwen(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "")
+	t.Setenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+	if got := detectScannerResponseMode("qwen/qwen3.5-9b"); got != scannerResponseModeThought {
+		t.Fatalf("expected remote qwen scanner to keep thought mode, got %s", got)
+	}
+}
+
 func TestEvaluateDetailedCachesBySignalAndDomain(t *testing.T) {
 	t.Setenv("SCANNER_RESPONSE_MODE", "json")
 
@@ -698,6 +714,22 @@ Domain filter: macro
 		t.Fatalf("expected inferred macro category, got %+v", result)
 	}
 	if !strings.Contains(result.Reasoning, "no clear catalyst") {
+		t.Fatalf("expected recovered reasoning, got %+v", result)
+	}
+}
+
+func TestParseScanResponseRecoversConservativeRejectFromThinkTrace(t *testing.T) {
+	result, err := parseScanResponse(`<think>
+Okay, let's break this down. The user wants a JSON output for a macro signal.
+The event is real, but there is no exact instrument and no clear directional setup.
+</think>`)
+	if err != nil {
+		t.Fatalf("expected conservative reject recovery, got %v", err)
+	}
+	if result.Tradeable {
+		t.Fatalf("expected recovered reject, got %+v", result)
+	}
+	if !strings.Contains(strings.ToLower(result.Reasoning), "no exact instrument") {
 		t.Fatalf("expected recovered reasoning, got %+v", result)
 	}
 }

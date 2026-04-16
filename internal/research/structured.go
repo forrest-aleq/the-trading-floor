@@ -214,3 +214,15 @@ func readStructuredIntEnv(name string, fallback int) int {
 	}
 	return value
 }
+
+func readStructuredFloatEnv(name string, fallback float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}

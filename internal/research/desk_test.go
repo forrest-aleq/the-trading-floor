@@ -2,6 +2,7 @@ package research
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -125,6 +126,58 @@ func TestInvestigateUsesThoughtModeForQwenResearch(t *testing.T) {
 	}
 }
 
+type researchMissingConvictionClient struct {
+	requests []llm.Request
+}
+
+func (s *researchMissingConvictionClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: `{
+  "structure": "single",
+  "instrument": {"symbol": "TLT", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+  "legs": [],
+  "direction": "long",
+  "entry_price": 90.5,
+  "target_price": 96.0,
+  "stop_loss": 88.0,
+  "time_horizon_hours": 48,
+  "position_size_pct": 0.01,
+  "evidence": ["hawkish policy rhetoric"],
+  "counter_args": ["positioning may already be crowded"],
+  "kill_rules": [{"condition": "price_below_stop", "threshold": 88.0, "action": "close"}],
+  "reasoning": "hawkish repricing favors duration rebound after overshoot"
+}`,
+		Model: "analysis",
+	}, nil
+}
+
+type researchMissingPositionSizeClient struct {
+	requests []llm.Request
+}
+
+func (s *researchMissingPositionSizeClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: `{
+  "structure": "single",
+  "instrument": {"symbol": "TLT", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+  "legs": [],
+  "direction": "long",
+  "entry_price": 90.5,
+  "target_price": 96.0,
+  "stop_loss": 88.0,
+  "conviction": 0.76,
+  "time_horizon_hours": 48,
+  "evidence": ["hawkish policy rhetoric"],
+  "counter_args": ["positioning may already be crowded"],
+  "kill_rules": [{"condition": "price_below_stop", "threshold": 88.0, "action": "close"}],
+  "reasoning": "hawkish repricing favors duration rebound after overshoot"
+}`,
+		Model: "analysis",
+	}, nil
+}
+
 func TestInvestigateCompilerFallbackRecoversStructuredThesis(t *testing.T) {
 	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
 	t.Setenv("RESEARCH_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
@@ -244,6 +297,111 @@ func TestInvestigateRecoversWithStructuredRetryAfterPrimaryError(t *testing.T) {
 	}
 	if client.requests[1].Tier != llm.TierSpeed {
 		t.Fatalf("expected retry to downgrade to speed tier, got %v", client.requests[1].Tier)
+	}
+}
+
+func TestInvestigateDefaultsMissingConvictionAndStrategy(t *testing.T) {
+	client := &researchMissingConvictionClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected thesis with derived conviction, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis")
+	}
+	if thesis.Conviction != 0.78 {
+		t.Fatalf("expected conviction to derive from opportunity score, got %.2f", thesis.Conviction)
+	}
+	if thesis.Strategy != "event" {
+		t.Fatalf("expected default event strategy, got %q", thesis.Strategy)
+	}
+}
+
+func TestInvestigateDefaultsMissingPositionSize(t *testing.T) {
+	t.Setenv("RESEARCH_DEFAULT_POSITION_SIZE_PCT", "0.015")
+	ReloadRuntimeConfig()
+	defer ReloadRuntimeConfig()
+
+	client := &researchMissingPositionSizeClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected thesis with default position size, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis")
+	}
+	if thesis.PositionSize != 0.015 {
+		t.Fatalf("expected default position size 0.015, got %.4f", thesis.PositionSize)
+	}
+}
+
+func TestEnrichResearchJSONBackfillsOpportunityAndMarketContext(t *testing.T) {
+	raw := `{
+  "structure": "single",
+  "instrument": {},
+  "direction": "",
+  "entry_price": 0,
+  "target_price": 96.0
+}`
+
+	opp := testOpportunity()
+	marketCtx := &model.MarketContext{CurrentPrice: 91.25}
+
+	enriched := enrichResearchJSON(raw, opp, marketCtx)
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(enriched), &payload); err != nil {
+		t.Fatalf("expected valid JSON after enrichment, got %v", err)
+	}
+
+	instrument, ok := payload["instrument"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected instrument payload, got %#v", payload["instrument"])
+	}
+	if got := instrument["symbol"]; got != "TLT" {
+		t.Fatalf("expected symbol TLT, got %#v", got)
+	}
+	if got := payload["direction"]; got != "long" {
+		t.Fatalf("expected long direction, got %#v", got)
+	}
+	entryPrice, ok := numericValue(payload["entry_price"])
+	if !ok {
+		t.Fatalf("expected numeric entry price, got %#v", payload["entry_price"])
+	}
+	if entryPrice != 91.25 {
+		t.Fatalf("expected market-context entry price 91.25, got %.2f", entryPrice)
+	}
+}
+
+func TestNormalizeResearchInstrumentParsesOptionContractSymbol(t *testing.T) {
+	inst := normalizeResearchInstrument(model.Instrument{
+		Symbol:   "TLT 2026-05-18 130PUT",
+		SecType:  "STK",
+		Currency: "USD",
+		Exchange: "SMART",
+	})
+
+	if inst.Symbol != "TLT" {
+		t.Fatalf("expected underlying symbol TLT, got %q", inst.Symbol)
+	}
+	if inst.SecType != "OPT" {
+		t.Fatalf("expected sec type OPT, got %q", inst.SecType)
+	}
+	if inst.Expiry != "20260518" {
+		t.Fatalf("expected normalized expiry 20260518, got %q", inst.Expiry)
+	}
+	if inst.Strike != 130 {
+		t.Fatalf("expected strike 130, got %.2f", inst.Strike)
+	}
+	if inst.Right != "P" {
+		t.Fatalf("expected right P, got %q", inst.Right)
+	}
+	if inst.Multiplier != "100" {
+		t.Fatalf("expected multiplier 100, got %q", inst.Multiplier)
 	}
 }
 

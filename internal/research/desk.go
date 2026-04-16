@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,6 +68,7 @@ var (
 	researchRetryMaxTokens    = readStructuredIntEnv("RESEARCH_RETRY_MAX_TOKENS", 384)
 	researchCompilerTimeout   = readStructuredDurationEnv("RESEARCH_COMPILER_TIMEOUT", 35*time.Second)
 	researchCompilerMaxTokens = readStructuredIntEnv("RESEARCH_COMPILER_MAX_TOKENS", 900)
+	researchDefaultPosition   = readStructuredFloatEnv("RESEARCH_DEFAULT_POSITION_SIZE_PCT", 0.01)
 )
 
 type Investigation struct {
@@ -129,8 +131,9 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 		)
 		return Investigation{Reason: "json_extraction"}, fmt.Errorf("research JSON extraction: %w", err)
 	}
+	cleaned = enrichResearchJSON(cleaned, opp, marketCtx)
 
-	if err := llm.ValidateJSONFields(cleaned, []string{"instrument", "direction", "entry_price", "conviction", "strategy"}); err != nil {
+	if err := llm.ValidateJSONFields(cleaned, []string{"instrument", "direction", "entry_price"}); err != nil {
 		return Investigation{Reason: "validation"}, fmt.Errorf("research response validation: %w", err)
 	}
 
@@ -166,6 +169,7 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 		Strike:   result.Instrument.Strike,
 		Right:    result.Instrument.Right,
 	}
+	primary = normalizeResearchInstrument(primary)
 	if primary.Symbol == "" && len(legs) > 0 {
 		primary = legs[0].Instrument
 	}
@@ -182,7 +186,7 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 		Instrument:         primary,
 		Legs:               legs,
 		Direction:          model.TradeDirection(result.Direction),
-		Conviction:         normalizeConviction(result.Conviction),
+		Conviction:         normalizeResearchConviction(result.Conviction, opp),
 		Health:             0.85, // Initial health
 		Evidence:           evidence,
 		CounterArgs:        result.CounterArgs,
@@ -398,16 +402,17 @@ func normalizeTradeLegs(raw []struct {
 		if entryPrice <= 0 {
 			entryPrice = fallbackEntry
 		}
+		inst := normalizeResearchInstrument(model.Instrument{
+			Symbol:   leg.Instrument.Symbol,
+			SecType:  leg.Instrument.SecType,
+			Currency: leg.Instrument.Currency,
+			Exchange: normalizeExchange(leg.Instrument.Exchange),
+			Expiry:   leg.Instrument.Expiry,
+			Strike:   leg.Instrument.Strike,
+			Right:    leg.Instrument.Right,
+		})
 		legs = append(legs, model.TradeLeg{
-			Instrument: model.Instrument{
-				Symbol:   leg.Instrument.Symbol,
-				SecType:  leg.Instrument.SecType,
-				Currency: leg.Instrument.Currency,
-				Exchange: normalizeExchange(leg.Instrument.Exchange),
-				Expiry:   leg.Instrument.Expiry,
-				Strike:   leg.Instrument.Strike,
-				Right:    leg.Instrument.Right,
-			},
+			Instrument: inst,
 			Direction:  direction,
 			Ratio:      ratio,
 			EntryPrice: entryPrice,
@@ -499,14 +504,236 @@ func normalizeConviction(value float64) float64 {
 	return value
 }
 
+func normalizeResearchInstrument(inst model.Instrument) model.Instrument {
+	inst.Symbol = strings.TrimSpace(inst.Symbol)
+	inst.Exchange = normalizeExchange(inst.Exchange)
+	if strings.TrimSpace(inst.Currency) == "" {
+		inst.Currency = "USD"
+	}
+	if parsed, ok := parseOptionContractString(inst.Symbol); ok {
+		if strings.TrimSpace(inst.Symbol) == "" || strings.EqualFold(inst.SecType, "STK") || strings.TrimSpace(inst.SecType) == "" {
+			inst.Symbol = parsed.Symbol
+			inst.SecType = parsed.SecType
+			inst.Multiplier = parsed.Multiplier
+		}
+		if inst.Expiry == "" {
+			inst.Expiry = parsed.Expiry
+		}
+		if inst.Strike <= 0 {
+			inst.Strike = parsed.Strike
+		}
+		if strings.TrimSpace(inst.Right) == "" {
+			inst.Right = parsed.Right
+		}
+		if strings.TrimSpace(inst.Symbol) == "" {
+			inst.Symbol = parsed.Symbol
+		}
+	}
+	if strings.TrimSpace(inst.SecType) == "" {
+		inst.SecType = "STK"
+	}
+	if (inst.SecType == "OPT" || inst.SecType == "FOP") && strings.TrimSpace(inst.Multiplier) == "" {
+		inst.Multiplier = "100"
+	}
+	inst.Right = normalizeOptionRight(inst.Right)
+	inst.Expiry = normalizeContractExpiry(inst.Expiry)
+	return inst
+}
+
+func parseOptionContractString(raw string) (model.Instrument, bool) {
+	parts := strings.Fields(strings.TrimSpace(raw))
+	if len(parts) < 3 {
+		return model.Instrument{}, false
+	}
+
+	expiry := normalizeContractExpiry(parts[1])
+	if expiry == "" {
+		return model.Instrument{}, false
+	}
+
+	strikeToken := parts[2]
+	rightToken := ""
+	if len(parts) >= 4 {
+		rightToken = parts[3]
+	}
+
+	strike, right, ok := parseOptionStrikeRight(strikeToken, rightToken)
+	if !ok {
+		return model.Instrument{}, false
+	}
+
+	return model.Instrument{
+		Symbol:     strings.TrimSpace(parts[0]),
+		SecType:    "OPT",
+		Currency:   "USD",
+		Exchange:   "SMART",
+		Expiry:     expiry,
+		Strike:     strike,
+		Right:      right,
+		Multiplier: "100",
+	}, true
+}
+
+func parseOptionStrikeRight(strikeToken, rightToken string) (float64, string, bool) {
+	strikeToken = strings.TrimSpace(strikeToken)
+	rightToken = strings.TrimSpace(rightToken)
+	combinedUpper := strings.ToUpper(strikeToken)
+	for _, suffix := range []string{"CALL", "PUT", "C", "P"} {
+		if strings.HasSuffix(combinedUpper, suffix) {
+			strikeText := strings.TrimSpace(strikeToken[:len(strikeToken)-len(suffix)])
+			strike, err := strconv.ParseFloat(strikeText, 64)
+			if err != nil || strike <= 0 {
+				return 0, "", false
+			}
+			return strike, normalizeOptionRight(suffix), true
+		}
+	}
+
+	strike, err := strconv.ParseFloat(strikeToken, 64)
+	if err != nil || strike <= 0 {
+		return 0, "", false
+	}
+	right := normalizeOptionRight(rightToken)
+	if right == "" {
+		return 0, "", false
+	}
+	return strike, right, true
+}
+
+func normalizeOptionRight(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "CALL", "C":
+		return "C"
+	case "PUT", "P":
+		return "P"
+	default:
+		return ""
+	}
+}
+
+func normalizeContractExpiry(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) == len("2006-01-02") {
+		if parsed, err := time.Parse("2006-01-02", value); err == nil {
+			return parsed.Format("20060102")
+		}
+	}
+	if len(value) == len("20060102") {
+		if _, err := time.Parse("20060102", value); err == nil {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeResearchConviction(value float64, opp *model.Opportunity) float64 {
+	value = normalizeConviction(value)
+	if value > 0 {
+		return value
+	}
+	if opp == nil {
+		return 0
+	}
+	return normalizeConviction(opp.Score / 100)
+}
+
+func enrichResearchJSON(cleaned string, opp *model.Opportunity, marketCtx *model.MarketContext) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(cleaned), &payload); err != nil {
+		return cleaned
+	}
+
+	if !hasInstrumentPayload(payload["instrument"]) && opp != nil && len(opp.Instruments) > 0 {
+		payload["instrument"] = instrumentPayload(opp.Instruments[0])
+	}
+	if strings.TrimSpace(fmt.Sprint(payload["direction"])) == "" && opp != nil && opp.Direction != "" {
+		payload["direction"] = string(opp.Direction)
+	}
+	if value, ok := numericValue(payload["entry_price"]); !ok || value <= 0 {
+		if price := fallbackResearchEntryPrice(marketCtx); price > 0 {
+			payload["entry_price"] = price
+		}
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return cleaned
+	}
+	return string(encoded)
+}
+
+func hasInstrumentPayload(value any) bool {
+	instrument, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	symbol, ok := instrument["symbol"]
+	if !ok || symbol == nil {
+		return false
+	}
+	return strings.TrimSpace(fmt.Sprint(symbol)) != ""
+}
+
+func instrumentPayload(inst model.Instrument) map[string]any {
+	return map[string]any{
+		"symbol":   inst.Symbol,
+		"sec_type": inst.SecType,
+		"currency": inst.Currency,
+		"exchange": normalizeExchange(inst.Exchange),
+		"expiry":   inst.Expiry,
+		"strike":   inst.Strike,
+		"right":    inst.Right,
+	}
+}
+
+func fallbackResearchEntryPrice(marketCtx *model.MarketContext) float64 {
+	if marketCtx == nil {
+		return 0
+	}
+	if marketCtx.CurrentPrice > 0 {
+		return marketCtx.CurrentPrice
+	}
+	return 0
+}
+
+func numericValue(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
+}
+
 func normalizePositionSizePct(value float64) float64 {
 	switch {
+	case value <= 0:
+		value = researchDefaultPosition
 	case value > 1 && value <= 100:
 		value /= 100
 	case value > 100:
 		value = 1
-	case value < 0:
-		value = 0
 	}
 	return value
 }

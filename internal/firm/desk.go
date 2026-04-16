@@ -100,7 +100,19 @@ var (
 	deskExecutionTimeout  = readDeskDurationEnv("DESK_EXECUTION_TIMEOUT", 30*time.Second)
 	deskSlowStageWarnAt   = readDeskDurationEnv("DESK_SLOW_STAGE_WARN_AT", 10*time.Second)
 	deskColleagueWeight   = readDeskFloatEnv("DESK_COLLEAGUE_TRUST_WEIGHT", 0.18)
+	deskSubTeamsEnabled   = readDeskBoolEnv("DESK_ENABLE_SUBTEAMS", true)
 )
+
+func ReloadRuntimeConfig() {
+	deskScannerTimeout = readDeskDurationEnv("DESK_SCANNER_TIMEOUT", 20*time.Second)
+	deskResearchTimeout = readDeskDurationEnv("DESK_RESEARCH_TIMEOUT", 45*time.Second)
+	deskProsecutionTimout = readDeskDurationEnv("DESK_PROSECUTION_TIMEOUT", 35*time.Second)
+	deskCouncilTimeout = readDeskDurationEnv("DESK_COUNCIL_TIMEOUT", 45*time.Second)
+	deskExecutionTimeout = readDeskDurationEnv("DESK_EXECUTION_TIMEOUT", 30*time.Second)
+	deskSlowStageWarnAt = readDeskDurationEnv("DESK_SLOW_STAGE_WARN_AT", 10*time.Second)
+	deskColleagueWeight = readDeskFloatEnv("DESK_COLLEAGUE_TRUST_WEIGHT", 0.18)
+	deskSubTeamsEnabled = readDeskBoolEnv("DESK_ENABLE_SUBTEAMS", true)
+}
 
 func NewDesk(cfg DeskConfig) *Desk {
 	if cfg.MinConviction == 0 {
@@ -488,6 +500,18 @@ func readDeskFloatEnv(name string, fallback float64) float64 {
 	return parsed
 }
 
+func readDeskBoolEnv(name string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 func (d *Desk) applyCollaborationContext(sig signal.Signal, thesis *model.Thesis) {
 	input := d.collaborationInputForSignal(sig)
 	institutional.ApplyCollaborationInput(thesis, input, 0.55, deskColleagueWeight)
@@ -576,7 +600,7 @@ func (d *Desk) forgetThesis(thesisID string) {
 }
 
 func (d *Desk) maybeSpawnSubTeam(ctx context.Context, thesis *model.Thesis) {
-	if d.llm == nil || thesis == nil {
+	if !deskSubTeamsEnabled || d.llm == nil || thesis == nil {
 		return
 	}
 

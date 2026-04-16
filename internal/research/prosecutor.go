@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hnic/trading-floor/internal/institutional"
@@ -97,6 +98,8 @@ func (p *Prosecutor) Challenge(ctx context.Context, thesis *model.Thesis) *model
 		}
 	}
 
+	cleaned = normalizeProsecutionJSON(cleaned)
+
 	var result prosecutionResult
 	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
 		p.log.Error("prosecution parse error",
@@ -177,4 +180,27 @@ type prosecutionResult struct {
 	CrowdedScore         float64  `json:"crowded_score"`
 	ConfidenceAdjustment float64  `json:"confidence_adjustment"`
 	Reasoning            string   `json:"reasoning"`
+}
+
+func normalizeProsecutionJSON(cleaned string) string {
+	trimmed := strings.TrimSpace(cleaned)
+	if !strings.HasPrefix(trimmed, "[") {
+		return cleaned
+	}
+
+	var bearArgs []string
+	if err := json.Unmarshal([]byte(trimmed), &bearArgs); err != nil || len(bearArgs) == 0 {
+		return cleaned
+	}
+
+	normalized, err := json.Marshal(prosecutionResult{
+		Verdict:              "weakened",
+		BearArgs:             bearArgs,
+		ConfidenceAdjustment: -0.1,
+		Reasoning:            "normalized from array-only prosecution response",
+	})
+	if err != nil {
+		return cleaned
+	}
+	return string(normalized)
 }

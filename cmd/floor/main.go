@@ -40,6 +40,9 @@ import (
 
 func main() {
 	_ = godotenv.Load()
+	firm.ReloadRuntimeConfig()
+	research.ReloadRuntimeConfig()
+	scanner.ReloadRuntimeConfig()
 
 	sessionID := uuid.New().String()[:8]
 	logLevel := parseLogLevel(os.Getenv("LOG_LEVEL"))

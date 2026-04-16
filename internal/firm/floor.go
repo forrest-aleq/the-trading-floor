@@ -201,19 +201,16 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 	f.mu.RUnlock()
 
 	relevantDomains := relevantDomainsForSignal(sig)
+	targets := selectDeskTargetsForSignal(desks, sig)
 	routed := 0
 	skipped := 0
 	dropped := 0
 
-	for _, desk := range desks {
-		if originDesk := internalOriginDesk(sig); originDesk != "" && originDesk == desk.ID {
-			skipped++
-			continue
-		}
-		if !domainShouldReviewSignal(desk.Domain, sig) {
-			skipped++
-			continue
-		}
+	if len(targets) == 0 {
+		skipped = len(desks)
+	}
+
+	for _, desk := range targets {
 		if !f.enqueueTask(ctx, deskTask{desk: desk, sig: sig}) {
 			dropped++
 			continue
@@ -221,6 +218,9 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 		routed++
 	}
 
+	if len(targets) > 0 {
+		skipped = len(desks) - len(targets)
+	}
 	f.tasksSkipped.Add(int64(skipped))
 
 	if routed == 0 {

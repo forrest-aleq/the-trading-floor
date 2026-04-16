@@ -99,6 +99,9 @@ type domainStats struct {
 
 func main() {
 	_ = godotenv.Load()
+	firm.ReloadRuntimeConfig()
+	research.ReloadRuntimeConfig()
+	scanner.ReloadRuntimeConfig()
 
 	opts := parseOptions()
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{

@@ -31,6 +31,9 @@ const (
 
 func main() {
 	_ = godotenv.Load()
+	firm.ReloadRuntimeConfig()
+	research.ReloadRuntimeConfig()
+	scanner.ReloadRuntimeConfig()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,

@@ -141,6 +141,14 @@ func TestParseRoutingPolicyNormalizesKeysAndDomains(t *testing.T) {
 	policy, err := parseRoutingPolicy([]byte(`{
 		"category_domain_rules": {" Corporate ": [" Sector ", "corporate", "sector"]},
 		"signal_type_domain_rules": {" NEWS ": ["macro"]},
+		"domain_group_max_matches": {" Corporate ": 2, " macro ": 0},
+		"desk_rules": {
+			" Corp-Earnings-A ": {
+				"priority": 12,
+				"categories": [" Corporate "],
+				"keywords_any": [" Earnings ", "guidance", "earnings"]
+			}
+		},
 		"fallback_domains": [" Macro ", "systematic", "macro"]
 	}`))
 	if err != nil {
@@ -156,5 +164,78 @@ func TestParseRoutingPolicyNormalizesKeysAndDomains(t *testing.T) {
 	}
 	if len(policy.FallbackDomains) != 2 || policy.FallbackDomains[0] != "macro" || policy.FallbackDomains[1] != "systematic" {
 		t.Fatalf("unexpected fallback domains: %#v", policy.FallbackDomains)
+	}
+	if policy.DomainGroupMaxMatches["corporate"] != 2 {
+		t.Fatalf("unexpected domain group max matches: %#v", policy.DomainGroupMaxMatches)
+	}
+	rule, ok := policy.DeskRules["corp-earnings-a"]
+	if !ok {
+		t.Fatalf("expected normalized desk rule map: %#v", policy.DeskRules)
+	}
+	if rule.Priority != 12 {
+		t.Fatalf("unexpected desk rule priority: %#v", rule)
+	}
+	if len(rule.KeywordsAny) != 2 || rule.KeywordsAny[0] != "earnings" || rule.KeywordsAny[1] != "guidance" {
+		t.Fatalf("unexpected normalized keyword list: %#v", rule.KeywordsAny)
+	}
+}
+
+func TestShouldDeskReviewSignalUsesDeskSpecificRules(t *testing.T) {
+	sig := signal.Signal{
+		Source:   "earnings-calendar",
+		Type:     signal.TypeNews,
+		Category: "corporate",
+		Entities: []signal.Entity{
+			{Name: "NVIDIA", Type: "company", ID: "NVDA"},
+			{Name: "NVDA", Type: "instrument", ID: "NVDA"},
+		},
+		Translated: "NVIDIA beat earnings, raised guidance, and expanded data center backlog.",
+		EvidenceMeta: &evidence.Metadata{
+			SourceOwnerGroup: "earnings_provider",
+		},
+	}
+
+	if !ShouldDeskReviewSignal("corp-earnings-a", "corporate", sig) {
+		t.Fatal("expected corp-earnings-a to receive earnings signal")
+	}
+	if ShouldDeskReviewSignal("corp-filings-a", "corporate", sig) {
+		t.Fatal("did not expect corp-filings-a to receive earnings signal")
+	}
+	if ShouldDeskReviewSignal("corp-mna-a", "corporate", sig) {
+		t.Fatal("did not expect corp-mna-a to receive earnings signal")
+	}
+	if !ShouldDeskReviewSignal("sector-tech-a", "sector", sig) {
+		t.Fatal("expected sector-tech-a to receive tech earnings signal")
+	}
+	if ShouldDeskReviewSignal("sector-biotech-a", "sector", sig) {
+		t.Fatal("did not expect sector-biotech-a to receive tech earnings signal")
+	}
+}
+
+func TestSelectDeskTargetsForSignalAppliesPerDomainGroupLimit(t *testing.T) {
+	desks := []*Desk{
+		{ID: "corp-a-1", Domain: "corporate", ABGroup: "A"},
+		{ID: "corp-a-2", Domain: "corporate", ABGroup: "A"},
+		{ID: "corp-b-1", Domain: "corporate", ABGroup: "B"},
+		{ID: "corp-b-2", Domain: "corporate", ABGroup: "B"},
+	}
+
+	sig := signal.Signal{
+		Source:     "generic-corporate",
+		Type:       signal.TypeNews,
+		Category:   "corporate",
+		Translated: "Generic corporate update with no desk-specific rule attached.",
+	}
+
+	targets := selectDeskTargetsForSignal(desks, sig)
+	if len(targets) != 2 {
+		t.Fatalf("expected one desk per AB group after cap, got %d", len(targets))
+	}
+	got := []string{targets[0].ID, targets[1].ID}
+	want := []string{"corp-a-1", "corp-b-1"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("targets[%d] = %s, want %s (all=%v)", i, got[i], want[i], got)
+		}
 	}
 }

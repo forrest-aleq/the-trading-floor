@@ -74,6 +74,22 @@ var (
 	scannerEvalCacheTTL           = readDurationEnv("SCANNER_EVAL_CACHE_TTL", 10*time.Minute)
 )
 
+func ReloadRuntimeConfig() {
+	scannerRequestTimeout = readDurationEnv("SCANNER_REQUEST_TIMEOUT", 15*time.Second)
+	scannerMaxTokens = readIntEnv("SCANNER_MAX_TOKENS", 128)
+	scannerCompactMaxTokens = readIntEnv("SCANNER_COMPACT_MAX_TOKENS", 96)
+	scannerThinkingRequestTimeout = readDurationEnv("SCANNER_THINKING_REQUEST_TIMEOUT", 12*time.Second)
+	scannerThinkingMaxTokens = readIntEnv("SCANNER_THINKING_MAX_TOKENS", 128)
+	scannerThinkingCompactTokens = readIntEnv("SCANNER_THINKING_COMPACT_MAX_TOKENS", 96)
+	scannerCompilerTimeout = readDurationEnv("SCANNER_COMPILER_TIMEOUT", 15*time.Second)
+	scannerCompilerMaxTokens = readIntEnv("SCANNER_COMPILER_MAX_TOKENS", 128)
+	scannerContentLimit = readIntEnv("SCANNER_CONTENT_LIMIT", 500)
+	scannerCompactContentMax = readIntEnv("SCANNER_COMPACT_CONTENT_LIMIT", 220)
+	scannerStaleSignalAge = readDurationEnv("SCANNER_STALE_SIGNAL_AGE", 6*time.Hour)
+	scannerLLMCooldown = readDurationEnv("SCANNER_LLM_UNAVAILABLE_COOLDOWN", 20*time.Second)
+	scannerEvalCacheTTL = readDurationEnv("SCANNER_EVAL_CACHE_TTL", 10*time.Minute)
+}
+
 func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
 	if minScore == 0 {
 		minScore = 70 // Default: aggressive filter — most signals should be rejected
@@ -576,6 +592,9 @@ func detectScannerResponseMode(model string) scannerResponseMode {
 	case "thought", "thoughts", "thinking", "thought_block":
 		return scannerResponseModeThought
 	}
+	if isLocalThoughtScannerModel(model) {
+		return scannerResponseModeStructured
+	}
 	if isThoughtFriendlyScannerModel(model) {
 		return scannerResponseModeThought
 	}
@@ -588,6 +607,14 @@ func isThoughtFriendlyScannerModel(model string) bool {
 		strings.Contains(model, "qwen3:") ||
 		strings.Contains(model, "qwen2.5:") ||
 		strings.HasPrefix(model, "qwen")
+}
+
+func isLocalThoughtScannerModel(model string) bool {
+	baseURL := strings.ToLower(strings.TrimSpace(os.Getenv("LLM_BASE_URL")))
+	return isThoughtFriendlyScannerModel(model) &&
+		(strings.Contains(baseURL, "127.0.0.1") ||
+			strings.Contains(baseURL, "localhost") ||
+			strings.Contains(baseURL, "::1"))
 }
 
 func extractFinalDecisionBlock(raw string) (string, error) {
@@ -715,9 +742,13 @@ func parseScanInstruments(raw string) ([]struct {
 
 func recoverConservativeThoughtReject(raw string) (scanResult, bool) {
 	normalized := strings.ToLower(strings.ReplaceAll(raw, "\r", ""))
-	if !strings.Contains(normalized, "thinking process") &&
+	if !strings.Contains(normalized, "<think>") &&
+		!strings.Contains(normalized, "thinking process") &&
 		!strings.Contains(normalized, "analyze the request") &&
-		!strings.Contains(normalized, "analyze the signal") {
+		!strings.Contains(normalized, "analyze the signal") &&
+		!strings.Contains(normalized, "the user wants") &&
+		!strings.Contains(normalized, "let's break this down") &&
+		!strings.Contains(normalized, "let me try to figure") {
 		return scanResult{}, false
 	}
 
@@ -738,13 +769,18 @@ func recoverConservativeThoughtReject(raw string) (scanResult, bool) {
 		return scanResult{}, false
 	}
 
+	reason := inferThoughtRejectReason(raw)
+	if reason == "incomplete thought trace defaulted to reject" {
+		return scanResult{}, false
+	}
+
 	return scanResult{
 		Tradeable: false,
 		Score:     0,
 		Direction: "none",
 		Urgency:   0,
 		Category:  inferThoughtCategory(normalized),
-		Reasoning: inferThoughtRejectReason(raw),
+		Reasoning: reason,
 	}, true
 }
 

@@ -77,6 +77,21 @@ func (s *prosecutorStructuredRetryClient) Complete(_ context.Context, req llm.Re
 	}, nil
 }
 
+type prosecutorArrayClient struct {
+	requests []llm.Request
+}
+
+func (s *prosecutorArrayClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: `[
+  "**Overreliance on event risk**",
+  "**Crowded expression with weak margin of safety**"
+]`,
+		Model: "critical",
+	}, nil
+}
+
 func TestProsecutorUsesThoughtModeForQwen(t *testing.T) {
 	t.Setenv("PROSECUTION_MODEL", "qwen/qwen3.5-35b-a3b")
 
@@ -159,6 +174,25 @@ func TestProsecutorStructuredRetryRecoversBeforeCompilerFallback(t *testing.T) {
 	}
 	if !client.requests[1].JSONMode {
 		t.Fatal("expected structured retry request")
+	}
+}
+
+func TestProsecutorNormalizesArrayOnlyResponse(t *testing.T) {
+	client := &prosecutorArrayClient{}
+	prosecutor := NewProsecutor(llm.NewRouter(client, client, client))
+
+	result := prosecutor.Challenge(context.Background(), structuredTestThesis())
+	if result == nil {
+		t.Fatal("expected prosecution result")
+	}
+	if result.Verdict != "weakened" {
+		t.Fatalf("expected weakened verdict, got %q", result.Verdict)
+	}
+	if got := len(result.BearArgs); got != 2 {
+		t.Fatalf("expected 2 bear args, got %d", got)
+	}
+	if result.Confidence != -0.1 {
+		t.Fatalf("expected conservative confidence adjustment, got %.2f", result.Confidence)
 	}
 }
 

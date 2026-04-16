@@ -2,6 +2,7 @@ package firm
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"os"
@@ -161,6 +162,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	if err := d.graph.RecordSignalSeen(ctx, sig.ID, d.ID, d.Domain, time.Now().UTC()); err != nil {
 		d.log.Warn("graph signal seen failed", "signal_id", sig.ID, "error", err)
 	}
+	sig = d.augmentSignalWithCollaborationContext(sig)
 
 	span := trace.FromContext(ctx).WithStage("scanner")
 	ctx = trace.IntoContext(ctx, span)
@@ -487,26 +489,88 @@ func readDeskFloatEnv(name string, fallback float64) float64 {
 }
 
 func (d *Desk) applyCollaborationContext(sig signal.Signal, thesis *model.Thesis) {
-	if thesis == nil || !isInternalSignal(sig) {
+	if thesis == nil {
 		return
+	}
+	input := d.collaborationInputForSignal(sig)
+	if input == nil {
+		return
+	}
+	if input.RelationshipTrust > 0 {
+		adjustment := (input.RelationshipTrust - 0.55) * deskColleagueWeight
+		thesis.Conviction = math.Max(0, math.Min(1, thesis.Conviction+adjustment))
+	}
+	thesis.CollaborationInput = input
+	if input.Summary != "" && !hasEvidenceSource(thesis, "colleague:"+input.OriginDesk) {
+		weight := math.Max(0.25, math.Min(0.95, input.RelationshipTrust))
+		thesis.Evidence = append(thesis.Evidence, model.Evidence{
+			Source:  "colleague:" + input.OriginDesk,
+			Content: fmt.Sprintf("Internal %s from %s desk. requested_action=%s peer_trust=%.2f peer_confidence=%.2f summary=%s", input.Kind, input.OriginDesk, input.RequestedAction, input.RelationshipTrust, input.RelationshipConfidence, input.Summary),
+			Weight:  weight,
+		})
+	}
+}
+
+func (d *Desk) collaborationInputForSignal(sig signal.Signal) *model.CollaborationInput {
+	if !isInternalSignal(sig) {
+		return nil
 	}
 	message, ok := model.DecodeColleagueMessage(sig.Raw)
 	if !ok {
-		return
+		return nil
 	}
 	input := model.CollaborationInputFromMessage(message)
 	if input == nil {
-		return
+		return nil
 	}
 	if d.beliefs != nil && input.OriginDesk != "" {
 		if peer, ok := d.beliefs.LookupPeer(input.OriginDesk, d.ID, firstNonEmptyInternal(d.Domain, input.OriginDomain), d.regime.Key()); ok {
 			input.RelationshipTrust = peer.Trust
 			input.RelationshipConfidence = peer.Confidence
-			adjustment := (peer.Trust - 0.55) * deskColleagueWeight
-			thesis.Conviction = math.Max(0, math.Min(1, thesis.Conviction+adjustment))
 		}
 	}
-	thesis.CollaborationInput = input
+	return input
+}
+
+func (d *Desk) augmentSignalWithCollaborationContext(sig signal.Signal) signal.Signal {
+	input := d.collaborationInputForSignal(sig)
+	if input == nil {
+		return sig
+	}
+	prefix := fmt.Sprintf(
+		"COLLEAGUE_CONTEXT\nfrom_desk: %s\nfrom_domain: %s\nmessage_kind: %s\nrequested_action: %s\npeer_trust: %.2f\npeer_confidence: %.2f\nsummary: %s\n\n",
+		input.OriginDesk,
+		input.OriginDomain,
+		input.Kind,
+		input.RequestedAction,
+		input.RelationshipTrust,
+		input.RelationshipConfidence,
+		input.Summary,
+	)
+	base := strings.TrimSpace(sig.Translated)
+	if base == "" {
+		base = strings.TrimSpace(sig.OriginalText)
+	}
+	if base == "" {
+		base = strings.TrimSpace(string(sig.Raw))
+	}
+	sig.Translated = prefix + base
+	if strings.TrimSpace(sig.OriginalText) == "" {
+		sig.OriginalText = sig.Translated
+	}
+	return sig
+}
+
+func hasEvidenceSource(thesis *model.Thesis, source string) bool {
+	if thesis == nil || source == "" {
+		return false
+	}
+	for _, item := range thesis.Evidence {
+		if item.Source == source {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Desk) ProcessOutcome(ctx context.Context, thesis *model.Thesis, outcome *model.ThesisOutcome) {

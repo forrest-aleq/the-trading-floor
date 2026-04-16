@@ -521,7 +521,7 @@ func TestDeskWeightsInternalColleagueSignalByPeerBelief(t *testing.T) {
 	)
 
 	var published []signal.Signal
-	macroDesk, _, beliefGraph := newRuntimeDeskWithOptions(t, "A", "macro", router, nil, nil, func(_ context.Context, sig signal.Signal) error {
+	macroDesk, bk, beliefGraph := newRuntimeDeskWithOptions(t, "A", "macro", router, nil, nil, func(_ context.Context, sig signal.Signal) error {
 		published = append(published, sig)
 		return nil
 	})
@@ -570,6 +570,79 @@ func TestDeskWeightsInternalColleagueSignalByPeerBelief(t *testing.T) {
 	}
 	if payload.Conviction <= 0.80 {
 		t.Fatalf("expected colleague weighting to lift conviction above base 0.80, got %.4f", payload.Conviction)
+	}
+	thesis := fetchActiveThesis(t, macroDesk, bk)
+	if thesis.CollaborationInput == nil || thesis.CollaborationInput.OriginDesk != "desk-geo-a" {
+		t.Fatalf("expected thesis collaboration input to be attached, got %+v", thesis.CollaborationInput)
+	}
+	foundColleagueEvidence := false
+	for _, item := range thesis.Evidence {
+		if item.Source == "colleague:desk-geo-a" {
+			foundColleagueEvidence = true
+			break
+		}
+	}
+	if !foundColleagueEvidence {
+		t.Fatalf("expected colleague evidence to be attached, got %+v", thesis.Evidence)
+	}
+}
+
+func TestDeskInjectsColleagueContextIntoScannerPrompt(t *testing.T) {
+	var scannerPrompt string
+	router := llm.NewRouter(
+		scriptedLLM{fn: func(req llm.Request) string {
+			scannerPrompt = req.Messages[len(req.Messages)-1].Content
+			return `{"tradeable":false,"score":10,"instruments":[],"direction":"none","urgency":0.1,"category":"macro","reasoning":"not actionable"}`
+		}},
+		scriptedLLM{response: `{}`},
+		scriptedLLM{response: `{}`},
+	)
+
+	macroDesk, _, beliefGraph := newRuntimeDeskWithOptions(t, "A", "macro", router, nil, nil, nil)
+	peerKey := belief.PeerBeliefKey("desk-geo-a", "desk-A", "macro", model.Regime{Volatility: "medium", Trend: "neutral", Risk: "neutral", Liquidity: "normal"}.Key())
+	for i := 0; i < 3; i++ {
+		beliefGraph.ApplyPeerSuccess(peerKey, 1.5)
+	}
+
+	rootMessage := model.ColleagueMessage{
+		ThreadID:        model.NewColleagueThreadID("thesis-root"),
+		MessageID:       model.NewColleagueMessageID("thesis-root"),
+		OriginDesk:      "desk-geo-a",
+		OriginDomain:    "geopolitical",
+		OriginSignalID:  "sig-root",
+		ThesisID:        "thesis-root",
+		RootThesisID:    "thesis-root",
+		TargetDomains:   []string{"macro", "tail"},
+		Strategy:        "event",
+		Structure:       "single",
+		Conviction:      0.84,
+		InternalDepth:   1,
+		Kind:            model.ColleagueMessageProposal,
+		RequestedAction: "review",
+		Summary:         "Internal thesis from geopolitical desk: XLE long structure=single strategy=event conviction=0.84",
+		DisplaySymbol:   "XLE",
+	}
+
+	macroDesk.Process(context.Background(), signal.Signal{
+		ID:           "sig-internal-scanner-context",
+		Source:       "internal/desk-geo-a",
+		Type:         signal.TypeAlternative,
+		Category:     "geopolitical",
+		Timestamp:    time.Now(),
+		Urgency:      0.9,
+		Raw:          rootMessage.Encode(),
+		Translated:   rootMessage.Summary,
+		OriginalText: rootMessage.Summary,
+	})
+
+	if !strings.Contains(scannerPrompt, "COLLEAGUE_CONTEXT") {
+		t.Fatalf("expected scanner prompt to include colleague context, got %q", scannerPrompt)
+	}
+	if !strings.Contains(scannerPrompt, "from_desk: desk-geo-a") {
+		t.Fatalf("expected scanner prompt to include origin desk, got %q", scannerPrompt)
+	}
+	if !strings.Contains(scannerPrompt, "peer_trust:") {
+		t.Fatalf("expected scanner prompt to include peer trust, got %q", scannerPrompt)
 	}
 }
 

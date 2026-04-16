@@ -19,13 +19,15 @@ import (
 // Council convenes multiple strategy archetypes to debate large positions (>2% of portfolio).
 // Each archetype evaluates independently, then the council synthesizes.
 type Council struct {
-	log           *slog.Logger
-	llm           *llm.Router
-	archetypes    []Archetype
-	telemetry     VoiceTelemetryProvider
-	selectedModel string
-	responseMode  structuredResponseMode
-	compilerModel string
+	log            *slog.Logger
+	llm            *llm.Router
+	archetypes     []Archetype
+	telemetry      VoiceTelemetryProvider
+	selectedModel  string
+	responseMode   structuredResponseMode
+	compilerModel  string
+	thoughtPrefix  string
+	compilerPrompt string
 }
 
 var (
@@ -34,17 +36,6 @@ var (
 	councilCompilerTimeout      = readStructuredDurationEnv("COUNCIL_COMPILER_TIMEOUT", 25*time.Second)
 	councilCompilerMaxTokens    = readStructuredIntEnv("COUNCIL_COMPILER_MAX_TOKENS", 600)
 )
-
-const councilThoughtPrefix = `Do not restate the request or schema.
-Think if useful, but keep it concise.
-You must end with exactly one JSON object matching the requested schema.`
-
-const councilCompilerPrompt = `You are a council-perspective compiler.
-You will receive the original council task and a freeform reasoning transcript from one council voice.
-Return one final JSON object only. No prose, no markdown, no thinking.
-
-JSON schema:
-{"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": 0.0, "size_adjustment": 1.0, "reasoning": "..."}`
 
 type perspectiveResult struct {
 	name           string
@@ -70,68 +61,16 @@ type VoiceTelemetryProvider interface {
 
 func NewCouncil(llmRouter *llm.Router) *Council {
 	selectedModel := criticalSelectedModel()
+	policy := activePromptPolicy()
 	return &Council{
-		log:           slog.Default().With("component", "council"),
-		llm:           llmRouter,
-		selectedModel: selectedModel,
-		responseMode:  detectStructuredResponseMode(os.Getenv("COUNCIL_RESPONSE_MODE"), selectedModel),
-		compilerModel: structuredCompilerModel("COUNCIL_COMPILER_MODEL"),
-		archetypes: []Archetype{
-			{
-				Name: "Fundamental",
-				Prompt: `You are a fundamental analyst on the trading council. Evaluate this thesis purely on numbers and fundamentals.
-Ask: Do the financials support this? What are the valuation multiples? Is growth priced in? What do margins look like?
-Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
-			},
-			{
-				Name: "Contrarian",
-				Prompt: `You are the contrarian voice on the trading council. Your job is to check if this trade is already crowded.
-Ask: Is everyone already positioned this way? Is this the obvious trade? What happens if the crowd reverses? Where is the pain trade?
-Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
-			},
-			{
-				Name: "Macro",
-				Prompt: `You are the macro strategist on the trading council. Evaluate whether the macro regime supports this thesis.
-Ask: Does the rate environment help or hurt? What is the vol regime? Is risk appetite expanding or contracting? Does this trade fight the Fed?
-Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
-			},
-			{
-				Name: "Tail",
-				Prompt: `You are the tail risk analyst on the trading council. Your job is to find the worst case scenario.
-Ask: What kills this trade? What is the max loss? Is there gap risk? What black swan event invalidates the thesis? Is the risk/reward actually asymmetric?
-Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
-			},
-			{
-				Name: "Timing",
-				Prompt: `You are the timing/execution specialist on the trading council. Evaluate whether the entry timing is right.
-Ask: Is the market trending or mean-reverting? Are we chasing? Is there a better entry? What does the order flow look like? Should we wait for a pullback?
-Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
-			},
-			{
-				Name: "Market-Implied",
-				Prompt: `You are the market-implied voice on the trading council. Your job is to ask what is already priced in.
-Ask: Does recent price action already reflect the thesis? Does implied move or skew already encode the event? Is the reaction gap actually large enough to trade?
-Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
-			},
-			{
-				Name: "Source-Forensics",
-				Prompt: `You are the source-forensics voice on the trading council. Your job is to challenge the evidence integrity.
-Ask: Is this primary reporting or copy-derived? Are the sources independent? Is there contradiction, manipulation risk, or weak provenance? Is the signal too stale or too social-noise heavy?
-Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
-			},
-			{
-				Name: "Execution-Microstructure",
-				Prompt: `You are the execution and microstructure voice on the trading council. Your job is to challenge whether this expression can actually be entered and exited cleanly.
-Ask: Is the structure liquid enough? Does the quant profile show acceptable max loss and margin? Are we likely to suffer slippage or poor fills? Is there a cleaner structure to express the same view?
-Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
-			},
-			{
-				Name: "Abstain",
-				Prompt: `You are the abstain voice on the trading council. Your job is to defend the null hypothesis and explain why we should do nothing.
-Ask: What is the strongest reason to stay flat? What information is missing? Is there a better waiting point or cleaner setup later? Are we overfitting weak evidence into a trade?
-Respond in JSON: {"perspective": "...", "recommendation": "approve|reject|abstain", "conviction_adjustment": -0.2 to +0.2, "size_adjustment": 0.5 to 1.5, "reasoning": "..."}`,
-			},
-		},
+		log:            slog.Default().With("component", "council"),
+		llm:            llmRouter,
+		selectedModel:  selectedModel,
+		responseMode:   detectStructuredResponseMode(os.Getenv("COUNCIL_RESPONSE_MODE"), selectedModel),
+		compilerModel:  structuredCompilerModel("COUNCIL_COMPILER_MODEL"),
+		thoughtPrefix:  policy.councilThoughtPrefix,
+		compilerPrompt: policy.councilCompilerPrompt,
+		archetypes:     policy.councilArchetypes,
 	}
 }
 
@@ -248,7 +187,7 @@ func (c *Council) requestPerspectiveJSON(ctx context.Context, archetype, systemP
 }
 
 func (c *Council) askPerspectiveWithFallbackMode(ctx context.Context, systemPrompt, thesisPrompt string) (string, error) {
-	resp, retried, err := askStructuredWithRetry(ctx, c.llm, llm.TierCritical, c.responseMode, systemPrompt, councilThoughtPrefix, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
+	resp, retried, err := askStructuredWithRetry(ctx, c.llm, llm.TierCritical, c.responseMode, systemPrompt, c.thoughtPrefix, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
 	if retried {
 		c.log.Info("council structured retry recovered terminal JSON miss",
 			"model", c.selectedModel,
@@ -263,7 +202,7 @@ func (c *Council) compilePerspectiveJSON(ctx context.Context, archetype, systemP
 
 	req := llm.Request{
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: councilCompilerPrompt},
+			{Role: llm.RoleSystem, Content: c.compilerPrompt},
 			{Role: llm.RoleUser, Content: fmt.Sprintf("Council voice: %s\n\nOriginal council system prompt:\n%s\n\nThesis under review:\n%s\n\nCouncil reasoning transcript:\n%s", archetype, systemPrompt, thesisPrompt, truncateForCompiler(rawResponse, 1800))},
 		},
 		Model:       c.compilerModel,

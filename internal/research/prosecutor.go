@@ -16,77 +16,36 @@ import (
 // Prosecutor tries to kill every thesis before it can trade.
 // Uses the critical-tier LLM (Claude Sonnet) for maximum reasoning depth.
 type Prosecutor struct {
-	log           *slog.Logger
-	llm           *llm.Router
-	selectedModel string
-	responseMode  structuredResponseMode
-	compilerModel string
+	log            *slog.Logger
+	llm            *llm.Router
+	selectedModel  string
+	responseMode   structuredResponseMode
+	compilerModel  string
+	systemPrompt   string
+	thoughtPrefix  string
+	compilerPrompt string
 }
 
 func NewProsecutor(llmRouter *llm.Router) *Prosecutor {
 	selectedModel := criticalSelectedModel()
+	policy := activePromptPolicy()
 	return &Prosecutor{
-		log:           slog.Default().With("component", "prosecutor"),
-		llm:           llmRouter,
-		selectedModel: selectedModel,
-		responseMode:  detectStructuredResponseMode(os.Getenv("PROSECUTION_RESPONSE_MODE"), selectedModel),
-		compilerModel: structuredCompilerModel("PROSECUTION_COMPILER_MODEL"),
+		log:            slog.Default().With("component", "prosecutor"),
+		llm:            llmRouter,
+		selectedModel:  selectedModel,
+		responseMode:   detectStructuredResponseMode(os.Getenv("PROSECUTION_RESPONSE_MODE"), selectedModel),
+		compilerModel:  structuredCompilerModel("PROSECUTION_COMPILER_MODEL"),
+		systemPrompt:   policy.prosecutionPrompt,
+		thoughtPrefix:  policy.prosecutionThoughtPrefix,
+		compilerPrompt: policy.prosecutionCompilerPrompt,
 	}
 }
-
-const prosecutionPrompt = `You are an adversarial prosecutor reviewing a trading thesis. Your job is to DESTROY this thesis. Find every reason it should not be traded.
-
-You must:
-1. Generate 5-7 bear arguments against this thesis
-2. Identify historical analogues where similar trades FAILED
-3. Check if this is a crowded trade (if everyone sees it, it's priced in)
-4. Stress test each assumption - what if they're wrong?
-5. Identify what data is MISSING that would be needed to have real conviction
-6. Consider second-order effects the thesis might have missed
-
-Your verdict options:
-- KILLED: Fatal flaws found. Do not trade.
-- WEAKENED: Significant concerns. Reduce conviction and position size.
-- SURVIVED: Arguments found but thesis core holds. Proceed with caution.
-- STRENGTHENED: Prosecution revealed additional supporting evidence.
-
-Be ruthlessly honest. A trade that survives your prosecution has earned its conviction.
-
-Respond in JSON:
-{
-  "verdict": "killed|weakened|survived|strengthened",
-  "bear_args": ["...", "..."],
-  "missing_data": ["...", "..."],
-  "historical_analogues": ["...", "..."],
-  "crowded_score": 0.0-1.0,
-  "confidence_adjustment": -0.3 to +0.1,
-  "reasoning": "..."
-}`
 
 var (
 	prosecutionMaxTokens         = readStructuredIntEnv("PROSECUTION_MAX_TOKENS", 768)
 	prosecutionCompilerTimeout   = readStructuredDurationEnv("PROSECUTION_COMPILER_TIMEOUT", 25*time.Second)
 	prosecutionCompilerMaxTokens = readStructuredIntEnv("PROSECUTION_COMPILER_MAX_TOKENS", 900)
 )
-
-const prosecutionThoughtPrefix = `Do not restate the request or schema.
-Think if useful, but keep it concise.
-You must end with exactly one JSON object matching the requested schema.`
-
-const prosecutionCompilerPrompt = `You are a prosecution-result compiler.
-You will receive the original prosecution task and a freeform reasoning transcript from a trading prosecutor.
-Return one final JSON object only. No prose, no markdown, no thinking.
-
-JSON schema:
-{
-  "verdict": "killed|weakened|survived|strengthened",
-  "bear_args": ["...", "..."],
-  "missing_data": ["...", "..."],
-  "historical_analogues": ["...", "..."],
-  "crowded_score": 0.0,
-  "confidence_adjustment": 0.0,
-  "reasoning": "..."
-}`
 
 // Challenge attempts to kill a thesis
 func (p *Prosecutor) Challenge(ctx context.Context, thesis *model.Thesis) *model.Prosecution {
@@ -178,7 +137,7 @@ func (p *Prosecutor) buildProsecutionPrompt(thesis *model.Thesis) string {
 }
 
 func (p *Prosecutor) askProsecutionWithFallbackMode(ctx context.Context, prompt string) (string, error) {
-	resp, retried, err := askStructuredWithRetry(ctx, p.llm, llm.TierCritical, p.responseMode, prosecutionPrompt, prosecutionThoughtPrefix, prompt, prosecutionMaxTokens, 0.2)
+	resp, retried, err := askStructuredWithRetry(ctx, p.llm, llm.TierCritical, p.responseMode, p.systemPrompt, p.thoughtPrefix, prompt, prosecutionMaxTokens, 0.2)
 	if retried {
 		p.log.Info("prosecution structured retry recovered terminal JSON miss",
 			"model", p.selectedModel,
@@ -193,7 +152,7 @@ func (p *Prosecutor) compileProsecutionJSON(ctx context.Context, originalPrompt,
 
 	req := llm.Request{
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: prosecutionCompilerPrompt},
+			{Role: llm.RoleSystem, Content: p.compilerPrompt},
 			{Role: llm.RoleUser, Content: fmt.Sprintf("Original prosecution task:\n%s\n\nProsecution reasoning transcript:\n%s", originalPrompt, truncateForCompiler(rawResponse, 1800))},
 		},
 		Model:       p.compilerModel,

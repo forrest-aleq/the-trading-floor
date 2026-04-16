@@ -10,10 +10,37 @@ import (
 	"time"
 
 	"github.com/hnic/trading-floor/internal/llm"
+	"github.com/hnic/trading-floor/internal/marketcontext"
 	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
+
+type researchMarketContextStub struct {
+	price  float64
+	change map[time.Duration]float64
+}
+
+func (s researchMarketContextStub) LatestPrice(model.Instrument) (float64, bool) {
+	return s.price, s.price > 0
+}
+
+func (s researchMarketContextStub) PriceChange(_ model.Instrument, window time.Duration) (float64, bool) {
+	value, ok := s.change[window]
+	return value, ok
+}
+
+func (s researchMarketContextStub) BestEffortPrice(_ context.Context, inst model.Instrument) (model.Instrument, float64, bool) {
+	if s.price <= 0 {
+		return model.Instrument{}, 0, false
+	}
+	resolved := inst
+	if resolved.SecType == "STK" && inst.Symbol == "VIX" {
+		resolved.SecType = "IND"
+		resolved.Exchange = "CBOE"
+	}
+	return resolved, s.price, true
+}
 
 type researchStubClient struct {
 	requests []llm.Request
@@ -394,6 +421,34 @@ func TestInvestigateAcceptsStringEncodedNumericFields(t *testing.T) {
 	}
 	if thesis.TimeHorizon != 48*time.Hour {
 		t.Fatalf("expected 48h time horizon, got %s", thesis.TimeHorizon)
+	}
+}
+
+func TestHydrateThesisPricingUsesResolvedContextPrice(t *testing.T) {
+	client := &researchMissingPositionSizeClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+	desk.SetMarketContextService(marketcontext.NewService(researchMarketContextStub{
+		price: 18.4,
+		change: map[time.Duration]float64{
+			15 * time.Minute: 0.8,
+		},
+	}))
+
+	thesis := &model.Thesis{
+		Instrument: model.Instrument{
+			Symbol:   "VIX",
+			SecType:  "STK",
+			Currency: "USD",
+			Exchange: "SMART",
+		},
+	}
+
+	desk.HydrateThesisPricing(context.Background(), thesis)
+	if thesis.EntryPrice != 18.4 {
+		t.Fatalf("expected hydrated entry price 18.4, got %.2f", thesis.EntryPrice)
+	}
+	if thesis.MarketContext == nil || thesis.MarketContext.CurrentPrice != 18.4 {
+		t.Fatalf("expected hydrated market context, got %+v", thesis.MarketContext)
 	}
 }
 

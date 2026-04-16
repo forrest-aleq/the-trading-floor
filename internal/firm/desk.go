@@ -364,6 +364,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	if autonomy.Mode == model.Supervised {
 		thesis.PositionSize *= 0.5
 	}
+	d.research.HydrateThesisPricing(ctx, thesis)
 	d.normalizePositionSize(thesis)
 
 	order, err := d.compiler.CompileEntry(orderflow.EntryInput{

@@ -1,6 +1,7 @@
 package marketcontext
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"strconv"
@@ -18,6 +19,10 @@ type PriceView interface {
 
 type Service struct {
 	prices PriceView
+}
+
+type priceResolver interface {
+	BestEffortPrice(context.Context, model.Instrument) (model.Instrument, float64, bool)
 }
 
 func NewService(prices PriceView) *Service {
@@ -72,6 +77,56 @@ func (s *Service) BuildOpportunityContext(opp *model.Opportunity, sig signal.Sig
 	return ctx
 }
 
+func (s *Service) BuildThesisContext(ctx context.Context, thesis *model.Thesis) *model.MarketContext {
+	if thesis == nil {
+		return nil
+	}
+
+	base := cloneMarketContext(thesis.MarketContext)
+	inst := thesis.PrimaryInstrument()
+	if inst.Symbol == "" && base != nil {
+		inst = base.Instrument
+	}
+	if inst.Symbol == "" {
+		return base
+	}
+	if base == nil {
+		base = &model.MarketContext{}
+	}
+
+	base.SnapshotAt = time.Now().UTC()
+	base.Instrument = inst
+
+	resolvedInst, price, ok := s.bestEffortPrice(ctx, inst)
+	if ok && price > 0 {
+		base.Instrument = mergeInstrument(inst, resolvedInst)
+		base.CurrentPrice = price
+	} else if base.CurrentPrice <= 0 {
+		base.Notes = appendNote(base.Notes, "latest price unavailable")
+	}
+
+	if s.prices != nil {
+		priceInst := base.Instrument
+		if priceInst.Symbol == "" {
+			priceInst = inst
+		}
+		if change, ok := s.prices.PriceChange(priceInst, 15*time.Minute); ok {
+			base.Return15mPct = change
+		}
+		if change, ok := s.prices.PriceChange(priceInst, time.Hour); ok {
+			base.Return1hPct = change
+		}
+		if change, ok := s.prices.PriceChange(priceInst, 4*time.Hour); ok {
+			base.Return4hPct = change
+		}
+	}
+
+	if !base.ImpliedMoveAvailable {
+		base.Notes = appendNote(base.Notes, "implied move unavailable")
+	}
+	return base
+}
+
 type consensusSnapshot struct {
 	EPS              float64 `json:"eps"`
 	EPSEstimated     float64 `json:"epsEstimated"`
@@ -111,6 +166,21 @@ func extractConsensusSnapshot(sig signal.Signal) *consensusSnapshot {
 		}
 	}
 	return nil
+}
+
+func (s *Service) bestEffortPrice(ctx context.Context, inst model.Instrument) (model.Instrument, float64, bool) {
+	if s.prices == nil || inst.Symbol == "" {
+		return model.Instrument{}, 0, false
+	}
+	if resolver, ok := s.prices.(priceResolver); ok {
+		if resolved, price, ok := resolver.BestEffortPrice(ctx, inst); ok {
+			return resolved, price, true
+		}
+	}
+	if price, ok := s.prices.LatestPrice(inst); ok && price > 0 {
+		return inst, price, true
+	}
+	return model.Instrument{}, 0, false
 }
 
 func primaryInstrument(instruments []model.Instrument) model.Instrument {
@@ -174,4 +244,60 @@ func FormatForPrompt(ctx *model.MarketContext) string {
 
 func formatFloat(value float64) string {
 	return strings.TrimRight(strings.TrimRight(strconv.FormatFloat(value, 'f', 4, 64), "0"), ".")
+}
+
+func cloneMarketContext(ctx *model.MarketContext) *model.MarketContext {
+	if ctx == nil {
+		return nil
+	}
+	clone := *ctx
+	if len(ctx.Notes) > 0 {
+		clone.Notes = append([]string(nil), ctx.Notes...)
+	}
+	return &clone
+}
+
+func mergeInstrument(primary, resolved model.Instrument) model.Instrument {
+	merged := resolved
+	if merged.Symbol == "" {
+		merged.Symbol = primary.Symbol
+	}
+	if merged.SecType == "" {
+		merged.SecType = primary.SecType
+	}
+	if merged.Exchange == "" {
+		merged.Exchange = primary.Exchange
+	}
+	if merged.Currency == "" {
+		merged.Currency = primary.Currency
+	}
+	if merged.Expiry == "" {
+		merged.Expiry = primary.Expiry
+	}
+	if merged.Strike <= 0 {
+		merged.Strike = primary.Strike
+	}
+	if merged.Right == "" {
+		merged.Right = primary.Right
+	}
+	if merged.Multiplier == "" {
+		merged.Multiplier = primary.Multiplier
+	}
+	if merged.ConID == 0 {
+		merged.ConID = primary.ConID
+	}
+	return merged
+}
+
+func appendNote(notes []string, note string) []string {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return notes
+	}
+	for _, existing := range notes {
+		if existing == note {
+			return notes
+		}
+	}
+	return append(notes, note)
 }

@@ -282,6 +282,8 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 		CreatedAt:          time.Now(),
 	}
 
+	d.HydrateThesisPricing(ctx, thesis)
+
 	d.log.Info("thesis formed",
 		"id", thesis.ID,
 		"desk", deskID,
@@ -301,6 +303,24 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 		investigation.Reason = "conviction_below_threshold"
 	}
 	return investigation, nil
+}
+
+func (d *Desk) HydrateThesisPricing(ctx context.Context, thesis *model.Thesis) {
+	if thesis == nil || d.marketContext == nil {
+		return
+	}
+
+	enriched := d.marketContext.BuildThesisContext(ctx, thesis)
+	if enriched == nil {
+		return
+	}
+	thesis.MarketContext = enriched
+	if !thesis.IsMultiLeg() {
+		thesis.Instrument = enriched.Instrument
+	}
+	if thesis.EntryPrice <= 0 && enriched.CurrentPrice > 0 {
+		thesis.EntryPrice = enriched.CurrentPrice
+	}
 }
 
 func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactPrompt string) (string, error) {

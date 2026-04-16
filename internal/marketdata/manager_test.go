@@ -79,3 +79,36 @@ func TestPollFallsBackToHistoricalPriceWhenLiveDataUnavailable(t *testing.T) {
 		t.Fatalf("expected latest historical close 101.25, got %.2f", price)
 	}
 }
+
+func TestBestEffortPriceUsesSameSymbolWatchlistCandidate(t *testing.T) {
+	manager := NewManager(stubHistoricalClient{
+		marketErr: errors.New("subscription missing"),
+		bars: []ibkr.HistoricalBar{
+			{Time: time.Now().Add(-2 * time.Hour), Close: 18.1},
+			{Time: time.Now().Add(-time.Hour), Close: 18.4},
+		},
+	}, nil, time.Minute)
+
+	manager.AddInstruments([]model.Instrument{{
+		Symbol:   "VIX",
+		SecType:  "IND",
+		Currency: "USD",
+		Exchange: "CBOE",
+	}})
+
+	resolved, price, ok := manager.BestEffortPrice(context.Background(), model.Instrument{
+		Symbol:   "VIX",
+		SecType:  "STK",
+		Currency: "USD",
+		Exchange: "SMART",
+	})
+	if !ok {
+		t.Fatal("expected best-effort price to succeed")
+	}
+	if resolved.SecType != "IND" {
+		t.Fatalf("expected resolved sec type IND, got %q", resolved.SecType)
+	}
+	if price != 18.4 {
+		t.Fatalf("expected latest historical close 18.4, got %.2f", price)
+	}
+}

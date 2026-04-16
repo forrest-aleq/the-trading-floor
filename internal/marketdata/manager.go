@@ -108,6 +108,36 @@ func (m *Manager) LatestPrice(inst model.Instrument) (float64, bool) {
 	return 0, false
 }
 
+// BestEffortPrice resolves the best available price for an instrument using the
+// current cache first, then same-symbol watchlist candidates, then historical
+// bars from the broker if needed.
+func (m *Manager) BestEffortPrice(ctx context.Context, inst model.Instrument) (model.Instrument, float64, bool) {
+	candidates := m.instrumentCandidates(inst)
+	for _, candidate := range candidates {
+		if price, ok := m.cachedPrice(candidate); ok && price > 0 {
+			return candidate, price, true
+		}
+	}
+	for _, candidate := range candidates {
+		if price, ok := m.historicalFallbackPrice(ctx, candidate); ok && price > 0 {
+			m.mu.Lock()
+			m.prices[candidate.Key()] = price
+			symbol := strings.ToUpper(strings.TrimSpace(candidate.Symbol))
+			if symbol != "" {
+				m.prices[symbol] = price
+			}
+			now := time.Now().UTC()
+			m.appendHistoryLocked(candidate.Key(), price, now)
+			if symbol != "" {
+				m.appendHistoryLocked(symbol, price, now)
+			}
+			m.mu.Unlock()
+			return candidate, price, true
+		}
+	}
+	return model.Instrument{}, 0, false
+}
+
 func (m *Manager) PriceChange(inst model.Instrument, window time.Duration) (float64, bool) {
 	if window <= 0 {
 		return 0, false
@@ -334,4 +364,51 @@ func (m *Manager) lookupHistoryLocked(inst model.Instrument) []PricePoint {
 		return nil
 	}
 	return m.history[symbol]
+}
+
+func (m *Manager) instrumentCandidates(inst model.Instrument) []model.Instrument {
+	if inst.Symbol == "" {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	candidates := make([]model.Instrument, 0, 4)
+	appendCandidate := func(candidate model.Instrument) {
+		if candidate.Symbol == "" {
+			return
+		}
+		key := candidate.Key()
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+
+	m.mu.RLock()
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	for _, watch := range m.watchlist {
+		if strings.ToUpper(strings.TrimSpace(watch.Symbol)) == symbol {
+			appendCandidate(watch)
+		}
+	}
+	m.mu.RUnlock()
+	appendCandidate(inst)
+	return candidates
+}
+
+func (m *Manager) cachedPrice(inst model.Instrument) (float64, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if price, ok := m.prices[inst.Key()]; ok && price > 0 {
+		return price, true
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	if symbol == "" {
+		return 0, false
+	}
+	if price, ok := m.prices[symbol]; ok && price > 0 {
+		return price, true
+	}
+	return 0, false
 }

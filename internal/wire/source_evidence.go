@@ -122,6 +122,30 @@ func ApplyLearnedSourceReliability(sig signal.Signal, trust, confidence float64)
 	return sig
 }
 
+func ApplyLeadTimeBelief(sig signal.Signal, averageHours float64, observations int, score float64) signal.Signal {
+	if sig.EvidenceMeta == nil || observations <= 0 {
+		return sig
+	}
+	meta := sig.EvidenceMeta.Clone()
+	if meta.LeadTimeObservations == 0 {
+		meta.LeadTimeAverageHours = roundEvidence(averageHours)
+		meta.LeadTimeObservations = observations
+		meta.LeadTimeScore = roundEvidence(score)
+	} else {
+		totalObs := meta.LeadTimeObservations + observations
+		if totalObs > 0 {
+			weightedHours := (meta.LeadTimeAverageHours * float64(meta.LeadTimeObservations)) + (averageHours * float64(observations))
+			meta.LeadTimeAverageHours = roundEvidence(weightedHours / float64(totalObs))
+			meta.LeadTimeObservations = totalObs
+		}
+		if score > meta.LeadTimeScore {
+			meta.LeadTimeScore = roundEvidence(score)
+		}
+	}
+	sig.EvidenceMeta = refreshEvidenceAssessment(sig, meta)
+	return sig
+}
+
 func inferSourceProfile(sig signal.Signal, domain string) sourceProfile {
 	if profile, ok := profileForDomain(domain); ok {
 		return applyProfileDefaults(profile, sig)

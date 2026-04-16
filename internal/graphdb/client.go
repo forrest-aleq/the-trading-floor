@@ -458,6 +458,160 @@ func (c *Client) LoadSourceReliabilityBeliefs(ctx context.Context) ([]*model.Sou
 	return result.([]*model.SourceReliabilityBelief), nil
 }
 
+func (c *Client) UpsertSourceLeadTimeBelief(ctx context.Context, state *model.SourceLeadTimeBelief) error {
+	if c == nil || c.driver == nil || state == nil || strings.TrimSpace(state.Key) == "" {
+		return nil
+	}
+
+	updatedAt := state.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+
+	return c.executeWrite(ctx, func(tx neo4j.ManagedTransaction) error {
+		if err := runQuery(ctx, tx, `
+			MERGE (b:SourceLeadTimeBelief {key: $key})
+			SET b.source = $source,
+			    b.signal_domain = $signal_domain,
+			    b.language = $language,
+			    b.region = $region,
+			    b.average_hours = $average_hours,
+			    b.observations = $observations,
+			    b.score = $score,
+			    b.updated_at = $updated_at`,
+			map[string]any{
+				"key":           state.Key,
+				"source":        strings.TrimSpace(state.Source),
+				"signal_domain": strings.TrimSpace(state.SignalDomain),
+				"language":      strings.TrimSpace(state.Language),
+				"region":        strings.TrimSpace(state.Region),
+				"average_hours": state.AverageHours,
+				"observations":  state.Observations,
+				"score":         state.Score,
+				"updated_at":    updatedAt,
+			},
+		); err != nil {
+			return err
+		}
+		if strings.TrimSpace(state.Source) != "" {
+			if err := runQuery(ctx, tx, `
+				MERGE (src:Source {id: $source_id})
+				SET src.name = CASE WHEN src.name IS NULL OR src.name = '' THEN $source ELSE src.name END,
+				    src.updated_at = $updated_at`,
+				map[string]any{
+					"source_id":  strings.ToLower(strings.TrimSpace(state.Source)),
+					"source":     strings.TrimSpace(state.Source),
+					"updated_at": updatedAt,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MATCH (src:Source {id: $source_id})
+				MATCH (b:SourceLeadTimeBelief {key: $key})
+				MERGE (src)-[r:HAS_LEAD_TIME_BELIEF]->(b)
+				SET r.updated_at = $updated_at`,
+				map[string]any{
+					"source_id":  strings.ToLower(strings.TrimSpace(state.Source)),
+					"key":        state.Key,
+					"updated_at": updatedAt,
+				},
+			); err != nil {
+				return err
+			}
+		}
+		if strings.TrimSpace(state.SignalDomain) != "" {
+			if err := runQuery(ctx, tx, `
+				MERGE (d:Domain {id: $domain})
+				SET d.updated_at = $updated_at`,
+				map[string]any{
+					"domain":     strings.TrimSpace(state.SignalDomain),
+					"updated_at": updatedAt,
+				},
+			); err != nil {
+				return err
+			}
+			if err := runQuery(ctx, tx, `
+				MATCH (b:SourceLeadTimeBelief {key: $key})
+				MATCH (d:Domain {id: $domain})
+				MERGE (b)-[r:LEADS_IN]->(d)
+				SET r.average_hours = $average_hours,
+				    r.observations = $observations,
+				    r.score = $score,
+				    r.updated_at = $updated_at`,
+				map[string]any{
+					"key":           state.Key,
+					"domain":        strings.TrimSpace(state.SignalDomain),
+					"average_hours": state.AverageHours,
+					"observations":  state.Observations,
+					"score":         state.Score,
+					"updated_at":    updatedAt,
+				},
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (c *Client) LoadSourceLeadTimeBeliefs(ctx context.Context) ([]*model.SourceLeadTimeBelief, error) {
+	if c == nil || c.driver == nil {
+		return nil, nil
+	}
+
+	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		rows, err := tx.Run(ctx, `
+			MATCH (b:SourceLeadTimeBelief)
+			RETURN b.key AS key,
+			       b.source AS source,
+			       b.signal_domain AS signal_domain,
+			       b.language AS language,
+			       b.region AS region,
+			       coalesce(b.average_hours, 0.0) AS average_hours,
+			       coalesce(b.observations, 0) AS observations,
+			       coalesce(b.score, 0.0) AS score,
+			       b.updated_at AS updated_at
+			ORDER BY b.updated_at DESC`,
+			nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		beliefs := make([]*model.SourceLeadTimeBelief, 0)
+		for rows.Next(ctx) {
+			record := rows.Record()
+			updatedAt, _ := record.Get("updated_at")
+			beliefs = append(beliefs, &model.SourceLeadTimeBelief{
+				Key:          strings.TrimSpace(toString(recordValue(record, "key"))),
+				Source:       strings.TrimSpace(toString(recordValue(record, "source"))),
+				SignalDomain: strings.TrimSpace(toString(recordValue(record, "signal_domain"))),
+				Language:     strings.TrimSpace(toString(recordValue(record, "language"))),
+				Region:       strings.TrimSpace(toString(recordValue(record, "region"))),
+				AverageHours: toFloat(recordValue(record, "average_hours")),
+				Observations: toInt(recordValue(record, "observations")),
+				Score:        toFloat(recordValue(record, "score")),
+				UpdatedAt:    toTime(updatedAt),
+			})
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return beliefs, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+	return result.([]*model.SourceLeadTimeBelief), nil
+}
+
 func (c *Client) CouncilVoiceTelemetry(ctx context.Context, domain string) (map[string]model.CouncilVoiceStats, error) {
 	stats := make(map[string]model.CouncilVoiceStats)
 	if c == nil || c.driver == nil || strings.TrimSpace(domain) == "" {

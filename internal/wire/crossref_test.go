@@ -241,3 +241,35 @@ func TestApplyLearnedSourceReliabilityBlendsTrustIntoEvidence(t *testing.T) {
 		t.Fatalf("expected original signal metadata to remain unchanged, got %.2f want %.2f", sig.EvidenceMeta.SourceTrust, baselineTrust)
 	}
 }
+
+func TestApplyLeadTimeBeliefSeedsHistoricalLeadTimeContext(t *testing.T) {
+	sig := NormalizeSignal(signal.Signal{
+		ID:        "sig-leadtime-seed",
+		Source:    "reuters",
+		Type:      signal.TypeNews,
+		Category:  "macro",
+		Timestamp: time.Now(),
+		Raw:       []byte(`{"title":"Consensus macro coverage catches up"}`),
+	})
+	if sig.EvidenceMeta == nil {
+		t.Fatal("expected normalized evidence metadata")
+	}
+	if sig.EvidenceMeta.LeadTimeObservations != 0 {
+		t.Fatalf("expected no lead-time observations before seeding, got %+v", sig.EvidenceMeta)
+	}
+
+	enriched := ApplyLeadTimeBelief(sig, 3.5, 4, 0.46)
+
+	if enriched.EvidenceMeta == nil {
+		t.Fatal("expected enriched evidence metadata")
+	}
+	if enriched.EvidenceMeta.LeadTimeObservations != 4 {
+		t.Fatalf("expected 4 lead-time observations, got %+v", enriched.EvidenceMeta)
+	}
+	if enriched.EvidenceMeta.LeadTimeAverageHours < 3.4 || enriched.EvidenceMeta.LeadTimeAverageHours > 3.6 {
+		t.Fatalf("expected ~3.5h lead time, got %.2f", enriched.EvidenceMeta.LeadTimeAverageHours)
+	}
+	if enriched.EvidenceMeta.LeadTimeScore <= 0 {
+		t.Fatalf("expected positive lead-time score, got %.2f", enriched.EvidenceMeta.LeadTimeScore)
+	}
+}

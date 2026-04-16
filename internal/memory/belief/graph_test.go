@@ -165,3 +165,29 @@ func TestLoadPeerAndSourceBeliefs(t *testing.T) {
 		t.Fatalf("expected loaded source belief, got %+v", source)
 	}
 }
+
+func TestLeadTimeBeliefObservationsAndLoad(t *testing.T) {
+	graph := NewGraph()
+	key := LeadTimeBeliefKey("telegram/mena", "geopolitical", "ar", "mena")
+
+	graph.RecordLeadTimeObservation(key, 2.0)
+	graph.RecordLeadTimeObservation(key, 4.0)
+
+	lead, ok := graph.LookupLeadTime("telegram/mena", "geopolitical", "ar", "mena")
+	if !ok {
+		t.Fatal("expected lead-time belief to be created")
+	}
+	if lead.Observations != 2 {
+		t.Fatalf("expected two lead-time observations, got %+v", lead)
+	}
+	if lead.AverageHours < 2.9 || lead.AverageHours > 3.1 {
+		t.Fatalf("expected ~3h average lead time, got %.2f", lead.AverageHours)
+	}
+
+	graph2 := NewGraph()
+	graph2.LoadLeadTimeBeliefs([]*model.SourceLeadTimeBelief{lead})
+	loaded, ok := graph2.LookupLeadTime("telegram/mena", "geopolitical", "ar", "mena")
+	if !ok || loaded.Observations != 2 {
+		t.Fatalf("expected loaded lead-time belief, got %+v", loaded)
+	}
+}

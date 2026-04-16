@@ -45,6 +45,7 @@ type LeadTimeTracker struct {
 	stats               map[string]leadStat
 	maxNarratives       int
 	maxRefsPerNarrative int
+	onObservation       func(source, category, language, region string, observedHours float64)
 }
 
 func NewLeadTimeTracker(maxNarratives, maxRefsPerNarrative int) *LeadTimeTracker {
@@ -62,6 +63,12 @@ func NewLeadTimeTracker(maxNarratives, maxRefsPerNarrative int) *LeadTimeTracker
 	}
 }
 
+func (t *LeadTimeTracker) SetObservationHandler(fn func(source, category, language, region string, observedHours float64)) {
+	t.mu.Lock()
+	t.onObservation = fn
+	t.mu.Unlock()
+}
+
 func (t *LeadTimeTracker) Enrich(sig signal.Signal) signal.Signal {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -74,7 +81,7 @@ func (t *LeadTimeTracker) Enrich(sig signal.Signal) signal.Signal {
 		meta = &evidence.Metadata{}
 	}
 
-	statsKey := leadStatKey(sig.Source, sig.Category, meta.OriginRegion)
+	statsKey := leadStatKey(sig.Source, sig.Category, signalLanguage(sig), meta.OriginRegion)
 	if stats, ok := t.stats[statsKey]; ok {
 		meta.LeadTimeAverageHours = roundEvidence(stats.averageHours())
 		meta.LeadTimeObservations = stats.observations
@@ -109,12 +116,15 @@ func (t *LeadTimeTracker) Enrich(sig signal.Signal) signal.Signal {
 			if hours <= 0 || hours > 168 {
 				continue
 			}
-			key := leadStatKey(ref.source, ref.category, ref.region)
+			key := leadStatKey(ref.source, ref.category, ref.language, ref.region)
 			stats := t.stats[key]
 			stats.totalHours += hours
 			stats.observations++
 			stats.lastUpdated = timestamp
 			t.stats[key] = stats
+			if t.onObservation != nil {
+				t.onObservation(ref.source, ref.category, ref.language, ref.region, hours)
+			}
 		}
 	}
 
@@ -168,14 +178,18 @@ func isConsensusSignal(sig signal.Signal, meta *evidence.Metadata) bool {
 	return meta.SourceTrust >= 0.84
 }
 
-func leadStatKey(source, category, region string) string {
+func leadStatKey(source, category, language, region string) string {
 	source = strings.TrimSpace(strings.ToLower(source))
 	category = strings.TrimSpace(strings.ToLower(category))
+	language = normalizeLanguageCode(language)
+	if language == "" {
+		language = "unknown"
+	}
 	region = normalizeRegionLabel(region)
 	if region == "" {
 		region = "global"
 	}
-	return source + "|" + category + "|" + region
+	return source + "|" + category + "|" + language + "|" + region
 }
 
 func leadTimeScore(hours float64, observations int) float64 {

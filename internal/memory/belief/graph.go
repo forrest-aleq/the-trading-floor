@@ -13,22 +13,25 @@ import (
 // Graph is the belief graph — trust/confidence per competence key.
 // Ported from MARS BeliefGraphStore.
 type Graph struct {
-	mu             sync.RWMutex
-	log            *slog.Logger
-	states         map[string]*model.CompetenceState
-	peerStates     map[string]*model.DeskRelationshipBelief
-	sourceStates   map[string]*model.SourceReliabilityBelief
-	onChange       func(*model.CompetenceState)
-	onPeerChange   func(*model.DeskRelationshipBelief)
-	onSourceChange func(*model.SourceReliabilityBelief)
+	mu               sync.RWMutex
+	log              *slog.Logger
+	states           map[string]*model.CompetenceState
+	peerStates       map[string]*model.DeskRelationshipBelief
+	sourceStates     map[string]*model.SourceReliabilityBelief
+	leadTimeStates   map[string]*model.SourceLeadTimeBelief
+	onChange         func(*model.CompetenceState)
+	onPeerChange     func(*model.DeskRelationshipBelief)
+	onSourceChange   func(*model.SourceReliabilityBelief)
+	onLeadTimeChange func(*model.SourceLeadTimeBelief)
 }
 
 func NewGraph() *Graph {
 	return &Graph{
-		log:          slog.Default().With("component", "belief-graph"),
-		states:       make(map[string]*model.CompetenceState),
-		peerStates:   make(map[string]*model.DeskRelationshipBelief),
-		sourceStates: make(map[string]*model.SourceReliabilityBelief),
+		log:            slog.Default().With("component", "belief-graph"),
+		states:         make(map[string]*model.CompetenceState),
+		peerStates:     make(map[string]*model.DeskRelationshipBelief),
+		sourceStates:   make(map[string]*model.SourceReliabilityBelief),
+		leadTimeStates: make(map[string]*model.SourceLeadTimeBelief),
 	}
 }
 
@@ -73,6 +76,23 @@ func ParseSourceBeliefKey(key string) (ownerGroup, sourceDomain, signalDomain, l
 		return "", "", "", "", ""
 	}
 	return parts[0], parts[1], parts[2], parts[3], parts[4]
+}
+
+func LeadTimeBeliefKey(source, signalDomain, language, region string) string {
+	return fmt.Sprintf("%s::%s::%s::%s",
+		contextOrUnknown(source),
+		contextOrUnknown(signalDomain),
+		contextOrUnknown(language),
+		contextOrUnknown(region),
+	)
+}
+
+func ParseLeadTimeBeliefKey(key string) (source, signalDomain, language, region string) {
+	parts := strings.SplitN(key, "::", 4)
+	if len(parts) != 4 {
+		return "", "", "", ""
+	}
+	return parts[0], parts[1], parts[2], parts[3]
 }
 
 type TerritoryStatus string
@@ -138,6 +158,12 @@ func (g *Graph) SetSourceChangeHandler(fn func(*model.SourceReliabilityBelief)) 
 	g.mu.Unlock()
 }
 
+func (g *Graph) SetLeadTimeChangeHandler(fn func(*model.SourceLeadTimeBelief)) {
+	g.mu.Lock()
+	g.onLeadTimeChange = fn
+	g.mu.Unlock()
+}
+
 func (g *Graph) Load(states []*model.CompetenceState) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -183,6 +209,22 @@ func (g *Graph) LoadSourceBeliefs(states []*model.SourceReliabilityBelief) {
 			state.OwnerGroup, state.SourceDomain, state.SignalDomain, state.Language, state.Region = ParseSourceBeliefKey(state.Key)
 		}
 		g.sourceStates[state.Key] = state
+	}
+}
+
+func (g *Graph) LoadLeadTimeBeliefs(states []*model.SourceLeadTimeBelief) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	for _, incoming := range states {
+		if incoming == nil || incoming.Key == "" {
+			continue
+		}
+		state := cloneLeadTimeState(incoming)
+		if state.Source == "" || state.SignalDomain == "" {
+			state.Source, state.SignalDomain, state.Language, state.Region = ParseLeadTimeBeliefKey(state.Key)
+		}
+		g.leadTimeStates[state.Key] = state
 	}
 }
 
@@ -275,6 +317,17 @@ func (g *Graph) LookupSource(ownerGroup, sourceDomain, signalDomain, language, r
 		return nil, false
 	}
 	return cloneSourceState(state), true
+}
+
+func (g *Graph) LookupLeadTime(source, signalDomain, language, region string) (*model.SourceLeadTimeBelief, bool) {
+	key := LeadTimeBeliefKey(source, signalDomain, language, region)
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	state, ok := g.leadTimeStates[key]
+	if !ok {
+		return nil, false
+	}
+	return cloneLeadTimeState(state), true
 }
 
 func (g *Graph) AssessTerritory(deskID, capability, context, regime string, minObservations int) TerritoryAssessment {
@@ -567,6 +620,39 @@ func (g *Graph) ApplySourceFailure(key string, magnitude float64) {
 	}
 }
 
+func (g *Graph) RecordLeadTimeObservation(key string, hours float64) {
+	if hours <= 0 {
+		return
+	}
+
+	g.mu.Lock()
+	state, exists := g.leadTimeStates[key]
+	if !exists {
+		source, signalDomain, language, region := ParseLeadTimeBeliefKey(key)
+		state = &model.SourceLeadTimeBelief{
+			Key:          key,
+			Source:       source,
+			SignalDomain: signalDomain,
+			Language:     language,
+			Region:       region,
+		}
+		g.leadTimeStates[key] = state
+	}
+	total := state.AverageHours * float64(state.Observations)
+	total += hours
+	state.Observations++
+	state.AverageHours = total / float64(state.Observations)
+	state.Score = leadTimeBeliefScore(state.AverageHours, state.Observations)
+	state.UpdatedAt = time.Now()
+	changed := cloneLeadTimeState(state)
+	handler := g.onLeadTimeChange
+	g.mu.Unlock()
+
+	if handler != nil {
+		handler(changed)
+	}
+}
+
 // DecayAll applies periodic decay to all beliefs (anti-overfitting layer 5)
 func (g *Graph) DecayAll(decayPct float64) {
 	g.mu.Lock()
@@ -643,6 +729,16 @@ func (g *Graph) AllSourceBeliefs() []*model.SourceReliabilityBelief {
 	return states
 }
 
+func (g *Graph) AllLeadTimeBeliefs() []*model.SourceLeadTimeBelief {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	states := make([]*model.SourceLeadTimeBelief, 0, len(g.leadTimeStates))
+	for _, s := range g.leadTimeStates {
+		states = append(states, cloneLeadTimeState(s))
+	}
+	return states
+}
+
 // Stats returns summary of belief graph
 func (g *Graph) Stats() GraphStats {
 	g.mu.RLock()
@@ -691,6 +787,29 @@ func cloneSourceState(state *model.SourceReliabilityBelief) *model.SourceReliabi
 	}
 	cloned := *state
 	return &cloned
+}
+
+func cloneLeadTimeState(state *model.SourceLeadTimeBelief) *model.SourceLeadTimeBelief {
+	if state == nil {
+		return nil
+	}
+	cloned := *state
+	return &cloned
+}
+
+func leadTimeBeliefScore(hours float64, observations int) float64 {
+	if hours <= 0 || observations <= 0 {
+		return 0
+	}
+	timeScore := hours / 6.0
+	if timeScore > 1 {
+		timeScore = 1
+	}
+	confidence := float64(observations) / 5.0
+	if confidence > 1 {
+		confidence = 1
+	}
+	return timeScore * confidence
 }
 
 func contextOrUnknown(value string) string {

@@ -184,6 +184,13 @@ func main() {
 				}
 			}
 		})
+		beliefGraph.SetLeadTimeChangeHandler(func(rel *model.SourceLeadTimeBelief) {
+			if graph != nil {
+				if err := graph.UpsertSourceLeadTimeBelief(context.Background(), rel); err != nil {
+					slog.Warn("persist source lead-time belief to graph failed", "key", rel.Key, "error", err)
+				}
+			}
+		})
 		engramStore.SetChangeHandler(func(engram *memory.Engram) {
 			if err := db.UpsertEngram(context.Background(), engramRecordFromMemory(engram)); err != nil {
 				slog.Warn("persist engram failed", "id", engram.ID, "error", err)
@@ -205,6 +212,11 @@ func main() {
 				slog.Warn("persist source reliability belief to graph failed", "key", rel.Key, "error", err)
 			}
 		})
+		beliefGraph.SetLeadTimeChangeHandler(func(rel *model.SourceLeadTimeBelief) {
+			if err := graph.UpsertSourceLeadTimeBelief(context.Background(), rel); err != nil {
+				slog.Warn("persist source lead-time belief to graph failed", "key", rel.Key, "error", err)
+			}
+		})
 	}
 	if graph != nil {
 		peerBeliefs, err := graph.LoadDeskRelationshipBeliefs(ctx)
@@ -221,6 +233,14 @@ func main() {
 		} else {
 			beliefGraph.LoadSourceBeliefs(sourceBeliefs)
 			slog.Info("source reliability beliefs hydrated", "count", len(sourceBeliefs))
+		}
+
+		leadTimeBeliefs, err := graph.LoadSourceLeadTimeBeliefs(ctx)
+		if err != nil {
+			slog.Warn("load source lead-time beliefs from graph failed", "error", err)
+		} else {
+			beliefGraph.LoadLeadTimeBeliefs(leadTimeBeliefs)
+			slog.Info("source lead-time beliefs hydrated", "count", len(leadTimeBeliefs))
 		}
 	}
 	learnWorker := memory.NewLearnWorker(beliefGraph, engramStore)
@@ -245,10 +265,25 @@ func main() {
 			meta.OriginalLanguage,
 			meta.OriginRegion,
 		)
+		if ok {
+			sig = wire.ApplyLearnedSourceReliability(sig, state.Trust, state.Confidence)
+		}
+		leadBelief, ok := beliefGraph.LookupLeadTime(
+			sig.Source,
+			firstNonEmptyRuntime(sig.Category, string(sig.Type)),
+			meta.OriginalLanguage,
+			meta.OriginRegion,
+		)
 		if !ok {
 			return sig
 		}
-		return wire.ApplyLearnedSourceReliability(sig, state.Trust, state.Confidence)
+		return wire.ApplyLeadTimeBelief(sig, leadBelief.AverageHours, leadBelief.Observations, leadBelief.Score)
+	})
+	wireMgr.SetLeadTimeObservationHandler(func(source, category, language, region string, observedHours float64) {
+		if observedHours <= 0 {
+			return
+		}
+		beliefGraph.RecordLeadTimeObservation(belief.LeadTimeBeliefKey(source, category, language, region), observedHours)
 	})
 	startBeliefDecay(ctx, beliefGraph)
 	slog.Info("decision services initialized")

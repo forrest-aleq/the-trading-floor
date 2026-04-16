@@ -104,6 +104,13 @@ func (m *Manager) SetSignalEnricher(fn func(signal.Signal) signal.Signal) {
 	m.mu.Unlock()
 }
 
+func (m *Manager) SetLeadTimeObservationHandler(fn func(source, category, language, region string, observedHours float64)) {
+	if m == nil || m.leadTracker == nil {
+		return
+	}
+	m.leadTracker.SetObservationHandler(fn)
+}
+
 func (m *Manager) Publish(ctx context.Context, sig signal.Signal) error {
 	timer := time.NewTimer(m.publishTimeout)
 	defer timer.Stop()

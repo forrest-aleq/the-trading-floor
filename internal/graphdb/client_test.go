@@ -44,6 +44,7 @@ func TestSchemaStatementsIncludeCoreConstraints(t *testing.T) {
 		"Instrument",
 		"Source",
 		"SourceReliabilityBelief",
+		"SourceLeadTimeBelief",
 		"Domain",
 		"EvidenceAssessment",
 	}

@@ -467,20 +467,23 @@ const (
 
 // CompetenceState is the belief graph entry
 type CompetenceState struct {
-	Key          string       `json:"key"`
-	DeskID       string       `json:"desk_id"`
-	Capability   string       `json:"capability"`
-	Context      string       `json:"context,omitempty"`
-	Regime       string       `json:"regime,omitempty"`
-	Trust        float64      `json:"trust"`
-	Confidence   float64      `json:"confidence"`
-	SuccessCount int          `json:"success_count"`
-	FailureCount int          `json:"failure_count"`
-	TotalPnL     float64      `json:"total_pnl"`
-	Sharpe       float64      `json:"sharpe"`
-	Autonomy     AutonomyMode `json:"autonomy"`
-	IsBackfilled bool         `json:"is_backfilled"`
-	UpdatedAt    time.Time    `json:"updated_at"`
+	Key               string       `json:"key"`
+	DeskID            string       `json:"desk_id"`
+	Capability        string       `json:"capability"`
+	Context           string       `json:"context,omitempty"`
+	Regime            string       `json:"regime,omitempty"`
+	Trust             float64      `json:"trust"`
+	Confidence        float64      `json:"confidence"`
+	TrustCeiling      float64      `json:"trust_ceiling,omitempty"`
+	ConfidenceCeiling float64      `json:"confidence_ceiling,omitempty"`
+	ValidatedOutcomes int          `json:"validated_outcomes,omitempty"`
+	SuccessCount      int          `json:"success_count"`
+	FailureCount      int          `json:"failure_count"`
+	TotalPnL          float64      `json:"total_pnl"`
+	Sharpe            float64      `json:"sharpe"`
+	Autonomy          AutonomyMode `json:"autonomy"`
+	IsBackfilled      bool         `json:"is_backfilled"`
+	UpdatedAt         time.Time    `json:"updated_at"`
 }
 
 // InferAutonomy applies MARS graduation thresholds

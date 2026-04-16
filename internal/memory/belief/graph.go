@@ -136,6 +136,7 @@ func (g *Graph) Get(key string) *model.CompetenceState {
 		UpdatedAt:  time.Now(),
 	}
 	state.DeskID, state.Capability, state.Context, state.Regime = ParseCompetenceKey(key)
+	NormalizeCompetenceState(state)
 	g.states[key] = state
 	return state
 }
@@ -176,6 +177,7 @@ func (g *Graph) Load(states []*model.CompetenceState) {
 		if state.DeskID == "" || state.Capability == "" || state.Regime == "" {
 			state.DeskID, state.Capability, state.Context, state.Regime = ParseCompetenceKey(state.Key)
 		}
+		NormalizeCompetenceState(state)
 		g.states[state.Key] = state
 	}
 }
@@ -408,11 +410,10 @@ func (g *Graph) ApplySuccess(key string, magnitude float64) {
 	weight := 0.025 * magnitude
 	state.Trust += (1 - state.Trust) * weight
 	state.Confidence += 0.03 * magnitude
-	if state.Confidence > 1.0 {
-		state.Confidence = 1.0
-	}
 	state.SuccessCount++
+	state.ValidatedOutcomes++
 	state.UpdatedAt = time.Now()
+	applyCompetenceCeilings(state)
 	state.Autonomy = state.InferAutonomy()
 	changed := cloneState(state)
 	handler := g.onChange
@@ -467,7 +468,9 @@ func (g *Graph) ApplyFailure(key string, magnitude float64, boundaryViolation bo
 		state.Confidence = 0
 	}
 	state.FailureCount++
+	state.ValidatedOutcomes++
 	state.UpdatedAt = time.Now()
+	applyCompetenceCeilings(state)
 	state.Autonomy = state.InferAutonomy()
 	changed := cloneState(state)
 	handler := g.onChange
@@ -661,6 +664,7 @@ func (g *Graph) DecayAll(decayPct float64) {
 	for key, state := range g.states {
 		state.Trust *= factor
 		state.Confidence *= factor
+		applyCompetenceCeilings(state)
 		state.Autonomy = state.InferAutonomy()
 		g.log.Debug("belief decayed", "key", key, "trust", state.Trust, "confidence", state.Confidence)
 		changed = append(changed, cloneState(state))
@@ -756,6 +760,37 @@ func (g *Graph) Stats() GraphStats {
 		}
 	}
 	return stats
+}
+
+func NormalizeCompetenceState(state *model.CompetenceState) {
+	if state == nil {
+		return
+	}
+	if state.ValidatedOutcomes <= 0 {
+		state.ValidatedOutcomes = state.TotalObservations()
+	}
+	applyCompetenceCeilings(state)
+}
+
+func applyCompetenceCeilings(state *model.CompetenceState) {
+	if state == nil {
+		return
+	}
+	band := ceilingBandForValidatedOutcomes(state.ValidatedOutcomes)
+	state.TrustCeiling = band.TrustCeiling
+	state.ConfidenceCeiling = band.ConfidenceCeiling
+	if state.Trust > state.TrustCeiling {
+		state.Trust = state.TrustCeiling
+	}
+	if state.Confidence > state.ConfidenceCeiling {
+		state.Confidence = state.ConfidenceCeiling
+	}
+	if state.Trust < 0 {
+		state.Trust = 0
+	}
+	if state.Confidence < 0 {
+		state.Confidence = 0
+	}
 }
 
 type GraphStats struct {

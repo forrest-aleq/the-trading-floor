@@ -191,3 +191,48 @@ func TestLeadTimeBeliefObservationsAndLoad(t *testing.T) {
 		t.Fatalf("expected loaded lead-time belief, got %+v", loaded)
 	}
 }
+
+func TestCompetenceStateGovernanceCeilings(t *testing.T) {
+	graph := NewGraph()
+	key := CompetenceKey("desk-a", "macro", "STK", "medium:neutral:risk_on:normal")
+
+	graph.Load([]*model.CompetenceState{{
+		Key:          key,
+		DeskID:       "desk-a",
+		Capability:   "macro",
+		Context:      "STK",
+		Regime:       "medium:neutral:risk_on:normal",
+		Trust:        0.95,
+		Confidence:   0.90,
+		SuccessCount: 2,
+	}})
+
+	state, ok := graph.Lookup("desk-a", "macro", "STK", "medium:neutral:risk_on:normal")
+	if !ok {
+		t.Fatal("expected competence state to load")
+	}
+	if state.ValidatedOutcomes != 2 {
+		t.Fatalf("expected validated outcomes to infer from observations, got %+v", state)
+	}
+	if state.TrustCeiling != 0.62 || state.ConfidenceCeiling != 0.45 {
+		t.Fatalf("expected early-stage ceilings to apply, got %+v", state)
+	}
+	if state.Trust != state.TrustCeiling || state.Confidence != state.ConfidenceCeiling {
+		t.Fatalf("expected trust/confidence to clamp to ceilings, got %+v", state)
+	}
+
+	graph.ApplySuccess(key, 1.0)
+	state, ok = graph.Lookup("desk-a", "macro", "STK", "medium:neutral:risk_on:normal")
+	if !ok {
+		t.Fatal("expected competence state after success")
+	}
+	if state.ValidatedOutcomes != 3 {
+		t.Fatalf("expected validated outcomes to increment, got %+v", state)
+	}
+	if state.TrustCeiling != 0.72 || state.ConfidenceCeiling != 0.58 {
+		t.Fatalf("expected next ceiling band after additional validation, got %+v", state)
+	}
+	if state.Trust > state.TrustCeiling || state.Confidence > state.ConfidenceCeiling {
+		t.Fatalf("expected state to remain within ceilings, got %+v", state)
+	}
+}

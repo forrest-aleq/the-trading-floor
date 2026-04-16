@@ -1,0 +1,22 @@
+[
+  {
+    "max_validated_outcomes": 2,
+    "trust_ceiling": 0.62,
+    "confidence_ceiling": 0.45
+  },
+  {
+    "max_validated_outcomes": 9,
+    "trust_ceiling": 0.72,
+    "confidence_ceiling": 0.58
+  },
+  {
+    "max_validated_outcomes": 24,
+    "trust_ceiling": 0.82,
+    "confidence_ceiling": 0.68
+  },
+  {
+    "max_validated_outcomes": 2147483647,
+    "trust_ceiling": 1.0,
+    "confidence_ceiling": 1.0
+  }
+]

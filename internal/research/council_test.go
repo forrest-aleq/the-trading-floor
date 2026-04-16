@@ -27,18 +27,22 @@ type councilCompilerFallbackClient struct {
 
 func (s *councilCompilerFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
 	s.requests = append(s.requests, req)
-	switch len(s.requests) {
-	case 1:
+	if len(s.requests) == 1 {
 		return &llm.Response{
 			Content: "Thinking Process:\n1. Timing is acceptable.\n2. Liquidity is fine.\n3. The model forgot to emit JSON.",
 			Model:   "critical",
 		}, nil
-	default:
+	}
+	if req.Model == "gemma-the-writer-mighty-sword-9b" {
 		return &llm.Response{
 			Content: validCouncilPerspectiveJSON(),
 			Model:   "compiler",
 		}, nil
 	}
+	return &llm.Response{
+		Content: "Still thinking without final JSON.",
+		Model:   "critical",
+	}, nil
 }
 
 type councilTerminalBlockClient struct {
@@ -50,6 +54,24 @@ func (s *councilTerminalBlockClient) Complete(_ context.Context, req llm.Request
 	return &llm.Response{
 		Content: "Thinking Process:\n1. Timing is acceptable.\n2. Liquidity is fine.\nFINAL_JSON\n" + validCouncilPerspectiveJSON() + "\nEND_FINAL_JSON",
 		Model:   "critical",
+	}, nil
+}
+
+type councilStructuredRetryClient struct {
+	requests []llm.Request
+}
+
+func (s *councilStructuredRetryClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if !req.JSONMode {
+		return &llm.Response{
+			Content: "Thinking Process:\n1. Timing is acceptable.\n2. Liquidity is fine.\n3. The model forgot to emit JSON.",
+			Model:   "critical",
+		}, nil
+	}
+	return &llm.Response{
+		Content: validCouncilPerspectiveJSON(),
+		Model:   "critical-json",
 	}, nil
 }
 
@@ -169,17 +191,20 @@ func TestCouncilPerspectiveCompilerFallbackRecoversStructuredJSON(t *testing.T) 
 	if cleaned == "" {
 		t.Fatal("expected cleaned JSON from compiler fallback")
 	}
-	if got := len(client.requests); got != 2 {
-		t.Fatalf("expected council call plus compiler call, got %d", got)
+	if got := len(client.requests); got != 3 {
+		t.Fatalf("expected council call, structured retry, plus compiler call, got %d", got)
 	}
 	if client.requests[0].JSONMode {
 		t.Fatal("expected initial council call to avoid strict JSON mode")
 	}
 	if !client.requests[1].JSONMode {
+		t.Fatal("expected structured retry request to use strict JSON mode")
+	}
+	if !client.requests[2].JSONMode {
 		t.Fatal("expected council compiler request to use strict JSON mode")
 	}
-	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
-		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	if client.requests[2].Model != "gemma-the-writer-mighty-sword-9b" {
+		t.Fatalf("unexpected compiler model %q", client.requests[2].Model)
 	}
 }
 
@@ -198,6 +223,30 @@ func TestCouncilPerspectiveAcceptsTerminalJSONBlockWithoutCompilerFallback(t *te
 	}
 	if got := len(client.requests); got != 1 {
 		t.Fatalf("expected one council call, got %d", got)
+	}
+}
+
+func TestCouncilPerspectiveStructuredRetryRecoversBeforeCompilerFallback(t *testing.T) {
+	t.Setenv("COUNCIL_MODEL", "qwen/qwen3.5-35b-a3b")
+
+	client := &councilStructuredRetryClient{}
+	council := NewCouncil(llm.NewRouter(client, client, client))
+
+	cleaned, err := council.requestPerspectiveJSON(context.Background(), "Macro", "macro system prompt", "thesis prompt")
+	if err != nil {
+		t.Fatalf("expected structured retry to recover perspective, got %v", err)
+	}
+	if cleaned == "" {
+		t.Fatal("expected cleaned JSON")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected council call plus structured retry, got %d", got)
+	}
+	if client.requests[0].JSONMode {
+		t.Fatal("expected initial thought-mode council request")
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected structured retry request")
 	}
 }
 

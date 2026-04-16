@@ -17,6 +17,8 @@ import (
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
+type evaluationTimeContextKey struct{}
+
 // Engine evaluates signals for tradeable opportunities using the speed-tier LLM
 type Engine struct {
 	log           *slog.Logger
@@ -32,6 +34,14 @@ type Engine struct {
 	lastCooldownNoticeAt time.Time
 }
 
+type Evaluation struct {
+	Opportunity *model.Opportunity
+	Accepted    bool
+	Reason      string
+	Score       float64
+	Tradeable   bool
+}
+
 var (
 	scannerRequestTimeout         = readDurationEnv("SCANNER_REQUEST_TIMEOUT", 15*time.Second)
 	scannerMaxTokens              = readIntEnv("SCANNER_MAX_TOKENS", 128)
@@ -39,8 +49,8 @@ var (
 	scannerThinkingRequestTimeout = readDurationEnv("SCANNER_THINKING_REQUEST_TIMEOUT", 12*time.Second)
 	scannerThinkingMaxTokens      = readIntEnv("SCANNER_THINKING_MAX_TOKENS", 128)
 	scannerThinkingCompactTokens  = readIntEnv("SCANNER_THINKING_COMPACT_MAX_TOKENS", 96)
-	scannerCompilerTimeout        = readDurationEnv("SCANNER_COMPILER_TIMEOUT", 8*time.Second)
-	scannerCompilerMaxTokens      = readIntEnv("SCANNER_COMPILER_MAX_TOKENS", 96)
+	scannerCompilerTimeout        = readDurationEnv("SCANNER_COMPILER_TIMEOUT", 15*time.Second)
+	scannerCompilerMaxTokens      = readIntEnv("SCANNER_COMPILER_MAX_TOKENS", 128)
 	scannerContentLimit           = readIntEnv("SCANNER_CONTENT_LIMIT", 500)
 	scannerCompactContentMax      = readIntEnv("SCANNER_COMPACT_CONTENT_LIMIT", 220)
 	scannerStaleSignalAge         = readDurationEnv("SCANNER_STALE_SIGNAL_AGE", 6*time.Hour)
@@ -158,7 +168,13 @@ const (
 
 // Evaluate checks if a signal contains a tradeable opportunity
 func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string) (*model.Opportunity, bool) {
-	if skip, reason := shouldSkipSignal(sig); skip {
+	result := e.EvaluateDetailed(ctx, sig, domain)
+	return result.Opportunity, result.Accepted
+}
+
+// EvaluateDetailed runs the scanner and records deterministic rejection reasons for replay and regression analysis.
+func (e *Engine) EvaluateDetailed(ctx context.Context, sig signal.Signal, domain string) Evaluation {
+	if skip, reason := shouldSkipSignalAt(sig, evaluationTime(ctx)); skip {
 		e.log.Debug("scanner skipped by deterministic prefilter",
 			"signal_id", sig.ID,
 			"reason", reason,
@@ -169,7 +185,7 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 			"source_trust", evidenceTrust(sig),
 			"evidence_score", evidenceScore(sig),
 		)
-		return nil, false
+		return Evaluation{Reason: "prefilter:" + reason}
 	}
 
 	if until, reason, shouldLog := e.llmCooldown(time.Now().UTC()); !until.IsZero() {
@@ -179,7 +195,7 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 				"reason", reason,
 			)
 		}
-		return nil, false
+		return Evaluation{Reason: "llm_cooldown"}
 	}
 
 	requestCfg := e.requestConfig()
@@ -265,7 +281,7 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 				"prompt_chars", len(candidate.content),
 				"max_tokens", candidate.maxTokens,
 			)
-			return nil, false
+			return Evaluation{Reason: "llm_error"}
 		}
 		e.log.Warn("scanner request exceeded primary scan budget, retrying compact prompt",
 			"signal_id", sig.ID,
@@ -276,6 +292,20 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 	}
 
 	result, err := parseScanResponse(resp)
+	if err != nil && requestCfg.allowStructuredFallback {
+		if fallbackResp, fallbackPrompt, fallbackErr := e.retryStructuredFallback(ctx, domain, sig); fallbackErr == nil {
+			if parsed, parseErr := parseScanResponse(fallbackResp); parseErr == nil {
+				e.log.Info("scanner structured fallback recovered parse failure",
+					"signal_id", sig.ID,
+					"prompt_chars", len(fallbackPrompt),
+					"max_tokens", scannerCompactMaxTokens,
+				)
+				result = parsed
+				err = nil
+				resp = fallbackResp
+			}
+		}
+	}
 	if err != nil && requestCfg.allowCompilerFallback {
 		if compiled, compileErr := e.compileScannerDecision(ctx, usedPrompt, resp); compileErr == nil {
 			if parsed, parseErr := parseScanResponse(compiled); parseErr == nil {
@@ -303,28 +333,39 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 			"response_len", len(resp),
 			"response_excerpt", truncateForPrompt(resp, 320),
 		)
-		return nil, false
+		return Evaluation{Reason: "parse_error"}
 	}
 
-	if !result.Tradeable || result.Score < e.minScore {
-		return nil, false
+	if !result.Tradeable {
+		return Evaluation{Reason: "scanner_rejected", Score: result.Score, Tradeable: false}
+	}
+	if result.Score < e.minScore {
+		return Evaluation{Reason: "score_below_threshold", Score: result.Score, Tradeable: true}
 	}
 
 	// Build instruments
-	instruments := make([]model.Instrument, len(result.Instruments))
-	for i, inst := range result.Instruments {
-		instruments[i] = model.Instrument{
-			Symbol:   inst.Symbol,
+	instruments := make([]model.Instrument, 0, len(result.Instruments))
+	for _, inst := range result.Instruments {
+		symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+		if symbol == "" || symbol == "NONE" || symbol == "UNKNOWN" {
+			continue
+		}
+		instrument := model.Instrument{
+			Symbol:   symbol,
 			SecType:  inst.SecType,
 			Currency: inst.Currency,
 			Exchange: "SMART", // IBKR smart routing default
 		}
-		if instruments[i].Currency == "" {
-			instruments[i].Currency = "USD"
+		if instrument.Currency == "" {
+			instrument.Currency = "USD"
 		}
-		if instruments[i].SecType == "" {
-			instruments[i].SecType = "STK"
+		if instrument.SecType == "" {
+			instrument.SecType = "STK"
 		}
+		instruments = append(instruments, instrument)
+	}
+	if len(instruments) == 0 {
+		return Evaluation{Reason: "no_instruments", Score: result.Score, Tradeable: true}
 	}
 
 	direction := model.Long
@@ -352,7 +393,29 @@ func (e *Engine) Evaluate(ctx context.Context, sig signal.Signal, domain string)
 		"signal_source", sig.Source,
 	)
 
-	return opp, true
+	return Evaluation{
+		Opportunity: opp,
+		Accepted:    true,
+		Reason:      "accepted",
+		Score:       result.Score,
+		Tradeable:   true,
+	}
+}
+
+func WithEvaluationTime(ctx context.Context, at time.Time) context.Context {
+	if at.IsZero() {
+		return ctx
+	}
+	return context.WithValue(ctx, evaluationTimeContextKey{}, at)
+}
+
+func evaluationTime(ctx context.Context) time.Time {
+	if ctx != nil {
+		if at, ok := ctx.Value(evaluationTimeContextKey{}).(time.Time); ok && !at.IsZero() {
+			return at
+		}
+	}
+	return time.Now().UTC()
 }
 
 func (e *Engine) retryStructuredFallback(ctx context.Context, domain string, sig signal.Signal) (string, string, error) {
@@ -762,11 +825,14 @@ func (e *Engine) clearLLMCooldown() {
 	e.lastCooldownNoticeAt = time.Time{}
 }
 
-func shouldSkipSignal(sig signal.Signal) (bool, string) {
+func shouldSkipSignalAt(sig signal.Signal, now time.Time) (bool, string) {
 	if allowed, reason := sig.EvidenceGate(); !allowed {
 		return true, reason
 	}
-	if !sig.Timestamp.IsZero() && time.Since(sig.Timestamp) > scannerStaleSignalAge {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if !sig.Timestamp.IsZero() && now.Sub(sig.Timestamp) > scannerStaleSignalAge {
 		return true, "stale_signal_age"
 	}
 	if sig.Type == signal.TypeSocial && sig.Urgency < 0.5 && len(sig.CorroboratingSources) == 0 {

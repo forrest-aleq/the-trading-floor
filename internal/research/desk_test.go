@@ -2,6 +2,7 @@ package research
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -30,18 +31,22 @@ type researchCompilerFallbackClient struct {
 
 func (s *researchCompilerFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
 	s.requests = append(s.requests, req)
-	switch len(s.requests) {
-	case 1:
+	if len(s.requests) == 1 {
 		return &llm.Response{
 			Content: "Thinking Process:\n1. Strong event setup.\n2. Clear catalyst.\n3. The model forgot to emit JSON.",
 			Model:   "analysis",
 		}, nil
-	default:
+	}
+	if req.Model == "gemma-the-writer-mighty-sword-9b" && strings.Contains(req.Messages[0].Content, "trading thesis compiler") {
 		return &llm.Response{
 			Content: validResearchJSON(),
 			Model:   "compiler",
 		}, nil
 	}
+	return &llm.Response{
+		Content: "Still thinking without final JSON.",
+		Model:   "analysis",
+	}, nil
 }
 
 type researchTerminalBlockClient struct {
@@ -53,6 +58,39 @@ func (s *researchTerminalBlockClient) Complete(_ context.Context, req llm.Reques
 	return &llm.Response{
 		Content: "Thinking Process:\n1. Strong event setup.\n2. Clear catalyst.\nFINAL_JSON\n" + validResearchJSON() + "\nEND_FINAL_JSON",
 		Model:   "analysis",
+	}, nil
+}
+
+type researchStructuredRetryClient struct {
+	requests []llm.Request
+}
+
+func (s *researchStructuredRetryClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if !req.JSONMode {
+		return &llm.Response{
+			Content: "Thinking Process:\n1. Strong event setup.\n2. Clear catalyst.\n3. The model forgot to emit JSON.",
+			Model:   "analysis",
+		}, nil
+	}
+	return &llm.Response{
+		Content: validResearchJSON(),
+		Model:   "analysis-json",
+	}, nil
+}
+
+type researchPrimaryErrorRetryClient struct {
+	requests []llm.Request
+}
+
+func (s *researchPrimaryErrorRetryClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if len(s.requests) == 1 {
+		return nil, errors.New("context deadline exceeded")
+	}
+	return &llm.Response{
+		Content: validResearchJSON(),
+		Model:   "analysis-json",
 	}, nil
 }
 
@@ -81,6 +119,9 @@ func TestInvestigateUsesThoughtModeForQwenResearch(t *testing.T) {
 	if got := client.requests[0].Messages[0].Content; !containsTerminalContract(got) {
 		t.Fatalf("expected terminal JSON contract in research prompt, got %q", got)
 	}
+	if got := client.requests[0].Messages[1].Content; !strings.Contains(got, "Federal Reserve speech signaled a more hawkish balance of risks.") {
+		t.Fatalf("expected research prompt to include signal content, got %q", got)
+	}
 }
 
 func TestInvestigateCompilerFallbackRecoversStructuredThesis(t *testing.T) {
@@ -97,17 +138,20 @@ func TestInvestigateCompilerFallbackRecoversStructuredThesis(t *testing.T) {
 	if thesis == nil {
 		t.Fatal("expected thesis from compiler fallback")
 	}
-	if got := len(client.requests); got != 2 {
-		t.Fatalf("expected analysis call plus compiler call, got %d", got)
+	if got := len(client.requests); got != 3 {
+		t.Fatalf("expected analysis call, structured retry, plus compiler call, got %d", got)
 	}
 	if client.requests[0].JSONMode {
 		t.Fatal("expected initial research call to avoid strict JSON mode")
 	}
 	if !client.requests[1].JSONMode {
+		t.Fatal("expected structured retry to use strict JSON mode")
+	}
+	if !client.requests[2].JSONMode {
 		t.Fatal("expected compiler request to use strict JSON mode")
 	}
-	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
-		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	if client.requests[2].Model != "gemma-the-writer-mighty-sword-9b" {
+		t.Fatalf("unexpected compiler model %q", client.requests[2].Model)
 	}
 }
 
@@ -126,6 +170,79 @@ func TestInvestigateAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T
 	}
 	if got := len(client.requests); got != 1 {
 		t.Fatalf("expected only one research call, got %d", got)
+	}
+}
+
+func TestInvestigateStructuredRetryRecoversBeforeCompilerFallback(t *testing.T) {
+	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+
+	client := &researchStructuredRetryClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected structured retry to recover thesis, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis from structured retry")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected analysis call plus structured retry, got %d", got)
+	}
+	if client.requests[0].JSONMode {
+		t.Fatal("expected initial thought-mode request")
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected structured retry request")
+	}
+	if got := client.requests[1].Messages[1].Content; !strings.Contains(got, "Signal snapshot") {
+		t.Fatalf("expected structured retry to retain compact signal context, got %q", got)
+	}
+}
+
+func TestInvestigateDetailedMarksLowConvictionAsReject(t *testing.T) {
+	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+
+	client := &researchStubClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.8)
+
+	result, err := desk.InvestigateDetailed(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected no hard error, got %v", err)
+	}
+	if result.Thesis == nil {
+		t.Fatal("expected thesis draft")
+	}
+	if result.Accepted {
+		t.Fatal("expected low-conviction thesis to be rejected")
+	}
+	if result.Reason != "conviction_below_threshold" {
+		t.Fatalf("unexpected reject reason %q", result.Reason)
+	}
+}
+
+func TestInvestigateRecoversWithStructuredRetryAfterPrimaryError(t *testing.T) {
+	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("RESEARCH_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
+
+	client := &researchPrimaryErrorRetryClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected retry to recover primary error, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis from structured retry")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected primary request plus retry, got %d", got)
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected retry request to use strict JSON mode")
+	}
+	if client.requests[1].Tier != llm.TierSpeed {
+		t.Fatalf("expected retry to downgrade to speed tier, got %v", client.requests[1].Tier)
 	}
 }
 

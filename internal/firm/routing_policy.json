@@ -1,0 +1,32 @@
+{
+  "category_domain_rules": {
+    "geopolitical": ["geopolitical", "tail"],
+    "macro": ["macro", "tail"],
+    "corporate": ["corporate", "sector"],
+    "flows": ["flows", "volatility"],
+    "tail": ["tail", "volatility", "macro", "geopolitical"],
+    "volatility": ["volatility", "tail"],
+    "sector": ["sector", "corporate"],
+    "market": ["systematic", "volatility", "sector"]
+  },
+  "signal_type_domain_rules": {
+    "filing": ["corporate"],
+    "economic": ["macro", "tail"],
+    "price": ["systematic", "volatility", "sector"],
+    "social": ["flows", "volatility"],
+    "flow": ["flows", "volatility"],
+    "alternative": ["macro", "sector"]
+  },
+  "source_type_domain_rules": {
+    "social": ["flows", "volatility"],
+    "market": ["systematic", "volatility"],
+    "alternative": ["sector", "systematic"]
+  },
+  "owner_group_domain_rules": {
+    "federal_reserve": ["macro", "tail", "systematic"],
+    "sec": ["corporate", "sector"],
+    "earnings_provider": ["corporate", "sector"],
+    "interactive_brokers": ["systematic", "volatility"]
+  },
+  "fallback_domains": ["macro", "systematic"]
+}

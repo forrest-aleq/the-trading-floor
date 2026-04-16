@@ -71,7 +71,7 @@ func TestSourceDrivenRoutingSpecializesDeskIntake(t *testing.T) {
 		Type:     signal.TypeNews,
 		Category: "geopolitical",
 		EvidenceMeta: &evidence.Metadata{
-			SourceType:  "secondary",
+			SourceType:   "secondary",
 			OriginRegion: "europe",
 		},
 	}
@@ -88,7 +88,7 @@ func TestSourceDrivenRoutingSpecializesDeskIntake(t *testing.T) {
 	macro := signal.Signal{
 		Type: signal.TypeEconomic,
 		EvidenceMeta: &evidence.Metadata{
-			SourceType:      "primary",
+			SourceType:       "primary",
 			SourceOwnerGroup: "federal_reserve",
 		},
 	}
@@ -134,5 +134,27 @@ func TestSourceDrivenRoutingSpecializesDeskIntake(t *testing.T) {
 	}
 	if domainShouldReviewSignal("macro", flow) {
 		t.Fatal("did not expect macro desk to receive social signal")
+	}
+}
+
+func TestParseRoutingPolicyNormalizesKeysAndDomains(t *testing.T) {
+	policy, err := parseRoutingPolicy([]byte(`{
+		"category_domain_rules": {" Corporate ": [" Sector ", "corporate", "sector"]},
+		"signal_type_domain_rules": {" NEWS ": ["macro"]},
+		"fallback_domains": [" Macro ", "systematic", "macro"]
+	}`))
+	if err != nil {
+		t.Fatalf("parse routing policy: %v", err)
+	}
+
+	got := policy.CategoryDomainRules["corporate"]
+	if len(got) != 2 || got[0] != "sector" || got[1] != "corporate" {
+		t.Fatalf("unexpected normalized category rule: %#v", got)
+	}
+	if len(policy.SignalTypeDomainRules["news"]) != 1 || policy.SignalTypeDomainRules["news"][0] != "macro" {
+		t.Fatalf("unexpected normalized signal-type rule: %#v", policy.SignalTypeDomainRules["news"])
+	}
+	if len(policy.FallbackDomains) != 2 || policy.FallbackDomains[0] != "macro" || policy.FallbackDomains[1] != "systematic" {
+		t.Fatalf("unexpected fallback domains: %#v", policy.FallbackDomains)
 	}
 }

@@ -25,43 +25,28 @@ type Gate struct {
 // Limits are the hard-coded risk parameters from policies.json
 type Limits struct {
 	// Per-desk
-	MaxDailyLossPct        float64
-	MaxSinglePositionPct   float64
-	MaxCorrelatedPositions int
-	MaxOpenPositions       int
-	CapitalPerDesk         float64
+	MaxDailyLossPct        float64 `json:"max_daily_loss_pct"`
+	MaxSinglePositionPct   float64 `json:"max_single_position_pct"`
+	MaxCorrelatedPositions int     `json:"max_correlated_positions"`
+	MaxOpenPositions       int     `json:"max_open_positions"`
+	CapitalPerDesk         float64 `json:"capital_per_desk"`
 
 	// Per-trade
-	MaxPositionSizePct float64
-	MinConvictionScore float64
+	MaxPositionSizePct float64 `json:"max_position_size_pct"`
+	MinConvictionScore float64 `json:"min_conviction_score"`
 
 	// Portfolio-level
-	TotalCapital          float64
-	MaxFactorExposurePct  float64
-	MaxDrawdownPct        float64
-	KillSwitchDrawdownPct float64
-	MaxGrossExposurePct   float64
-	MaxNetExposurePct     float64
-	MaxCashDeployPct      float64
+	TotalCapital          float64 `json:"total_capital"`
+	MaxFactorExposurePct  float64 `json:"max_factor_exposure_pct"`
+	MaxDrawdownPct        float64 `json:"max_drawdown_pct"`
+	KillSwitchDrawdownPct float64 `json:"kill_switch_drawdown_pct"`
+	MaxGrossExposurePct   float64 `json:"max_gross_exposure_pct"`
+	MaxNetExposurePct     float64 `json:"max_net_exposure_pct"`
+	MaxCashDeployPct      float64 `json:"max_cash_deploy_pct"`
 }
 
 func DefaultLimits() Limits {
-	return Limits{
-		MaxDailyLossPct:        3.0,
-		MaxSinglePositionPct:   20.0,
-		MaxCorrelatedPositions: 3,
-		MaxOpenPositions:       10,
-		CapitalPerDesk:         25000,
-		MaxPositionSizePct:     10.0,
-		MinConvictionScore:     0.65,
-		TotalCapital:           1000000,
-		MaxFactorExposurePct:   25.0,
-		MaxDrawdownPct:         10.0,
-		KillSwitchDrawdownPct:  15.0,
-		MaxGrossExposurePct:    200.0,
-		MaxNetExposurePct:      100.0,
-		MaxCashDeployPct:       80.0,
-	}
+	return loadActiveLimits()
 }
 
 func NewGate(limits Limits) *Gate {

@@ -28,18 +28,22 @@ type prosecutorCompilerFallbackClient struct {
 
 func (s *prosecutorCompilerFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
 	s.requests = append(s.requests, req)
-	switch len(s.requests) {
-	case 1:
+	if len(s.requests) == 1 {
 		return &llm.Response{
 			Content: "Thinking Process:\n1. Crowded setup.\n2. Thin evidence.\n3. The model forgot to emit JSON.",
 			Model:   "critical",
 		}, nil
-	default:
+	}
+	if req.Model == "gemma-the-writer-mighty-sword-9b" {
 		return &llm.Response{
 			Content: validProsecutionJSON(),
 			Model:   "compiler",
 		}, nil
 	}
+	return &llm.Response{
+		Content: "Still thinking without final JSON.",
+		Model:   "critical",
+	}, nil
 }
 
 type prosecutorTerminalBlockClient struct {
@@ -51,6 +55,24 @@ func (s *prosecutorTerminalBlockClient) Complete(_ context.Context, req llm.Requ
 	return &llm.Response{
 		Content: "Thinking Process:\n1. Crowded setup.\n2. Thin evidence.\nFINAL_JSON\n" + validProsecutionJSON() + "\nEND_FINAL_JSON",
 		Model:   "critical",
+	}, nil
+}
+
+type prosecutorStructuredRetryClient struct {
+	requests []llm.Request
+}
+
+func (s *prosecutorStructuredRetryClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if !req.JSONMode {
+		return &llm.Response{
+			Content: "Thinking Process:\n1. Crowded setup.\n2. Thin evidence.\n3. The model forgot to emit JSON.",
+			Model:   "critical",
+		}, nil
+	}
+	return &llm.Response{
+		Content: validProsecutionJSON(),
+		Model:   "critical-json",
 	}, nil
 }
 
@@ -86,17 +108,20 @@ func TestProsecutorCompilerFallbackRecoversStructuredVerdict(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected prosecution result")
 	}
-	if got := len(client.requests); got != 2 {
-		t.Fatalf("expected critical call plus compiler call, got %d", got)
+	if got := len(client.requests); got != 3 {
+		t.Fatalf("expected critical call, structured retry, plus compiler call, got %d", got)
 	}
 	if client.requests[0].JSONMode {
 		t.Fatal("expected initial prosecution call to avoid strict JSON mode")
 	}
 	if !client.requests[1].JSONMode {
+		t.Fatal("expected structured retry request to use strict JSON mode")
+	}
+	if !client.requests[2].JSONMode {
 		t.Fatal("expected compiler request to use strict JSON mode")
 	}
-	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
-		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	if client.requests[2].Model != "gemma-the-writer-mighty-sword-9b" {
+		t.Fatalf("unexpected compiler model %q", client.requests[2].Model)
 	}
 }
 
@@ -112,6 +137,27 @@ func TestProsecutorAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T)
 	}
 	if got := len(client.requests); got != 1 {
 		t.Fatalf("expected one prosecution call, got %d", got)
+	}
+}
+
+func TestProsecutorStructuredRetryRecoversBeforeCompilerFallback(t *testing.T) {
+	t.Setenv("PROSECUTION_MODEL", "qwen/qwen3.5-35b-a3b")
+
+	client := &prosecutorStructuredRetryClient{}
+	prosecutor := NewProsecutor(llm.NewRouter(client, client, client))
+
+	result := prosecutor.Challenge(context.Background(), structuredTestThesis())
+	if result == nil {
+		t.Fatal("expected prosecution result")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected prosecution call plus structured retry, got %d", got)
+	}
+	if client.requests[0].JSONMode {
+		t.Fatal("expected initial thought-mode prosecution request")
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected structured retry request")
 	}
 }
 

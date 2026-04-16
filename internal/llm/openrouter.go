@@ -338,15 +338,27 @@ func DefaultRouter() *Router {
 
 	speedModel := os.Getenv("LLM_MODEL_SPEED")
 	if speedModel == "" {
-		speedModel = "qwen/qwen3-8b"
+		if isLocalLLM(baseURL) {
+			speedModel = "qwen3:8b"
+		} else {
+			speedModel = "qwen/qwen3.5-9b"
+		}
 	}
 	analysisModel := os.Getenv("LLM_MODEL_ANALYSIS")
 	if analysisModel == "" {
-		analysisModel = "qwen/qwen3.5-35b-a3b"
+		if isLocalLLM(baseURL) {
+			analysisModel = "qwen3:30b"
+		} else {
+			analysisModel = "qwen/qwen3.5-35b-a3b"
+		}
 	}
 	criticalModel := os.Getenv("LLM_MODEL_CRITICAL")
 	if criticalModel == "" {
-		criticalModel = "anthropic/claude-sonnet-4-20250514"
+		if isLocalLLM(baseURL) {
+			criticalModel = analysisModel
+		} else {
+			criticalModel = "anthropic/claude-sonnet-4-20250514"
+		}
 	}
 
 	speed := NewOpenRouterClient(OpenRouterConfig{

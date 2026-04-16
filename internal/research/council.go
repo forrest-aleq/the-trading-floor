@@ -27,11 +27,11 @@ type Council struct {
 	compilerModel string
 }
 
-const (
-	councilPerspectiveMaxTokens = 384
-	councilPerspectiveTimeout   = 25 * time.Second
-	councilCompilerTimeout      = 15 * time.Second
-	councilCompilerMaxTokens    = 600
+var (
+	councilPerspectiveMaxTokens = readStructuredIntEnv("COUNCIL_MAX_TOKENS", 384)
+	councilPerspectiveTimeout   = readStructuredDurationEnv("COUNCIL_TIMEOUT", 25*time.Second)
+	councilCompilerTimeout      = readStructuredDurationEnv("COUNCIL_COMPILER_TIMEOUT", 25*time.Second)
+	councilCompilerMaxTokens    = readStructuredIntEnv("COUNCIL_COMPILER_MAX_TOKENS", 600)
 )
 
 const councilThoughtPrefix = `Do not restate the request or schema.
@@ -262,11 +262,13 @@ func (c *Council) requestPerspectiveJSON(ctx context.Context, archetype, systemP
 }
 
 func (c *Council) askPerspectiveWithFallbackMode(ctx context.Context, systemPrompt, thesisPrompt string) (string, error) {
-	if c.responseMode == structuredResponseModeThought {
-		systemPrompt = addTerminalJSONContract(councilThoughtPrefix + "\n\n" + systemPrompt)
-		return c.llm.AskWithLimit(ctx, llm.TierCritical, systemPrompt, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
+	resp, retried, err := askStructuredWithRetry(ctx, c.llm, llm.TierCritical, c.responseMode, systemPrompt, councilThoughtPrefix, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
+	if retried {
+		c.log.Info("council structured retry recovered terminal JSON miss",
+			"model", c.selectedModel,
+		)
 	}
-	return c.llm.AskJSONWithLimit(ctx, llm.TierCritical, systemPrompt, thesisPrompt, councilPerspectiveMaxTokens, 0.2)
+	return resp, err
 }
 
 func (c *Council) compilePerspectiveJSON(ctx context.Context, archetype, systemPrompt, thesisPrompt, rawResponse string) (string, error) {

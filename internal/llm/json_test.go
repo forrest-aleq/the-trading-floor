@@ -37,6 +37,14 @@ func TestExtractJSON(t *testing.T) {
 			name:  "think tags around JSON",
 			input: "<think>\ninternal reasoning\n</think>\n\n{\"tradeable\": false, \"score\": 12}",
 		},
+		{
+			name:  "multiple JSON objects prefers last valid candidate",
+			input: "schema example {\"tradeable\": false}\nfinal answer {\"tradeable\": true, \"score\": 88}",
+		},
+		{
+			name:  "json array candidate",
+			input: "notes before\n[{\"symbol\":\"AAPL\"},{\"symbol\":\"MSFT\"}]\nafter",
+		},
 	}
 
 	for _, tt := range tests {

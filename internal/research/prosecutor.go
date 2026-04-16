@@ -62,9 +62,11 @@ Respond in JSON:
   "reasoning": "..."
 }`
 
-const prosecutionMaxTokens = 768
-const prosecutionCompilerTimeout = 15 * time.Second
-const prosecutionCompilerMaxTokens = 900
+var (
+	prosecutionMaxTokens         = readStructuredIntEnv("PROSECUTION_MAX_TOKENS", 768)
+	prosecutionCompilerTimeout   = readStructuredDurationEnv("PROSECUTION_COMPILER_TIMEOUT", 25*time.Second)
+	prosecutionCompilerMaxTokens = readStructuredIntEnv("PROSECUTION_COMPILER_MAX_TOKENS", 900)
+)
 
 const prosecutionThoughtPrefix = `Do not restate the request or schema.
 Think if useful, but keep it concise.
@@ -191,12 +193,13 @@ Quant Metrics:
 }
 
 func (p *Prosecutor) askProsecutionWithFallbackMode(ctx context.Context, prompt string) (string, error) {
-	systemPrompt := prosecutionPrompt
-	if p.responseMode == structuredResponseModeThought {
-		systemPrompt = addTerminalJSONContract(prosecutionThoughtPrefix + "\n\n" + prosecutionPrompt)
-		return p.llm.AskWithLimit(ctx, llm.TierCritical, systemPrompt, prompt, prosecutionMaxTokens, 0.2)
+	resp, retried, err := askStructuredWithRetry(ctx, p.llm, llm.TierCritical, p.responseMode, prosecutionPrompt, prosecutionThoughtPrefix, prompt, prosecutionMaxTokens, 0.2)
+	if retried {
+		p.log.Info("prosecution structured retry recovered terminal JSON miss",
+			"model", p.selectedModel,
+		)
 	}
-	return p.llm.AskJSONWithLimit(ctx, llm.TierCritical, systemPrompt, prompt, prosecutionMaxTokens, 0.2)
+	return resp, err
 }
 
 func (p *Prosecutor) compileProsecutionJSON(ctx context.Context, originalPrompt, rawResponse string) (string, error) {

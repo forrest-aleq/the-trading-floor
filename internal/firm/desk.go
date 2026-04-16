@@ -15,6 +15,7 @@ import (
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
+	"github.com/hnic/trading-floor/internal/orderflow"
 	"github.com/hnic/trading-floor/internal/quant"
 	"github.com/hnic/trading-floor/internal/research"
 	"github.com/hnic/trading-floor/internal/risk"
@@ -36,6 +37,7 @@ type Desk struct {
 	llm         *llm.Router
 	scanner     *scanner.Engine
 	research    *research.Desk
+	compiler    *orderflow.Compiler
 	quant       *quant.Service
 	prosecutor  *research.Prosecutor
 	council     *research.Council
@@ -68,6 +70,7 @@ type DeskConfig struct {
 	LLM           *llm.Router
 	Scanner       *scanner.Engine
 	Research      *research.Desk
+	Compiler      *orderflow.Compiler
 	Quant         *quant.Service
 	Prosecutor    *research.Prosecutor
 	Council       *research.Council
@@ -117,6 +120,7 @@ func NewDesk(cfg DeskConfig) *Desk {
 		llm:              cfg.LLM,
 		scanner:          cfg.Scanner,
 		research:         cfg.Research,
+		compiler:         firstCompiler(cfg.Compiler),
 		quant:            cfg.Quant,
 		prosecutor:       cfg.Prosecutor,
 		council:          cfg.Council,
@@ -141,6 +145,13 @@ func NewDesk(cfg DeskConfig) *Desk {
 		},
 		activeTheses: make(map[string]*model.Thesis),
 	}
+}
+
+func firstCompiler(compiler *orderflow.Compiler) *orderflow.Compiler {
+	if compiler != nil {
+		return compiler
+	}
+	return orderflow.NewCompiler()
 }
 
 // Process handles a single signal through the full pipeline.
@@ -336,20 +347,13 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	}
 	d.normalizePositionSize(thesis)
 
-	order := model.Order{
-		ID:          thesis.ID,
-		ThesisID:    thesis.ID,
-		DeskID:      d.ID,
-		Structure:   thesis.Structure,
-		Instrument:  thesis.PrimaryInstrument(),
-		Legs:        append([]model.TradeLeg(nil), thesis.Legs...),
-		Direction:   thesis.Direction,
-		Quantity:    thesis.PositionSize,
-		OrderType:   model.OrderLimit,
-		LimitPrice:  thesis.EntryPrice,
-		StopPrice:   thesis.StopLoss,
-		TimeInForce: "DAY",
-		Notional:    thesis.GrossEntryNotional(thesis.PositionSize),
+	order, err := d.compiler.CompileEntry(orderflow.EntryInput{
+		DeskID: d.ID,
+		Thesis: thesis,
+	})
+	if err != nil {
+		d.log.Warn("compile order failed", "thesis_id", thesis.ID, "error", err)
+		return
 	}
 
 	snapshot := d.book.Snapshot()
@@ -366,7 +370,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		DeskCapital:   snapshot.DeskCapital,
 	}
 
-	decision := d.riskGate.Check(order, thesis, portfolioState)
+	decision := d.riskGate.Check(*order, thesis, portfolioState)
 	if !decision.Allowed {
 		d.log.Info("thesis blocked by risk gate",
 			"thesis_id", thesis.ID,

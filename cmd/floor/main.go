@@ -25,6 +25,7 @@ import (
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
 	"github.com/hnic/trading-floor/internal/observe"
+	"github.com/hnic/trading-floor/internal/orderflow"
 	"github.com/hnic/trading-floor/internal/quant"
 	"github.com/hnic/trading-floor/internal/regime"
 	"github.com/hnic/trading-floor/internal/research"
@@ -272,23 +273,17 @@ func main() {
 	}
 
 	// --- Position Monitor ---
+	orderCompiler := orderflow.NewCompiler()
 	monitor := book.NewMonitor(bk, thesisLookup, func(pos *model.Position, exitPrice float64, reason string) {
 		closePrice := exitPrice
 		if !pos.Shadow {
-			exitOrder := model.Order{
-				ID:          pos.ID + "-close",
-				ThesisID:    pos.ThesisID,
-				DeskID:      pos.DeskID,
-				Structure:   pos.Structure,
-				Instrument:  pos.PrimaryInstrument(),
-				Legs:        append([]model.TradeLeg(nil), pos.Legs...),
-				Direction:   oppositeDirection(pos.Direction),
-				Quantity:    pos.Quantity,
-				OrderType:   model.OrderMarket,
-				TimeInForce: "DAY",
+			exitOrder, err := orderCompiler.CompileExit(pos)
+			if err != nil {
+				slog.Error("failed to compile closing order", "position_id", pos.ID, "error", err)
+				return
 			}
 			executionCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			fill, err := execMgr.SubmitExit(executionCtx, exitOrder)
+			fill, err := execMgr.SubmitExit(executionCtx, *exitOrder)
 			cancel()
 			if err != nil {
 				slog.Error("failed to submit closing order", "position_id", pos.ID, "error", err)

@@ -1,9 +1,12 @@
 package research
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hnic/trading-floor/internal/llm"
 )
@@ -18,6 +21,12 @@ const (
 const (
 	terminalJSONStart = "FINAL_JSON"
 	terminalJSONEnd   = "END_FINAL_JSON"
+)
+
+var (
+	structuredThoughtTimeout  = readStructuredDurationEnv("STRUCTURED_THOUGHT_TIMEOUT", 18*time.Second)
+	structuredJSONRetryTimout = readStructuredDurationEnv("STRUCTURED_JSON_RETRY_TIMEOUT", 10*time.Second)
+	structuredJSONRetryTokens = readStructuredIntEnv("STRUCTURED_JSON_RETRY_MAX_TOKENS", 640)
 )
 
 func detectStructuredResponseMode(envName, model string) structuredResponseMode {
@@ -36,7 +45,10 @@ func detectStructuredResponseMode(envName, model string) structuredResponseMode 
 
 func isThoughtFriendlyModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.Contains(model, "qwen/")
+	return strings.Contains(model, "qwen/") ||
+		strings.Contains(model, "qwen3:") ||
+		strings.Contains(model, "qwen2.5:") ||
+		strings.HasPrefix(model, "qwen")
 }
 
 func researchSelectedModel() string {
@@ -69,6 +81,18 @@ func structuredCompilerModel(envName string) string {
 		}
 	}
 	return ""
+}
+
+func structuredRetryModel(envName, fallback, selected string) string {
+	for _, key := range []string{envName, "STRUCTURED_RETRY_MODEL"} {
+		if model := strings.TrimSpace(os.Getenv(key)); model != "" {
+			return model
+		}
+	}
+	if model := strings.TrimSpace(fallback); model != "" {
+		return model
+	}
+	return strings.TrimSpace(selected)
 }
 
 func addTerminalJSONContract(systemPrompt string) string {
@@ -120,4 +144,73 @@ func truncateForCompiler(value string, max int) string {
 		return block[len(block)-max:]
 	}
 	return value[len(value)-max:]
+}
+
+func askStructuredWithRetry(ctx context.Context, router *llm.Router, tier llm.Tier, mode structuredResponseMode, baseSystemPrompt, thoughtPrefix, prompt string, maxTokens int, temperature float64) (string, bool, error) {
+	if mode == structuredResponseModeThought {
+		thoughtPrompt := addTerminalJSONContract(thoughtPrefix + "\n\n" + baseSystemPrompt)
+		primaryCtx, cancel := withStructuredTimeout(ctx, structuredThoughtTimeout)
+		resp, err := router.AskWithLimit(primaryCtx, tier, thoughtPrompt, prompt, maxTokens, temperature)
+		cancel()
+		if err != nil {
+			return "", false, err
+		}
+		if _, err := extractStructuredJSON(resp); err == nil {
+			return resp, false, nil
+		}
+		retryCtx, retryCancel := withStructuredTimeout(ctx, structuredJSONRetryTimout)
+		fallbackResp, fallbackErr := router.AskJSONWithLimit(retryCtx, tier, baseSystemPrompt, prompt, minStructuredRetryTokens(maxTokens), temperature)
+		retryCancel()
+		if fallbackErr == nil {
+			return fallbackResp, true, nil
+		}
+		return resp, false, nil
+	}
+
+	resp, err := router.AskJSONWithLimit(ctx, tier, baseSystemPrompt, prompt, maxTokens, temperature)
+	if err != nil {
+		return "", false, err
+	}
+	return resp, false, nil
+}
+
+func withStructuredTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func minStructuredRetryTokens(maxTokens int) int {
+	if structuredJSONRetryTokens > 0 && structuredJSONRetryTokens < maxTokens {
+		return structuredJSONRetryTokens
+	}
+	if maxTokens > 512 {
+		return 512
+	}
+	return maxTokens
+}
+
+func readStructuredDurationEnv(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func readStructuredIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }

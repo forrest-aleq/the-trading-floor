@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +59,14 @@ type AccountSummary struct {
 	Cash           float64
 	UnrealizedPnL  float64
 	RealizedPnL    float64
+}
+
+type HistoricalBar struct {
+	Time  time.Time
+	Open  float64
+	High  float64
+	Low   float64
+	Close float64
 }
 
 func NewClient(cfg Config) *Client {
@@ -395,6 +404,57 @@ func (c *Client) ReqMarketData(ctx context.Context, inst model.Instrument) (*Mar
 	}, nil
 }
 
+func (c *Client) HistoricalBars(ctx context.Context, inst model.Instrument, end time.Time, duration, barSize, whatToShow string, useRTH bool) ([]HistoricalBar, error) {
+	ib := c.conn.IB()
+	if ib == nil {
+		return nil, fmt.Errorf("not connected to IBKR")
+	}
+
+	contract, err := c.qualifyContract(inst)
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(duration) == "" {
+		duration = "3 D"
+	}
+	if strings.TrimSpace(barSize) == "" {
+		barSize = "1 hour"
+	}
+	if strings.TrimSpace(whatToShow) == "" {
+		whatToShow = historicalWhatToShow(inst)
+	}
+
+	waitCtx, cancel := withDefaultTimeout(ctx, 45*time.Second)
+	defer cancel()
+
+	barCh, stop := ib.ReqHistoricalData(contract, ibsync.FormatIBTimeUSEastern(end), duration, barSize, whatToShow, useRTH, 2)
+	defer stop()
+
+	bars := make([]HistoricalBar, 0, 128)
+	for {
+		select {
+		case <-waitCtx.Done():
+			return nil, waitCtx.Err()
+		case bar, ok := <-barCh:
+			if !ok {
+				return bars, nil
+			}
+			observedAt, err := ibsync.ParseIBTime(bar.Date)
+			if err != nil {
+				return nil, fmt.Errorf("parse historical bar time %q: %w", bar.Date, err)
+			}
+			bars = append(bars, HistoricalBar{
+				Time:  observedAt,
+				Open:  bar.Open,
+				High:  bar.High,
+				Low:   bar.Low,
+				Close: bar.Close,
+			})
+		}
+	}
+}
+
 func (c *Client) qualifyContract(inst model.Instrument) (*ibsync.Contract, error) {
 	ib := c.conn.IB()
 	if ib == nil {
@@ -407,6 +467,15 @@ func (c *Client) qualifyContract(inst model.Instrument) (*ibsync.Contract, error
 	}
 
 	return contract, nil
+}
+
+func historicalWhatToShow(inst model.Instrument) string {
+	switch strings.ToUpper(strings.TrimSpace(inst.SecType)) {
+	case "CASH", "CFD":
+		return "MIDPOINT"
+	default:
+		return "TRADES"
+	}
 }
 
 func (c *Client) buildComboContract(order model.Order) (*ibsync.Contract, []model.TradeLeg, error) {

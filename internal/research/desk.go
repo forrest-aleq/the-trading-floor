@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/marketcontext"
+	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
@@ -24,6 +25,7 @@ type Desk struct {
 	marketContext *marketcontext.Service
 	selectedModel string
 	responseMode  structuredResponseMode
+	retryModel    string
 	compilerModel string
 }
 
@@ -37,6 +39,7 @@ func NewDesk(llmRouter *llm.Router, minConviction float64) *Desk {
 		minConviction: minConviction,
 		selectedModel: researchSelectedModel(),
 		responseMode:  detectStructuredResponseMode(os.Getenv("RESEARCH_RESPONSE_MODE"), researchSelectedModel()),
+		retryModel:    structuredRetryModel("RESEARCH_RETRY_MODEL", structuredCompilerModel("RESEARCH_COMPILER_MODEL"), researchSelectedModel()),
 		compilerModel: structuredCompilerModel("RESEARCH_COMPILER_MODEL"),
 	}
 }
@@ -101,9 +104,55 @@ Respond in JSON:
   "reasoning": "..."
 }`
 
-const researchMaxTokens = 1024
-const researchCompilerTimeout = 20 * time.Second
-const researchCompilerMaxTokens = 1200
+const researchFastPrompt = `Return one final JSON object only.
+Use exactly this schema and keep the reasoning short.
+If the setup is weak or ambiguous, still return a conservative thesis with low conviction and small size.
+
+JSON schema:
+{
+  "structure": "single|bull_call_spread|bear_put_spread",
+  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
+  "legs": [
+    {
+      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
+      "direction": "long|short",
+      "ratio": 1,
+      "entry_price": 0.0
+    }
+  ],
+  "direction": "long|short",
+  "entry_price": 0.0,
+  "target_price": 0.0,
+  "stop_loss": 0.0,
+  "conviction": 0.0,
+  "time_horizon_hours": 0,
+  "position_size_pct": 0.0,
+  "strategy": "scalper|event|macro|fundamental|contrarian|tail",
+  "surprise_assessment": {
+    "truth_score": 0.0,
+    "novelty_score": 0.0,
+    "priced_in_score": 0.0,
+    "reaction_gap_score": 0.0,
+    "unmoved_asset_score": 0.0,
+    "summary": ""
+  },
+  "evidence": ["...", "..."],
+  "counter_args": ["...", "..."],
+  "kill_rules": [{"condition": "...", "threshold": 0.0, "action": "close|reduce|alert"}],
+  "reasoning": "..."
+}`
+
+const researchUserCompactPrefix = `Prioritize the signal text, exact catalyst, instrument choice, and risk rails.
+Do not restate metadata that is already obvious.`
+
+var (
+	researchMaxTokens         = readStructuredIntEnv("RESEARCH_MAX_TOKENS", 1024)
+	researchThoughtTimeout    = readStructuredDurationEnv("RESEARCH_THOUGHT_TIMEOUT", 30*time.Second)
+	researchRetryTimeout      = readStructuredDurationEnv("RESEARCH_RETRY_TIMEOUT", 20*time.Second)
+	researchRetryMaxTokens    = readStructuredIntEnv("RESEARCH_RETRY_MAX_TOKENS", 384)
+	researchCompilerTimeout   = readStructuredDurationEnv("RESEARCH_COMPILER_TIMEOUT", 35*time.Second)
+	researchCompilerMaxTokens = readStructuredIntEnv("RESEARCH_COMPILER_MAX_TOKENS", 900)
+)
 
 const researchThoughtPrefix = `Do not restate the request, schema, or instructions.
 Think if useful, but keep it concise.
@@ -149,73 +198,39 @@ JSON schema:
   "reasoning": "..."
 }`
 
+type Investigation struct {
+	Thesis     *model.Thesis
+	Accepted   bool
+	Reason     string
+	Conviction float64
+}
+
 // Investigate takes an opportunity and produces a thesis
 func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, sig signal.Signal, deskID string) (*model.Thesis, error) {
-	prompt := fmt.Sprintf("Opportunity (score: %.0f, urgency: %.2f, category: %s):\n\nInstruments: %v\nDirection: %s\nSignal IDs: %v",
-		opp.Score, opp.Urgency, opp.Category,
-		instrumentNames(opp.Instruments), opp.Direction, opp.SignalIDs,
-	)
-	if opp.EvidenceMeta != nil {
-		prompt += fmt.Sprintf(
-			"\n\nEvidence quality:\n  Source trust: %.2f\n  Source tier/type: %s / %s\n  Source lineage: %s / %s\n  Original language: %s\n  Origin region: %s\n  Translation: provider=%s confidence=%.2f\n  Historical lead time: avg %.2fh across %d narratives (score %.2f)\n  Freshness: %s (age %.1fh, window %.1fh)\n  Distinct sources: %d\n  Distinct owner groups: %d\n  Distinct languages: %d\n  Has primary source: %t\n  Contradictions: %d (%s)\n  Evidence score: %.2f\nUse this to calibrate conviction. Contradictory or weak evidence should reduce confidence materially.",
-			opp.EvidenceMeta.SourceTrust,
-			opp.EvidenceMeta.SourceTier,
-			opp.EvidenceMeta.SourceType,
-			opp.EvidenceMeta.SourceDomain,
-			opp.EvidenceMeta.SourceOwnerGroup,
-			opp.EvidenceMeta.OriginalLanguage,
-			opp.EvidenceMeta.OriginRegion,
-			opp.EvidenceMeta.TranslationProvider,
-			opp.EvidenceMeta.TranslationConfidence,
-			opp.EvidenceMeta.LeadTimeAverageHours,
-			opp.EvidenceMeta.LeadTimeObservations,
-			opp.EvidenceMeta.LeadTimeScore,
-			opp.EvidenceMeta.FreshnessStatus,
-			opp.EvidenceMeta.FreshnessAgeHours,
-			opp.EvidenceMeta.FreshnessWindowHours,
-			opp.EvidenceMeta.DistinctSources,
-			opp.EvidenceMeta.DistinctOwnerGroups,
-			opp.EvidenceMeta.DistinctLanguages,
-			opp.EvidenceMeta.HasPrimarySource,
-			opp.EvidenceMeta.ContradictionCount,
-			opp.EvidenceMeta.ContradictionSeverity,
-			opp.EvidenceMeta.EvidenceScore,
-		)
-		if vector := opp.EvidenceMeta.ConfidenceVector; vector != nil && vector.Present() {
-			prompt += fmt.Sprintf(
-				"\n  Confidence vector: fact=%.2f novelty=%.2f market_map=%.2f expression=%.2f execution=%.2f competence=%.2f",
-				vector.FactConfidence,
-				vector.NoveltyConfidence,
-				vector.MarketMappingConfidence,
-				vector.ExpressionConfidence,
-				vector.ExecutionConfidence,
-				vector.CompetenceConfidence,
-			)
-		}
+	result, err := d.InvestigateDetailed(ctx, opp, sig, deskID)
+	if err != nil {
+		return nil, err
 	}
+	return result.Thesis, nil
+}
 
-	if opp.CascadeInfo != nil {
-		prompt += fmt.Sprintf("\n\nCascade detected:\n  Source domain: %s\n  Target gaps: %v\n  Confidence: %.2f",
-			opp.CascadeInfo.SourceDomain, opp.CascadeInfo.TargetGaps, opp.CascadeInfo.Confidence)
-	}
-
+func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, sig signal.Signal, deskID string) (Investigation, error) {
 	var marketCtx *model.MarketContext
 	if d.marketContext != nil {
 		marketCtx = d.marketContext.BuildOpportunityContext(opp, sig)
-		if marketSummary := marketcontext.FormatForPrompt(marketCtx); marketSummary != "" {
-			prompt += "\n\nMarket context:\n" + marketSummary + "\nUse this snapshot to judge whether the setup is genuinely surprising or already priced in."
-		}
 	}
+	prompt := d.buildResearchPrompt(opp, sig, marketCtx, false)
+	compactPrompt := d.buildResearchPrompt(opp, sig, marketCtx, true)
 
-	resp, err := d.askResearchWithFallbackMode(ctx, prompt)
+	resp, err := d.askResearchWithFallbackMode(ctx, prompt, compactPrompt)
 	if err != nil {
-		return nil, fmt.Errorf("research LLM error: %w", err)
+		return Investigation{Reason: "llm_error"}, fmt.Errorf("research LLM error: %w", err)
 	}
 
 	cleaned, err := extractStructuredJSON(resp)
 	if err != nil {
 		if d.compilerModel != "" {
-			if compiled, compileErr := d.compileResearchJSON(ctx, prompt, resp); compileErr == nil {
+			if compiled, compileErr := d.compileResearchJSON(ctx, compactPrompt, resp); compileErr == nil {
 				if compiledJSON, extractErr := extractStructuredJSON(compiled); extractErr == nil {
 					cleaned = compiledJSON
 					err = nil
@@ -241,16 +256,16 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, sig sign
 			"response_len", len(resp),
 			"response_excerpt", truncateForLog(resp, 320),
 		)
-		return nil, fmt.Errorf("research JSON extraction: %w", err)
+		return Investigation{Reason: "json_extraction"}, fmt.Errorf("research JSON extraction: %w", err)
 	}
 
 	if err := llm.ValidateJSONFields(cleaned, []string{"instrument", "direction", "entry_price", "conviction", "strategy"}); err != nil {
-		return nil, fmt.Errorf("research response validation: %w", err)
+		return Investigation{Reason: "validation"}, fmt.Errorf("research response validation: %w", err)
 	}
 
 	var result researchResult
 	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
-		return nil, fmt.Errorf("research parse error: %w", err)
+		return Investigation{Reason: "parse_error"}, fmt.Errorf("research parse error: %w", err)
 	}
 
 	// Build thesis
@@ -282,6 +297,9 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, sig sign
 	}
 	if primary.Symbol == "" && len(legs) > 0 {
 		primary = legs[0].Instrument
+	}
+	if primary.Symbol == "" {
+		return Investigation{Reason: "no_instrument"}, fmt.Errorf("research validation: missing trade instrument")
 	}
 
 	thesis := &model.Thesis{
@@ -320,16 +338,80 @@ func (d *Desk) Investigate(ctx context.Context, opp *model.Opportunity, sig sign
 		"strategy", thesis.Strategy,
 	)
 
-	return thesis, nil
+	investigation := Investigation{
+		Thesis:     thesis,
+		Accepted:   thesis.Conviction >= d.minConviction,
+		Conviction: thesis.Conviction,
+	}
+	if !investigation.Accepted {
+		investigation.Reason = "conviction_below_threshold"
+	}
+	return investigation, nil
 }
 
-func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt string) (string, error) {
-	systemPrompt := researchPrompt
+func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactPrompt string) (string, error) {
 	if d.responseMode == structuredResponseModeThought {
-		systemPrompt = addTerminalJSONContract(researchThoughtPrefix + "\n\n" + researchPrompt)
-		return d.llm.AskWithLimit(ctx, llm.TierAnalysis, systemPrompt, prompt, researchMaxTokens, 0.2)
+		thoughtPrompt := addTerminalJSONContract(researchThoughtPrefix + "\n\n" + researchPrompt)
+		primaryCtx, cancel := withStructuredTimeout(ctx, researchThoughtTimeout)
+		resp, err := d.llm.AskWithLimit(primaryCtx, llm.TierAnalysis, thoughtPrompt, prompt, researchMaxTokens, 0.2)
+		cancel()
+		if err != nil {
+			retryCtx, retryCancel := withStructuredTimeout(ctx, researchRetryTimeout)
+			retryResp, retryErr := d.retryStructuredJSON(retryCtx, compactPrompt)
+			retryCancel()
+			if retryErr == nil {
+				if _, retryParseErr := extractStructuredJSON(retryResp); retryParseErr == nil {
+					d.log.Info("research structured retry recovered primary LLM failure",
+						"model", d.retryModel,
+						"error", err,
+					)
+					return retryResp, nil
+				}
+			}
+			return "", err
+		}
+		if _, err := extractStructuredJSON(resp); err == nil {
+			return resp, nil
+		}
+
+		retryCtx, retryCancel := withStructuredTimeout(ctx, researchRetryTimeout)
+		retryResp, retryErr := d.retryStructuredJSON(retryCtx, compactPrompt)
+		retryCancel()
+		if retryErr == nil {
+			if _, err := extractStructuredJSON(retryResp); err != nil {
+				return resp, nil
+			}
+			d.log.Info("research structured retry recovered terminal JSON miss",
+				"model", d.selectedModel,
+			)
+			return retryResp, nil
+		}
+		return resp, nil
 	}
-	return d.llm.AskJSONWithLimit(ctx, llm.TierAnalysis, systemPrompt, prompt, researchMaxTokens, 0.2)
+	return d.llm.AskJSONWithLimit(ctx, llm.TierAnalysis, researchPrompt, prompt, researchMaxTokens, 0.2)
+}
+
+func (d *Desk) retryStructuredJSON(ctx context.Context, prompt string) (string, error) {
+	retryTier := llm.TierAnalysis
+	if strings.TrimSpace(d.retryModel) != "" && strings.TrimSpace(d.retryModel) != strings.TrimSpace(d.selectedModel) {
+		retryTier = llm.TierSpeed
+	}
+	req := llm.Request{
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: researchFastPrompt},
+			{Role: llm.RoleUser, Content: prompt},
+		},
+		Model:       d.retryModel,
+		Tier:        retryTier,
+		MaxTokens:   minResearchRetryTokens(researchMaxTokens),
+		Temperature: 0.1,
+		JSONMode:    true,
+	}
+	resp, err := d.llm.Complete(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
 }
 
 func (d *Desk) compileResearchJSON(ctx context.Context, originalPrompt, rawResponse string) (string, error) {
@@ -339,7 +421,7 @@ func (d *Desk) compileResearchJSON(ctx context.Context, originalPrompt, rawRespo
 	req := llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: researchCompilerPrompt},
-			{Role: llm.RoleUser, Content: fmt.Sprintf("Original research task:\n%s\n\nResearch reasoning transcript:\n%s", originalPrompt, truncateForCompiler(rawResponse, 2400))},
+			{Role: llm.RoleUser, Content: fmt.Sprintf("Original research task:\n%s\n\nResearch reasoning transcript:\n%s", originalPrompt, truncateForCompiler(rawResponse, 1200))},
 		},
 		Model:       d.compilerModel,
 		Tier:        llm.TierSpeed,
@@ -639,4 +721,194 @@ func truncateForLog(value string, max int) string {
 		return value[:max]
 	}
 	return value[:max-3] + "..."
+}
+
+func (d *Desk) buildResearchPrompt(opp *model.Opportunity, sig signal.Signal, marketCtx *model.MarketContext, compact bool) string {
+	var sb strings.Builder
+	if compact {
+		sb.WriteString(researchUserCompactPrefix + "\n\n")
+	}
+	sb.WriteString(fmt.Sprintf("Opportunity (score: %.0f, urgency: %.2f, category: %s):\n", opp.Score, opp.Urgency, opp.Category))
+	sb.WriteString(fmt.Sprintf("Instruments: %v\n", instrumentNames(opp.Instruments)))
+	sb.WriteString(fmt.Sprintf("Direction: %s\n", opp.Direction))
+	sb.WriteString(fmt.Sprintf("Signal IDs: %v\n", opp.SignalIDs))
+
+	sb.WriteString("\nSignal snapshot:\n")
+	sb.WriteString(formatSignalForResearch(sig, compact))
+
+	if opp.EvidenceMeta != nil {
+		sb.WriteString("\nEvidence quality:\n")
+		sb.WriteString(formatEvidenceMetadataForResearch(opp.EvidenceMeta, compact))
+		sb.WriteString("\nUse this to calibrate conviction. Contradictory or weak evidence should reduce confidence materially.")
+	}
+
+	if opp.CascadeInfo != nil {
+		sb.WriteString(fmt.Sprintf("\n\nCascade detected:\n  Source domain: %s\n  Target gaps: %v\n  Confidence: %.2f",
+			opp.CascadeInfo.SourceDomain, opp.CascadeInfo.TargetGaps, opp.CascadeInfo.Confidence))
+	}
+
+	if marketSummary := marketcontext.FormatForPrompt(marketCtx); marketSummary != "" {
+		sb.WriteString("\n\nMarket context:\n" + marketSummary + "\nUse this snapshot to judge whether the setup is genuinely surprising or already priced in.")
+	}
+
+	return sb.String()
+}
+
+func formatSignalForResearch(sig signal.Signal, compact bool) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("  Source: %s\n", sig.Source))
+	sb.WriteString(fmt.Sprintf("  Type/category: %s / %s\n", sig.Type, sig.Category))
+	if sig.Direction != "" {
+		sb.WriteString(fmt.Sprintf("  Signal direction: %s\n", sig.Direction))
+	}
+	if len(sig.Entities) > 0 {
+		limit := 8
+		if compact {
+			limit = 4
+		}
+		sb.WriteString(fmt.Sprintf("  Entities: %s\n", strings.Join(sampleEntities(sig.Entities, limit), ", ")))
+	}
+	if len(sig.Languages) > 0 {
+		sb.WriteString(fmt.Sprintf("  Original language: %s\n", strings.ToLower(sig.Languages[0])))
+	}
+	if len(sig.CorroboratingSources) > 0 {
+		limit := 6
+		if compact {
+			limit = 3
+		}
+		sb.WriteString(fmt.Sprintf("  Corroborating sources: %s\n", strings.Join(sampleStrings(sig.CorroboratingSources, limit), ", ")))
+	}
+	if len(sig.CorroboratingLanguages) > 0 {
+		limit := 6
+		if compact {
+			limit = 3
+		}
+		sb.WriteString(fmt.Sprintf("  Corroborating languages: %s\n", strings.Join(sampleStrings(sig.CorroboratingLanguages, limit), ", ")))
+	}
+	contentLimit := 900
+	if compact {
+		contentLimit = 420
+	}
+	content := signalContent(sig)
+	if content != "" {
+		sb.WriteString(fmt.Sprintf("  Content: %s\n", truncateForPrompt(content, contentLimit)))
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func formatEvidenceMetadataForResearch(meta *evidence.Metadata, compact bool) string {
+	if meta == nil {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("  Source trust: %.2f\n", meta.SourceTrust))
+	sb.WriteString(fmt.Sprintf("  Source tier/type: %s / %s\n", meta.SourceTier, meta.SourceType))
+	if !compact {
+		sb.WriteString(fmt.Sprintf("  Source lineage: %s / %s\n", meta.SourceDomain, meta.SourceOwnerGroup))
+	}
+	if meta.OriginalLanguage != "" || meta.OriginRegion != "" {
+		sb.WriteString(fmt.Sprintf("  Original language / region: %s / %s\n", meta.OriginalLanguage, meta.OriginRegion))
+	}
+	if meta.TranslationProvider != "" || meta.TranslationConfidence > 0 {
+		sb.WriteString(fmt.Sprintf("  Translation: provider=%s confidence=%.2f\n", meta.TranslationProvider, meta.TranslationConfidence))
+	}
+	if meta.LeadTimeObservations > 0 {
+		sb.WriteString(fmt.Sprintf("  Historical lead time: avg %.2fh across %d narratives (score %.2f)\n",
+			meta.LeadTimeAverageHours, meta.LeadTimeObservations, meta.LeadTimeScore))
+	}
+	sb.WriteString(fmt.Sprintf("  Freshness: %s (age %.1fh, window %.1fh)\n", meta.FreshnessStatus, meta.FreshnessAgeHours, meta.FreshnessWindowHours))
+	sb.WriteString(fmt.Sprintf("  Distinct sources / owner groups / languages: %d / %d / %d\n",
+		meta.DistinctSources, meta.DistinctOwnerGroups, meta.DistinctLanguages))
+	sb.WriteString(fmt.Sprintf("  Has primary source: %t\n", meta.HasPrimarySource))
+	sb.WriteString(fmt.Sprintf("  Contradictions: %d (%s)\n", meta.ContradictionCount, meta.ContradictionSeverity))
+	sb.WriteString(fmt.Sprintf("  Evidence score: %.2f\n", meta.EvidenceScore))
+	if vector := meta.ConfidenceVector; vector != nil && vector.Present() {
+		sb.WriteString(fmt.Sprintf(
+			"  Confidence vector: fact=%.2f novelty=%.2f market_map=%.2f expression=%.2f execution=%.2f competence=%.2f",
+			vector.FactConfidence,
+			vector.NoveltyConfidence,
+			vector.MarketMappingConfidence,
+			vector.ExpressionConfidence,
+			vector.ExecutionConfidence,
+			vector.CompetenceConfidence,
+		))
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func signalContent(sig signal.Signal) string {
+	switch {
+	case strings.TrimSpace(sig.Translated) != "":
+		return strings.TrimSpace(sig.Translated)
+	case strings.TrimSpace(sig.OriginalText) != "":
+		return strings.TrimSpace(sig.OriginalText)
+	case len(sig.Raw) == 0:
+		return ""
+	}
+
+	var decoded string
+	if err := json.Unmarshal(sig.Raw, &decoded); err == nil {
+		return strings.TrimSpace(decoded)
+	}
+	return strings.TrimSpace(string(sig.Raw))
+}
+
+func sampleEntities(entities []signal.Entity, limit int) []string {
+	if len(entities) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(entities) > limit {
+		entities = entities[:limit]
+	}
+	values := make([]string, 0, len(entities))
+	for _, entity := range entities {
+		label := strings.TrimSpace(entity.Name)
+		if label == "" {
+			continue
+		}
+		if kind := strings.TrimSpace(entity.Type); kind != "" {
+			label += ":" + kind
+		}
+		values = append(values, label)
+	}
+	return values
+}
+
+func sampleStrings(values []string, limit int) []string {
+	if len(values) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	sampled := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		sampled = append(sampled, value)
+	}
+	return sampled
+}
+
+func truncateForPrompt(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	if max <= 3 {
+		return value[:max]
+	}
+	return value[:max-3] + "..."
+}
+
+func minResearchRetryTokens(maxTokens int) int {
+	if researchRetryMaxTokens > 0 && researchRetryMaxTokens < maxTokens {
+		return researchRetryMaxTokens
+	}
+	if maxTokens > 384 {
+		return 384
+	}
+	return maxTokens
 }

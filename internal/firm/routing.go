@@ -6,39 +6,6 @@ import (
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
-var categoryDomainRules = map[string][]string{
-	"geopolitical": {"geopolitical", "tail"},
-	"macro":        {"macro", "tail"},
-	"corporate":    {"corporate", "sector"},
-	"flows":        {"flows", "volatility"},
-	"tail":         {"tail", "volatility", "macro", "geopolitical"},
-	"volatility":   {"volatility", "tail"},
-	"sector":       {"sector", "corporate"},
-	"market":       {"systematic", "volatility", "sector"},
-}
-
-var signalTypeDomainRules = map[signal.Type][]string{
-	signal.TypeFiling:      {"corporate"},
-	signal.TypeEconomic:    {"macro", "tail"},
-	signal.TypePrice:       {"systematic", "volatility", "sector"},
-	signal.TypeSocial:      {"flows", "volatility"},
-	signal.TypeFlow:        {"flows", "volatility"},
-	signal.TypeAlternative: {"macro", "sector"},
-}
-
-var sourceTypeDomainRules = map[string][]string{
-	"social":      {"flows", "volatility"},
-	"market":      {"systematic", "volatility"},
-	"alternative": {"sector", "systematic"},
-}
-
-var ownerGroupDomainRules = map[string][]string{
-	"federal_reserve":     {"macro", "tail", "systematic"},
-	"sec":                 {"corporate", "sector"},
-	"earnings_provider":   {"corporate", "sector"},
-	"interactive_brokers": {"systematic", "volatility"},
-}
-
 // domainShouldReviewSignal applies a deterministic pre-filter before the LLM
 // scanner so irrelevant desks do not burn inference budget on every signal.
 func domainShouldReviewSignal(domain string, sig signal.Signal) bool {
@@ -68,6 +35,7 @@ func relevantDomainsForSignal(sig signal.Signal) []string {
 // RelevantDomainsForSignal returns the desk domains that should see a signal
 // before any LLM work is spent on it.
 func RelevantDomainsForSignal(sig signal.Signal) []string {
+	policy := activeRoutingPolicy()
 	set := newDomainSet()
 
 	if targets := internalTargetDomains(sig); len(targets) > 0 {
@@ -77,17 +45,18 @@ func RelevantDomainsForSignal(sig signal.Signal) []string {
 
 	set.add(sourceDomainsForSignal(sig)...)
 
-	set.add(categoryDomainRules[strings.TrimSpace(strings.ToLower(sig.Category))]...)
-	set.add(signalTypeDomainRules[sig.Type]...)
+	set.add(policy.CategoryDomainRules[strings.TrimSpace(strings.ToLower(sig.Category))]...)
+	set.add(policy.SignalTypeDomainRules[strings.TrimSpace(strings.ToLower(string(sig.Type)))]...)
 
 	if len(set.values()) == 0 {
-		set.add("macro", "systematic")
+		set.add(policy.FallbackDomains...)
 	}
 
 	return set.values()
 }
 
 func sourceDomainsForSignal(sig signal.Signal) []string {
+	policy := activeRoutingPolicy()
 	meta := sig.EvidenceMeta
 	if meta == nil {
 		return nil
@@ -98,12 +67,12 @@ func sourceDomainsForSignal(sig signal.Signal) []string {
 	ownerGroup := strings.TrimSpace(strings.ToLower(meta.SourceOwnerGroup))
 	originRegion := strings.TrimSpace(strings.ToLower(meta.OriginRegion))
 
-	set.add(sourceTypeDomainRules[sourceType]...)
+	set.add(policy.SourceTypeDomainRules[sourceType]...)
 	if sourceType == "market" && instrumentEntityCount(sig) > 0 {
 		set.add("sector")
 	}
 
-	set.add(ownerGroupDomainRules[ownerGroup]...)
+	set.add(policy.OwnerGroupDomainRules[ownerGroup]...)
 
 	if hasEntityType(sig, "country") {
 		set.add("geopolitical", "macro", "tail")

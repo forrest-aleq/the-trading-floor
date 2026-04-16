@@ -116,18 +116,22 @@ type scannerCompilerFallbackClient struct {
 
 func (s *scannerCompilerFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
 	s.requests = append(s.requests, req)
-	switch len(s.requests) {
-	case 1:
+	if len(s.requests) == 1 {
 		return &llm.Response{
 			Content: "Thinking Process:\n1. This looks actionable but the model forgot the final block.",
 			Model:   "scanner",
 		}, nil
-	default:
+	}
+	if req.Model == "gemma-the-writer-mighty-sword-9b" {
 		return &llm.Response{
 			Content: `{"tradeable":true,"score":84,"instruments":[{"symbol":"TLT","sec_type":"STK","currency":"USD"}],"direction":"short","urgency":0.7,"category":"macro","reasoning":"rates repricing after hawkish surprise"}`,
 			Model:   "compiler",
 		}, nil
 	}
+	return &llm.Response{
+		Content: "<think>\nStill no final block.\n",
+		Model:   "scanner",
+	}, nil
 }
 
 type scannerThoughtTimeoutThenStructuredFallbackClient struct {
@@ -141,6 +145,36 @@ func (s *scannerThoughtTimeoutThenStructuredFallbackClient) Complete(_ context.C
 	}
 	return &llm.Response{
 		Content: `{"tradeable":true,"score":83,"instruments":[{"symbol":"NVDA","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.9,"category":"corporate","reasoning":"earnings beat and guidance raise with clean confirmation"}`,
+		Model:   "stub",
+	}, nil
+}
+
+type scannerThoughtParseThenStructuredFallbackClient struct {
+	requests []llm.Request
+}
+
+func (s *scannerThoughtParseThenStructuredFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if !req.JSONMode {
+		return &llm.Response{
+			Content: "<think>\nThis looks interesting but the model forgot the final block.\n",
+			Model:   "qwen",
+		}, nil
+	}
+	return &llm.Response{
+		Content: `{"tradeable":true,"score":79,"instruments":[{"symbol":"USO","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.7,"category":"macro","reasoning":"oil supply shock setup"}`,
+		Model:   "stub",
+	}, nil
+}
+
+type scannerBlankInstrumentClient struct {
+	requests []llm.Request
+}
+
+func (s *scannerBlankInstrumentClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: `{"tradeable":true,"score":84,"instruments":[{"symbol":"","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.7,"category":"macro","reasoning":"missing instrument should be rejected"}`,
 		Model:   "stub",
 	}, nil
 }
@@ -284,17 +318,20 @@ func TestEvaluateFallsBackToCompilerWhenThoughtModeMissesFinalBlock(t *testing.T
 	if !ok || opp == nil {
 		t.Fatal("expected compiler fallback to recover a structured decision")
 	}
-	if got := len(client.requests); got != 2 {
-		t.Fatalf("expected thought pass plus compiler pass, got %d requests", got)
+	if got := len(client.requests); got != 3 {
+		t.Fatalf("expected thought pass, structured retry, and compiler pass, got %d requests", got)
 	}
 	if client.requests[0].JSONMode {
 		t.Fatal("expected initial Qwen thought pass to avoid strict JSON mode")
 	}
 	if !client.requests[1].JSONMode {
+		t.Fatal("expected structured retry to force strict JSON mode")
+	}
+	if !client.requests[2].JSONMode {
 		t.Fatal("expected compiler pass to force strict JSON mode")
 	}
-	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
-		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	if client.requests[2].Model != "gemma-the-writer-mighty-sword-9b" {
+		t.Fatalf("unexpected compiler model %q", client.requests[2].Model)
 	}
 	if opp.Direction != model.Short || len(opp.Instruments) != 1 || opp.Instruments[0].Symbol != "TLT" {
 		t.Fatalf("unexpected compiler fallback opportunity: %+v", opp)
@@ -333,11 +370,40 @@ func TestEvaluateFallsBackToStructuredJSONAfterThoughtTimeouts(t *testing.T) {
 	}
 }
 
+func TestEvaluateFallsBackToStructuredJSONAfterThoughtParseFailure(t *testing.T) {
+	t.Setenv("SCANNER_MODEL", "qwen/qwen3.5-9b")
+
+	client := &scannerThoughtParseThenStructuredFallbackClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	opp, ok := engine.Evaluate(context.Background(), signal.Signal{
+		ID:         "sig-thought-parse-fail",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: "Energy ministers warn of a near-term supply disruption after regional escalation.",
+	}, "macro")
+	if !ok || opp == nil {
+		t.Fatal("expected structured fallback after parse failure to recover an opportunity")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected one thought attempt plus one structured fallback, got %d", got)
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected final scanner fallback to force structured JSON mode")
+	}
+	if opp.Instruments[0].Symbol != "USO" {
+		t.Fatalf("unexpected structured fallback opportunity: %+v", opp)
+	}
+}
+
 func TestEvaluateSkipsLowSignalSocialNoiseBeforeLLM(t *testing.T) {
 	client := &scannerStubClient{}
 	engine := NewEngine(llm.NewRouter(client, client, client), 70)
 
-	if _, ok := engine.Evaluate(context.Background(), signal.Signal{
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
 		ID:         "sig-social",
 		Source:     "stocktwits",
 		Type:       signal.TypeSocial,
@@ -346,8 +412,12 @@ func TestEvaluateSkipsLowSignalSocialNoiseBeforeLLM(t *testing.T) {
 		Urgency:    0.4,
 		Entities:   []signal.Entity{{Name: "AAPL", Type: "instrument"}},
 		Translated: "StockTwits mentions AAPL trending higher",
-	}, "flows"); ok {
+	}, "flows")
+	if result.Accepted {
 		t.Fatal("expected low-signal social chatter to be rejected without LLM")
+	}
+	if result.Reason != "prefilter:low_signal_social_noise" {
+		t.Fatalf("unexpected reject reason %q", result.Reason)
 	}
 	if len(client.requests) != 0 {
 		t.Fatalf("expected no LLM request for deterministic social reject, got %d", len(client.requests))
@@ -358,7 +428,7 @@ func TestEvaluateSkipsLowIntegrityEvidenceBeforeLLM(t *testing.T) {
 	client := &scannerStubClient{}
 	engine := NewEngine(llm.NewRouter(client, client, client), 70)
 
-	if _, ok := engine.Evaluate(context.Background(), signal.Signal{
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
 		ID:         "sig-evidence",
 		Source:     "stocktwits",
 		Type:       signal.TypeSocial,
@@ -372,11 +442,84 @@ func TestEvaluateSkipsLowIntegrityEvidenceBeforeLLM(t *testing.T) {
 			FreshnessStatus: "fresh",
 			EvidenceScore:   0.18,
 		},
-	}, "flows"); ok {
+	}, "flows")
+	if result.Accepted {
 		t.Fatal("expected low-integrity evidence to be rejected without LLM")
+	}
+	if !strings.HasPrefix(result.Reason, "prefilter:") {
+		t.Fatalf("expected prefilter reject reason, got %q", result.Reason)
 	}
 	if len(client.requests) != 0 {
 		t.Fatalf("expected no LLM request for evidence-gated reject, got %d", len(client.requests))
+	}
+}
+
+func TestEvaluateDetailedReportsScoreThresholdReject(t *testing.T) {
+	client := &scannerStubClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 90)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:         "sig-threshold",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.9,
+		Translated: "Federal Reserve speech on inflation and labor conditions.",
+	}, "macro")
+	if result.Accepted {
+		t.Fatal("expected threshold reject")
+	}
+	if result.Reason != "score_below_threshold" {
+		t.Fatalf("unexpected reject reason %q", result.Reason)
+	}
+	if result.Score != 85 {
+		t.Fatalf("expected score to be surfaced, got %.2f", result.Score)
+	}
+}
+
+func TestEvaluateDetailedUsesReplayEvaluationTimeForStaleness(t *testing.T) {
+	client := &scannerStubClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+	ts := time.Now().Add(-72 * time.Hour)
+
+	ctx := WithEvaluationTime(context.Background(), ts)
+	result := engine.EvaluateDetailed(ctx, signal.Signal{
+		ID:         "sig-replay-fresh",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  ts,
+		Urgency:    0.9,
+		Translated: "Federal Reserve speech on inflation and labor conditions.",
+	}, "macro")
+	if !result.Accepted || result.Opportunity == nil {
+		t.Fatalf("expected replay-time evaluation to bypass stale reject, got %+v", result)
+	}
+}
+
+func TestEvaluateDetailedRejectsBlankInstruments(t *testing.T) {
+	client := &scannerStubClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	client.requests = nil
+	client2 := &scannerBlankInstrumentClient{}
+	engine = NewEngine(llm.NewRouter(client2, client2, client2), 70)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:         "sig-blank-inst",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.9,
+		Translated: "Central bank communication shifted meaningfully toward renewed tightening.",
+	}, "macro")
+	if result.Accepted {
+		t.Fatalf("expected blank instrument response to be rejected, got %+v", result)
+	}
+	if result.Reason != "no_instruments" {
+		t.Fatalf("unexpected reject reason %q", result.Reason)
 	}
 }
 

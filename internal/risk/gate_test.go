@@ -2,6 +2,7 @@ package risk
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/hnic/trading-floor/pkg/evidence"
@@ -26,6 +27,50 @@ func TestLoadTokenSecretGeneratesEphemeralSecretWhenUnset(t *testing.T) {
 	secret := loadTokenSecret(slog.Default())
 	if len(secret) < 32 {
 		t.Fatalf("expected generated secret to be at least 32 bytes, got %d", len(secret))
+	}
+}
+
+func TestParseLimitsLoadsEmbeddedShape(t *testing.T) {
+	limits, err := parseLimits([]byte(`{
+		"max_daily_loss_pct": 2.5,
+		"max_single_position_pct": 12,
+		"max_correlated_positions": 4,
+		"max_open_positions": 8,
+		"capital_per_desk": 30000,
+		"max_position_size_pct": 8,
+		"min_conviction_score": 0.72,
+		"total_capital": 2000000,
+		"max_factor_exposure_pct": 18,
+		"max_drawdown_pct": 9,
+		"kill_switch_drawdown_pct": 14,
+		"max_gross_exposure_pct": 160,
+		"max_net_exposure_pct": 90,
+		"max_cash_deploy_pct": 70
+	}`))
+	if err != nil {
+		t.Fatalf("parse limits: %v", err)
+	}
+	if limits.MinConvictionScore != 0.72 || limits.CapitalPerDesk != 30000 {
+		t.Fatalf("unexpected limits parse result: %+v", limits)
+	}
+}
+
+func TestParseLimitsRejectsInvalidValues(t *testing.T) {
+	_, err := parseLimits([]byte(`{
+		"max_daily_loss_pct": 0,
+		"max_single_position_pct": 12,
+		"max_open_positions": 8,
+		"capital_per_desk": 30000,
+		"min_conviction_score": 1.2,
+		"total_capital": 2000000,
+		"max_gross_exposure_pct": 160,
+		"max_cash_deploy_pct": 70
+	}`))
+	if err == nil {
+		t.Fatal("expected invalid limits to fail")
+	}
+	if !strings.Contains(err.Error(), "max_daily_loss_pct") {
+		t.Fatalf("unexpected validation error: %v", err)
 	}
 }
 

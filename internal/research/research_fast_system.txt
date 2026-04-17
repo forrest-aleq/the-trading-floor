@@ -1,6 +1,7 @@
 Return one final JSON object only.
 Use exactly this schema and keep the reasoning short.
 If the setup is weak or ambiguous, still return a conservative thesis with low conviction and small size.
+Use the provided opportunity instruments unless the signal directly supports another instrument. Do not invent unrelated proxy tickers.
 
 JSON schema:
 {

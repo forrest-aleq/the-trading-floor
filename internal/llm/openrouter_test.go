@@ -125,35 +125,46 @@ func TestMakeLimiterUsesConfiguredCapacity(t *testing.T) {
 	}
 }
 
-func TestApplyLocalQwenJSONControlsAddsNoThinkForLocalQwenJSON(t *testing.T) {
+func TestApplyLocalJSONControlsAddsNoThinkForLocalQwenJSON(t *testing.T) {
 	messages := []orMessage{
 		{Role: string(RoleSystem), Content: "Return JSON only."},
 		{Role: string(RoleUser), Content: "Scan this signal."},
 	}
 
-	got := applyLocalQwenJSONControls("http://127.0.0.1:1234/v1", "qwen/qwen3-8b", true, messages)
+	got := applyLocalJSONControls("http://127.0.0.1:1234/v1", "qwen/qwen3-8b", true, messages)
 	if got[0].Content != "/no_think\nReturn JSON only." {
 		t.Fatalf("unexpected system message %q", got[0].Content)
 	}
 }
 
-func TestApplyLocalQwenJSONControlsLeavesRemoteModelsUntouched(t *testing.T) {
+func TestApplyLocalJSONControlsLeavesRemoteModelsUntouched(t *testing.T) {
 	messages := []orMessage{
 		{Role: string(RoleSystem), Content: "Return JSON only."},
 	}
 
-	got := applyLocalQwenJSONControls("https://openrouter.ai/api/v1", "qwen/qwen3-8b", true, messages)
+	got := applyLocalJSONControls("https://openrouter.ai/api/v1", "qwen/qwen3-8b", true, messages)
 	if got[0].Content != "Return JSON only." {
 		t.Fatalf("expected remote model to be unchanged, got %q", got[0].Content)
 	}
 }
 
-func TestApplyLocalQwenJSONControlsHandlesOllamaQwenModels(t *testing.T) {
+func TestApplyLocalJSONControlsHandlesOllamaQwenModels(t *testing.T) {
 	messages := []orMessage{
 		{Role: string(RoleSystem), Content: "Return JSON only."},
 	}
 
-	got := applyLocalQwenJSONControls("http://127.0.0.1:11434/v1", "qwen3:8b", true, messages)
+	got := applyLocalJSONControls("http://127.0.0.1:11434/v1", "qwen3:8b", true, messages)
+	if got[0].Content != "/no_think\nReturn JSON only." {
+		t.Fatalf("unexpected system message %q", got[0].Content)
+	}
+}
+
+func TestApplyLocalJSONControlsHandlesNonQwenLocalModels(t *testing.T) {
+	messages := []orMessage{
+		{Role: string(RoleSystem), Content: "Return JSON only."},
+	}
+
+	got := applyLocalJSONControls("http://127.0.0.1:11434/v1", "glm-4.7-flash:latest", true, messages)
 	if got[0].Content != "/no_think\nReturn JSON only." {
 		t.Fatalf("unexpected system message %q", got[0].Content)
 	}

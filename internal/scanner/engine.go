@@ -27,6 +27,7 @@ type Engine struct {
 	llm                  *llm.Router
 	minScore             float64 // Minimum score to pass (0-100)
 	selectedModel        string
+	fallbackModels       []string
 	responseMode         scannerResponseMode
 	compilerModel        string
 	structuredPrompt     string
@@ -48,6 +49,7 @@ type Engine struct {
 type cachedEvaluation struct {
 	evaluation Evaluation
 	cachedAt   time.Time
+	ttl        time.Duration
 }
 
 type Evaluation struct {
@@ -72,6 +74,7 @@ var (
 	scannerStaleSignalAge         = readDurationEnv("SCANNER_STALE_SIGNAL_AGE", 6*time.Hour)
 	scannerLLMCooldown            = readDurationEnv("SCANNER_LLM_UNAVAILABLE_COOLDOWN", 20*time.Second)
 	scannerEvalCacheTTL           = readDurationEnv("SCANNER_EVAL_CACHE_TTL", 10*time.Minute)
+	scannerErrorCacheTTL          = readDurationEnv("SCANNER_ERROR_CACHE_TTL", 30*time.Second)
 )
 
 func ReloadRuntimeConfig() {
@@ -88,6 +91,7 @@ func ReloadRuntimeConfig() {
 	scannerStaleSignalAge = readDurationEnv("SCANNER_STALE_SIGNAL_AGE", 6*time.Hour)
 	scannerLLMCooldown = readDurationEnv("SCANNER_LLM_UNAVAILABLE_COOLDOWN", 20*time.Second)
 	scannerEvalCacheTTL = readDurationEnv("SCANNER_EVAL_CACHE_TTL", 10*time.Minute)
+	scannerErrorCacheTTL = readDurationEnv("SCANNER_ERROR_CACHE_TTL", 30*time.Second)
 }
 
 func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
@@ -101,6 +105,7 @@ func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
 		llm:                  llmRouter,
 		minScore:             minScore,
 		selectedModel:        selectedModel,
+		fallbackModels:       scannerFallbackModels(selectedModel),
 		responseMode:         detectScannerResponseMode(selectedModel),
 		compilerModel:        strings.TrimSpace(os.Getenv("SCANNER_COMPILER_MODEL")),
 		structuredPrompt:     policy.structuredPrompt,
@@ -202,6 +207,21 @@ func (e *Engine) evaluateDetailedUncached(ctx context.Context, sig signal.Signal
 			e.clearLLMCooldown()
 			break
 		}
+		if isScannerTimeoutError(err) {
+			if fallbackResp, fallbackModel, fallbackErr := e.retryFastModelFallback(ctx, requestCfg.systemPrompt, candidate.content, candidate.maxTokens, 0.0, requestCfg.jsonMode); fallbackErr == nil {
+				e.log.Info("scanner fast-model fallback recovered decision",
+					"signal_id", sig.ID,
+					"fallback_model", fallbackModel,
+					"prompt_chars", len(candidate.content),
+					"max_tokens", candidate.maxTokens,
+				)
+				resp = fallbackResp
+				usedPrompt = candidate.content
+				e.clearLLMCooldown()
+				err = nil
+				break
+			}
+		}
 		if isUnavailableLLMError(err) {
 			e.tripLLMCooldown(time.Now().UTC(), err)
 		}
@@ -298,6 +318,16 @@ func (e *Engine) evaluateDetailedUncached(ctx context.Context, sig signal.Signal
 				"compiler_model", e.compilerModel,
 				"error", compileErr,
 			)
+		}
+	}
+	if err != nil {
+		if recovered, ok := recoverConservativeThoughtReject(resp, true); ok {
+			e.log.Info("scanner defaulted malformed thought trace to reject",
+				"signal_id", sig.ID,
+				"reason", recovered.Reasoning,
+			)
+			result = recovered
+			err = nil
 		}
 	}
 	if err != nil {
@@ -411,7 +441,7 @@ func (e *Engine) evaluationCacheKey(sig signal.Signal, domain string) string {
 }
 
 func (e *Engine) lookupCachedEvaluation(key string, now time.Time) (Evaluation, bool) {
-	if key == "" || e.cacheTTL <= 0 {
+	if key == "" {
 		return Evaluation{}, false
 	}
 	e.cacheMu.RLock()
@@ -420,7 +450,14 @@ func (e *Engine) lookupCachedEvaluation(key string, now time.Time) (Evaluation, 
 	if !ok {
 		return Evaluation{}, false
 	}
-	if now.Sub(cached.cachedAt) > e.cacheTTL {
+	ttl := cached.ttl
+	if ttl <= 0 {
+		ttl = e.cacheTTL
+	}
+	if ttl <= 0 {
+		return Evaluation{}, false
+	}
+	if now.Sub(cached.cachedAt) > ttl {
 		e.cacheMu.Lock()
 		delete(e.cache, key)
 		e.cacheMu.Unlock()
@@ -430,14 +467,19 @@ func (e *Engine) lookupCachedEvaluation(key string, now time.Time) (Evaluation, 
 }
 
 func (e *Engine) storeCachedEvaluation(key string, evaluation Evaluation, now time.Time) {
-	if key == "" || e.cacheTTL <= 0 {
+	if key == "" {
 		return
 	}
-	if strings.TrimSpace(evaluation.Reason) == "llm_error" {
+	ttl := e.cacheTTL
+	switch strings.TrimSpace(evaluation.Reason) {
+	case "llm_error", "parse_error":
+		ttl = scannerErrorCacheTTL
+	}
+	if ttl <= 0 {
 		return
 	}
 	e.cacheMu.Lock()
-	e.cache[key] = cachedEvaluation{evaluation: evaluation, cachedAt: now}
+	e.cache[key] = cachedEvaluation{evaluation: evaluation, cachedAt: now, ttl: ttl}
 	e.cacheMu.Unlock()
 }
 
@@ -486,12 +528,16 @@ func (e *Engine) retryStructuredFallback(ctx context.Context, domain string, sig
 }
 
 func (e *Engine) askScannerWithLimit(ctx context.Context, system, prompt string, maxTokens int, temperature float64, jsonMode bool) (string, error) {
+	return e.askScannerModelWithLimit(ctx, e.selectedModel, system, prompt, maxTokens, temperature, jsonMode)
+}
+
+func (e *Engine) askScannerModelWithLimit(ctx context.Context, model, system, prompt string, maxTokens int, temperature float64, jsonMode bool) (string, error) {
 	req := llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: system},
 			{Role: llm.RoleUser, Content: prompt},
 		},
-		Model:       e.selectedModel,
+		Model:       model,
 		Tier:        llm.TierSpeed,
 		MaxTokens:   maxTokens,
 		Temperature: temperature,
@@ -502,6 +548,18 @@ func (e *Engine) askScannerWithLimit(ctx context.Context, system, prompt string,
 		return "", err
 	}
 	return resp.Content, nil
+}
+
+func (e *Engine) retryFastModelFallback(ctx context.Context, system, prompt string, maxTokens int, temperature float64, jsonMode bool) (string, string, error) {
+	for _, model := range e.fallbackModels {
+		reqCtx, cancel := context.WithTimeout(ctx, scannerRequestTimeout)
+		resp, err := e.askScannerModelWithLimit(reqCtx, model, system, prompt, maxTokens, temperature, jsonMode)
+		cancel()
+		if err == nil {
+			return resp, model, nil
+		}
+	}
+	return "", "", fmt.Errorf("no fast-model fallback succeeded")
 }
 
 func (e *Engine) compileScannerDecision(ctx context.Context, signalPrompt, rawResponse string) (string, error) {
@@ -560,7 +618,7 @@ func (e *Engine) requestConfig() scannerRequestConfig {
 		maxTokens:               scannerMaxTokens,
 		compactMaxTokens:        scannerCompactMaxTokens,
 		allowCompilerFallback:   e.compilerModel != "",
-		allowStructuredFallback: false,
+		allowStructuredFallback: true,
 	}
 }
 
@@ -572,6 +630,28 @@ func scannerSelectedModel() string {
 		return model
 	}
 	return "qwen/qwen3-8b"
+}
+
+func scannerFallbackModels(selectedModel string) []string {
+	seen := map[string]struct{}{}
+	models := make([]string, 0, 3)
+	selected := strings.TrimSpace(selectedModel)
+	if selected != "" {
+		seen[strings.ToLower(selected)] = struct{}{}
+	}
+	for _, raw := range strings.Split(strings.TrimSpace(os.Getenv("SCANNER_FALLBACK_MODELS")), ",") {
+		model := strings.TrimSpace(raw)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		models = append(models, model)
+	}
+	return models
 }
 
 func buildScannerCompilerPrompt(signalPrompt, rawResponse string) string {
@@ -660,7 +740,7 @@ func parseScanResponse(raw string) (scanResult, error) {
 
 	block, err := extractFinalDecisionBlock(raw)
 	if err != nil {
-		if recovered, ok := recoverConservativeThoughtReject(raw); ok {
+		if recovered, ok := recoverConservativeThoughtReject(raw, false); ok {
 			return recovered, nil
 		}
 		return scanResult{}, fmt.Errorf("no structured decision block found")
@@ -759,19 +839,46 @@ func parseScanInstruments(raw string) ([]struct {
 	return instruments, nil
 }
 
-func recoverConservativeThoughtReject(raw string) (scanResult, bool) {
+func recoverConservativeThoughtReject(raw string, allowGeneric bool) (scanResult, bool) {
 	normalized := strings.ToLower(strings.ReplaceAll(raw, "\r", ""))
-	if !strings.Contains(normalized, "<think>") &&
-		!strings.Contains(normalized, "thinking process") &&
-		!strings.Contains(normalized, "analyze the request") &&
-		!strings.Contains(normalized, "analyze the signal") &&
-		!strings.Contains(normalized, "the user wants") &&
-		!strings.Contains(normalized, "let's break this down") &&
-		!strings.Contains(normalized, "let me try to figure") {
+	if !looksLikeScannerThoughtTrace(normalized) {
 		return scanResult{}, false
 	}
 
-	if containsAny(normalized,
+	if isPositiveThoughtTrace(normalized) {
+		return scanResult{}, false
+	}
+
+	reason := inferThoughtRejectReason(raw)
+	if reason == "incomplete thought trace defaulted to reject" && !allowGeneric {
+		return scanResult{}, false
+	}
+	if reason == "incomplete thought trace defaulted to reject" {
+		reason = "noncompliant scanner thought trace defaulted to reject"
+	}
+
+	return scanResult{
+		Tradeable: false,
+		Score:     0,
+		Direction: "none",
+		Urgency:   0,
+		Category:  inferThoughtCategory(normalized),
+		Reasoning: reason,
+	}, true
+}
+
+func looksLikeScannerThoughtTrace(normalized string) bool {
+	return strings.Contains(normalized, "<think>") ||
+		strings.Contains(normalized, "thinking process") ||
+		strings.Contains(normalized, "analyze the request") ||
+		strings.Contains(normalized, "analyze the signal") ||
+		strings.Contains(normalized, "the user wants") ||
+		strings.Contains(normalized, "let's break this down") ||
+		strings.Contains(normalized, "let me try to figure")
+}
+
+func isPositiveThoughtTrace(normalized string) bool {
+	return containsAny(normalized,
 		"this signal is tradeable",
 		"this is tradeable",
 		"tradeable opportunity",
@@ -784,23 +891,7 @@ func recoverConservativeThoughtReject(raw string) (scanResult, bool) {
 		"recommend going short",
 		"meets all criteria",
 		"passes all criteria",
-	) {
-		return scanResult{}, false
-	}
-
-	reason := inferThoughtRejectReason(raw)
-	if reason == "incomplete thought trace defaulted to reject" {
-		return scanResult{}, false
-	}
-
-	return scanResult{
-		Tradeable: false,
-		Score:     0,
-		Direction: "none",
-		Urgency:   0,
-		Category:  inferThoughtCategory(normalized),
-		Reasoning: reason,
-	}, true
+	)
 }
 
 func inferThoughtCategory(normalized string) string {

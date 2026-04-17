@@ -110,6 +110,24 @@ func (s *scannerTimeoutThenSuccessClient) Complete(_ context.Context, req llm.Re
 	}, nil
 }
 
+type scannerTimeoutThenFastModelClient struct {
+	requests []llm.Request
+}
+
+func (s *scannerTimeoutThenFastModelClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if len(s.requests) == 1 {
+		return nil, fmt.Errorf("http request: Post \"http://127.0.0.1:11434/v1/chat/completions\": context deadline exceeded")
+	}
+	if req.Model != "glm-4.7-flash:latest" {
+		return nil, fmt.Errorf("unexpected fallback model %q", req.Model)
+	}
+	return &llm.Response{
+		Content: `{"tradeable":true,"score":82,"instruments":[{"symbol":"TLT","sec_type":"STK","currency":"USD"}],"direction":"short","urgency":0.7,"category":"macro","reasoning":"fast fallback recovered macro setup"}`,
+		Model:   req.Model,
+	}, nil
+}
+
 type scannerCompilerFallbackClient struct {
 	requests []llm.Request
 }
@@ -164,6 +182,36 @@ func (s *scannerThoughtParseThenStructuredFallbackClient) Complete(_ context.Con
 	return &llm.Response{
 		Content: `{"tradeable":true,"score":79,"instruments":[{"symbol":"USO","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.7,"category":"macro","reasoning":"oil supply shock setup"}`,
 		Model:   "stub",
+	}, nil
+}
+
+type scannerStructuredParseThenFastFallbackClient struct {
+	requests []llm.Request
+}
+
+func (s *scannerStructuredParseThenFastFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if len(s.requests) == 1 {
+		return &llm.Response{
+			Content: "<think>\nOkay, let's break this down. The user wants a JSON output based on the signal.\n",
+			Model:   "qwen",
+		}, nil
+	}
+	return &llm.Response{
+		Content: `{"tradeable":true,"score":76,"instruments":[{"symbol":"XLE","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.5,"category":"sector","reasoning":"energy bid after supply constraint"}`,
+		Model:   "stub",
+	}, nil
+}
+
+type scannerMalformedThoughtRejectClient struct {
+	requests []llm.Request
+}
+
+func (s *scannerMalformedThoughtRejectClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: "<think>\nOkay, let's break this down. The user wants a JSON output based on the given signal.\n",
+		Model:   "qwen",
 	}, nil
 }
 
@@ -394,6 +442,39 @@ func TestEvaluateRetriesCompactPromptOnTimeout(t *testing.T) {
 	}
 }
 
+func TestEvaluateUsesFastModelFallbackAfterTimeout(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+	t.Setenv("SCANNER_FALLBACK_MODELS", "glm-4.7-flash:latest")
+
+	client := &scannerTimeoutThenFastModelClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	opp, ok := engine.Evaluate(context.Background(), signal.Signal{
+		ID:         "sig-fast-fallback",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: strings.Repeat("Rates volatility repricing. ", 40),
+	}, "macro")
+	if !ok || opp == nil {
+		t.Fatal("expected fast model fallback to recover an opportunity")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected primary scanner plus fast fallback, got %d requests", got)
+	}
+	if client.requests[0].Model != "qwen/qwen3-8b" {
+		t.Fatalf("unexpected primary model %q", client.requests[0].Model)
+	}
+	if client.requests[1].Model != "glm-4.7-flash:latest" {
+		t.Fatalf("unexpected fallback model %q", client.requests[1].Model)
+	}
+	if opp.Instruments[0].Symbol != "TLT" || opp.Direction != model.Short {
+		t.Fatalf("unexpected fallback opportunity: %+v", opp)
+	}
+}
+
 func TestEvaluateFallsBackToCompilerWhenThoughtModeMissesFinalBlock(t *testing.T) {
 	t.Setenv("SCANNER_MODEL", "qwen/qwen3.5-9b")
 	t.Setenv("SCANNER_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
@@ -452,17 +533,20 @@ func TestEvaluateFallsBackToCompilerWhenStructuredModeMissesJSON(t *testing.T) {
 	if !ok || opp == nil {
 		t.Fatal("expected compiler fallback to recover a structured decision in json mode")
 	}
-	if got := len(client.requests); got != 2 {
-		t.Fatalf("expected scanner pass and compiler pass, got %d requests", got)
+	if got := len(client.requests); got != 3 {
+		t.Fatalf("expected scanner pass, fast structured fallback, and compiler pass, got %d requests", got)
 	}
 	if !client.requests[0].JSONMode {
 		t.Fatal("expected structured scanner pass to request JSON mode")
 	}
 	if !client.requests[1].JSONMode {
+		t.Fatal("expected structured fallback pass to request JSON mode")
+	}
+	if !client.requests[2].JSONMode {
 		t.Fatal("expected compiler pass to request JSON mode")
 	}
-	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
-		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	if client.requests[2].Model != "gemma-the-writer-mighty-sword-9b" {
+		t.Fatalf("unexpected compiler model %q", client.requests[2].Model)
 	}
 	if opp.Direction != model.Short || len(opp.Instruments) != 1 || opp.Instruments[0].Symbol != "TLT" {
 		t.Fatalf("unexpected compiler fallback opportunity: %+v", opp)
@@ -527,6 +611,62 @@ func TestEvaluateFallsBackToStructuredJSONAfterThoughtParseFailure(t *testing.T)
 	}
 	if opp.Instruments[0].Symbol != "USO" {
 		t.Fatalf("unexpected structured fallback opportunity: %+v", opp)
+	}
+}
+
+func TestEvaluateFallsBackToStructuredFastPromptAfterStructuredParseFailure(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+
+	client := &scannerStructuredParseThenFastFallbackClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	opp, ok := engine.Evaluate(context.Background(), signal.Signal{
+		ID:         "sig-structured-parse-fail",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "sector",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: "Energy markets tighten after surprise regional outage.",
+	}, "sector")
+	if !ok || opp == nil {
+		t.Fatal("expected structured fast fallback after parse failure to recover an opportunity")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected one structured attempt plus one fast structured fallback, got %d", got)
+	}
+	if !client.requests[0].JSONMode || !client.requests[1].JSONMode {
+		t.Fatal("expected both structured attempts to stay in JSON mode")
+	}
+	if opp.Instruments[0].Symbol != "XLE" {
+		t.Fatalf("unexpected structured fast fallback opportunity: %+v", opp)
+	}
+}
+
+func TestEvaluateDefaultsMalformedThoughtTraceToRejectAfterSalvageFails(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+	t.Setenv("SCANNER_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
+
+	client := &scannerMalformedThoughtRejectClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:         "sig-malformed-thought",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "corporate",
+		Timestamp:  time.Now(),
+		Urgency:    0.7,
+		Translated: "Prosus trims stake after follow-on block placement.",
+	}, "corporate")
+	if result.Accepted {
+		t.Fatalf("expected malformed thought trace to fail closed as reject, got %+v", result)
+	}
+	if result.Reason != "scanner_rejected" {
+		t.Fatalf("expected deterministic reject reason, got %q", result.Reason)
+	}
+	if got := len(client.requests); got != 3 {
+		t.Fatalf("expected scanner attempt, fast structured fallback, and compiler attempt, got %d", got)
 	}
 }
 
@@ -679,6 +819,37 @@ func TestEvaluateTripsCooldownOnUnavailableLLM(t *testing.T) {
 	}
 }
 
+func TestEvaluateCachesLLMErrorsBriefly(t *testing.T) {
+	t.Setenv("SCANNER_ERROR_CACHE_TTL", "1m")
+
+	client := &scannerErrorClient{err: fmt.Errorf("http request: Post \"http://127.0.0.1:1234/v1/chat/completions\": context deadline exceeded")}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	sig := signal.Signal{
+		ID:         "sig-llm-timeout-cache",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.9,
+		Translated: "Unexpected macro headline.",
+	}
+
+	first := engine.EvaluateDetailed(context.Background(), sig, "macro")
+	requestsAfterFirst := client.requests
+	second := engine.EvaluateDetailed(context.Background(), sig, "macro")
+
+	if first.Reason != "llm_error" || second.Reason != "llm_error" {
+		t.Fatalf("expected repeated llm_error results, got first=%q second=%q", first.Reason, second.Reason)
+	}
+	if requestsAfterFirst == 0 {
+		t.Fatal("expected first evaluation to issue scanner requests")
+	}
+	if client.requests != requestsAfterFirst {
+		t.Fatalf("expected second evaluation to hit error cache without new requests, first=%d total=%d", requestsAfterFirst, client.requests)
+	}
+}
+
 func TestEvaluateParsesThoughtfulTerminalDecisionBlock(t *testing.T) {
 	result, err := parseScanResponse(`Thinking Process:
 
@@ -767,6 +938,21 @@ The event is real, but there is no exact instrument and no clear directional set
 	}
 	if !strings.Contains(strings.ToLower(result.Reasoning), "no exact instrument") {
 		t.Fatalf("expected recovered reasoning, got %+v", result)
+	}
+}
+
+func TestRecoverConservativeThoughtRejectAllowsGenericFallback(t *testing.T) {
+	result, ok := recoverConservativeThoughtReject(`<think>
+Okay, let's break this down. The user wants a JSON output based on the signal.
+</think>`, true)
+	if !ok {
+		t.Fatal("expected generic malformed thought trace to be recoverable when explicitly allowed")
+	}
+	if result.Tradeable {
+		t.Fatalf("expected recovered reject, got %+v", result)
+	}
+	if !strings.Contains(strings.ToLower(result.Reasoning), "defaulted to reject") {
+		t.Fatalf("expected generic fallback reason, got %+v", result)
 	}
 }
 

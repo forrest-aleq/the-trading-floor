@@ -8,6 +8,7 @@ func ReloadRuntimeConfig() {
 	structuredJSONRetryTokens = readStructuredIntEnv("STRUCTURED_JSON_RETRY_MAX_TOKENS", 640)
 
 	researchMaxTokens = readStructuredIntEnv("RESEARCH_MAX_TOKENS", 1024)
+	researchRequestTimeout = readStructuredDurationEnv("RESEARCH_REQUEST_TIMEOUT", 18*time.Second)
 	researchThoughtTimeout = readStructuredDurationEnv("RESEARCH_THOUGHT_TIMEOUT", 30*time.Second)
 	researchRetryTimeout = readStructuredDurationEnv("RESEARCH_RETRY_TIMEOUT", 20*time.Second)
 	researchRetryMaxTokens = readStructuredIntEnv("RESEARCH_RETRY_MAX_TOKENS", 384)

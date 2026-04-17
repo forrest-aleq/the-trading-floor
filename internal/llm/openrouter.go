@@ -96,7 +96,7 @@ func (c *OpenRouterClient) Complete(ctx context.Context, req Request) (*Response
 	for i, m := range req.Messages {
 		messages[i] = orMessage{Role: string(m.Role), Content: m.Content}
 	}
-	messages = applyLocalQwenJSONControls(c.baseURL, model, req.JSONMode, messages)
+	messages = applyLocalJSONControls(c.baseURL, model, req.JSONMode, messages)
 
 	orReq := orRequest{
 		Model:       model,
@@ -250,8 +250,8 @@ func (c *OpenRouterClient) supportsStructuredJSON() bool {
 	}
 }
 
-func applyLocalQwenJSONControls(baseURL, model string, jsonMode bool, messages []orMessage) []orMessage {
-	if !jsonMode || !isLocalQwenModel(baseURL, model) || len(messages) == 0 {
+func applyLocalJSONControls(baseURL, model string, jsonMode bool, messages []orMessage) []orMessage {
+	if !jsonMode || !isLocalLLM(baseURL) || len(messages) == 0 {
 		return messages
 	}
 

@@ -146,6 +146,7 @@ func (d *Desk) SetMarketContextService(service *marketcontext.Service) {
 
 var (
 	researchMaxTokens         = readStructuredIntEnv("RESEARCH_MAX_TOKENS", 1024)
+	researchRequestTimeout    = readStructuredDurationEnv("RESEARCH_REQUEST_TIMEOUT", 18*time.Second)
 	researchThoughtTimeout    = readStructuredDurationEnv("RESEARCH_THOUGHT_TIMEOUT", 30*time.Second)
 	researchRetryTimeout      = readStructuredDurationEnv("RESEARCH_RETRY_TIMEOUT", 20*time.Second)
 	researchRetryMaxTokens    = readStructuredIntEnv("RESEARCH_RETRY_MAX_TOKENS", 384)
@@ -205,6 +206,16 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 					"error", compileErr,
 				)
 			}
+		}
+	}
+	if err != nil {
+		if recovered, ok := recoverGroundedResearchJSON(resp, opp, sig, marketCtx); ok {
+			cleaned = recovered
+			err = nil
+			d.log.Info("research recovered grounded thesis from thought trace",
+				"desk", deskID,
+				"symbol", firstOpportunitySymbol(opp),
+			)
 		}
 	}
 	if err != nil {
@@ -375,7 +386,47 @@ func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactP
 		}
 		return resp, nil
 	}
-	return d.llm.AskJSONWithLimit(ctx, llm.TierAnalysis, d.systemPrompt, prompt, researchMaxTokens, 0.2)
+
+	primaryCtx, cancel := withStructuredBudgetFraction(ctx, researchRequestTimeout, 0.5)
+	resp, err := d.llm.AskJSONWithLimit(primaryCtx, llm.TierAnalysis, d.systemPrompt, prompt, researchMaxTokens, 0.2)
+	cancel()
+	if err != nil {
+		if !hasStructuredBudget(ctx, minStructuredAttemptBudget) {
+			return "", err
+		}
+		retryCtx, retryCancel := withStructuredBudgetFraction(ctx, researchRetryTimeout, 0.5)
+		retryResp, retryErr := d.retryStructuredJSON(retryCtx, compactPrompt)
+		retryCancel()
+		if retryErr == nil {
+			if _, retryParseErr := extractStructuredJSON(retryResp); retryParseErr == nil {
+				d.log.Info("research structured retry recovered primary JSON failure",
+					"model", d.retryModel,
+					"error", err,
+				)
+				return retryResp, nil
+			}
+		}
+		return "", err
+	}
+	if _, err := extractStructuredJSON(resp); err == nil {
+		return resp, nil
+	}
+	if !hasStructuredBudget(ctx, minStructuredAttemptBudget) {
+		return resp, nil
+	}
+	retryCtx, retryCancel := withStructuredBudgetFraction(ctx, researchRetryTimeout, 0.5)
+	retryResp, retryErr := d.retryStructuredJSON(retryCtx, compactPrompt)
+	retryCancel()
+	if retryErr == nil {
+		if _, err := extractStructuredJSON(retryResp); err != nil {
+			return resp, nil
+		}
+		d.log.Info("research structured retry recovered JSON mode terminal miss",
+			"model", d.selectedModel,
+		)
+		return retryResp, nil
+	}
+	return resp, nil
 }
 
 func (d *Desk) retryStructuredJSON(ctx context.Context, prompt string) (string, error) {
@@ -999,6 +1050,147 @@ func normalizePositionSizePct(value float64) float64 {
 		value = 1
 	}
 	return value
+}
+
+func recoverGroundedResearchJSON(raw string, opp *model.Opportunity, sig signal.Signal, marketCtx *model.MarketContext) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !looksLikeGroundableThoughtTrace(raw) || opp == nil || len(opp.Instruments) == 0 {
+		return "", false
+	}
+
+	inst := normalizeResearchInstrument(opp.Instruments[0])
+	if inst.Symbol == "" {
+		return "", false
+	}
+
+	entryPrice := 0.0
+	if marketCtx != nil && marketCtx.CurrentPrice > 0 {
+		entryPrice = marketCtx.CurrentPrice
+	}
+
+	conviction := normalizeResearchConviction(0, opp) - 0.10
+	if conviction < 0.20 {
+		conviction = 0.20
+	}
+
+	payload := map[string]any{
+		"structure": "single",
+		"instrument": map[string]any{
+			"symbol":   inst.Symbol,
+			"sec_type": inst.SecType,
+			"currency": firstNonEmptyString(inst.Currency, "USD"),
+			"exchange": firstNonEmptyString(inst.Exchange, "SMART"),
+			"expiry":   inst.Expiry,
+			"strike":   inst.Strike,
+			"right":    inst.Right,
+		},
+		"legs":               []any{},
+		"direction":          string(opp.Direction),
+		"entry_price":        entryPrice,
+		"target_price":       0.0,
+		"stop_loss":          0.0,
+		"conviction":         conviction,
+		"time_horizon_hours": recoverTimeHorizonHours(opp),
+		"position_size_pct":  normalizePositionSizePct(0),
+		"strategy":           normalizeStrategy(""),
+		"surprise_assessment": map[string]any{
+			"truth_score":         0.0,
+			"novelty_score":       0.0,
+			"priced_in_score":     0.0,
+			"reaction_gap_score":  0.0,
+			"unmoved_asset_score": 0.0,
+			"summary":             "Recovered from research thought trace using scanner-grounded opportunity context.",
+		},
+		"evidence":     recoverEvidence(sig, raw),
+		"counter_args": []string{"Recovered from noncompliant research trace; requires prosecution and council scrutiny."},
+		"kill_rules":   []any{},
+		"reasoning":    "Recovered from noncompliant research trace using the scanner-selected instrument and direction.",
+	}
+
+	cleaned, err := json.Marshal(payload)
+	if err != nil {
+		return "", false
+	}
+	return string(cleaned), true
+}
+
+func looksLikeGroundableThoughtTrace(raw string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	return strings.HasPrefix(normalized, "<think>") ||
+		strings.Contains(normalized, "we are given an opportunity to trade") ||
+		strings.Contains(normalized, "the signal is") ||
+		strings.Contains(normalized, "the instruments mentioned are")
+}
+
+func recoverTimeHorizonHours(opp *model.Opportunity) int {
+	if opp == nil {
+		return 24
+	}
+	switch {
+	case opp.Urgency >= 0.85:
+		return 24
+	case opp.Urgency >= 0.65:
+		return 48
+	default:
+		return 72
+	}
+}
+
+func recoverEvidence(sig signal.Signal, raw string) []string {
+	evidenceItems := []string{}
+	if summary := strings.TrimSpace(sig.Translated); summary != "" {
+		evidenceItems = append(evidenceItems, institutional.TruncateForPrompt(summary, 180))
+	}
+	if summary := strings.TrimSpace(sig.OriginalText); summary != "" && summary != strings.TrimSpace(sig.Translated) {
+		evidenceItems = append(evidenceItems, institutional.TruncateForPrompt(summary, 140))
+	}
+	if snippet := recoverReasoningSnippet(raw); snippet != "" {
+		evidenceItems = append(evidenceItems, snippet)
+	}
+	if len(evidenceItems) == 0 {
+		evidenceItems = append(evidenceItems, "Recovered from scanner-grounded opportunity context.")
+	}
+	if len(evidenceItems) > 3 {
+		evidenceItems = evidenceItems[:3]
+	}
+	return evidenceItems
+}
+
+func recoverReasoningSnippet(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	normalized := strings.NewReplacer("<think>", "", "</think>", "").Replace(raw)
+	normalized = strings.TrimSpace(normalized)
+	if normalized == "" {
+		return ""
+	}
+	lines := strings.FieldsFunc(normalized, func(r rune) bool { return r == '\n' || r == '\r' })
+	for _, line := range lines {
+		line = strings.TrimSpace(strings.TrimLeft(line, "-*0123456789. "))
+		if line == "" {
+			continue
+		}
+		return institutional.TruncateForPrompt(line, 180)
+	}
+	return institutional.TruncateForPrompt(normalized, 180)
+}
+
+func firstOpportunitySymbol(opp *model.Opportunity) string {
+	if opp == nil || len(opp.Instruments) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(opp.Instruments[0].Symbol)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func clampUnit(value float64) float64 {

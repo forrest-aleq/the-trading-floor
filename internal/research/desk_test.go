@@ -123,6 +123,51 @@ func (s *researchPrimaryErrorRetryClient) Complete(_ context.Context, req llm.Re
 	}, nil
 }
 
+type researchJSONModeRetryClient struct {
+	requests []llm.Request
+}
+
+func (s *researchJSONModeRetryClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if len(s.requests) == 1 {
+		return &llm.Response{
+			Content: "<think>\nThe setup is interesting but I forgot the final JSON.\n</think>",
+			Model:   "analysis-json",
+		}, nil
+	}
+	return &llm.Response{
+		Content: validResearchJSON(),
+		Model:   "analysis-json-retry",
+	}, nil
+}
+
+type researchJSONModePrimaryErrorRetryClient struct {
+	requests []llm.Request
+}
+
+func (s *researchJSONModePrimaryErrorRetryClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	if len(s.requests) == 1 {
+		return nil, errors.New("context deadline exceeded")
+	}
+	return &llm.Response{
+		Content: validResearchJSON(),
+		Model:   "analysis-json-retry",
+	}, nil
+}
+
+type researchGroundedThoughtFallbackClient struct {
+	requests []llm.Request
+}
+
+func (s *researchGroundedThoughtFallbackClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return &llm.Response{
+		Content: "<think>\nWe are given an opportunity to trade based on a macro signal. The direction is long on TLT, but the model omitted the required JSON block.\n</think>",
+		Model:   "analysis-json",
+	}, nil
+}
+
 func TestInvestigateUsesThoughtModeForQwenResearch(t *testing.T) {
 	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
 	t.Setenv("RESEARCH_RESPONSE_MODE", "thought")
@@ -318,6 +363,92 @@ func TestInvestigateStructuredRetryRecoversBeforeCompilerFallback(t *testing.T) 
 	}
 	if got := client.requests[1].Messages[1].Content; !strings.Contains(got, "Signal snapshot") {
 		t.Fatalf("expected structured retry to retain compact signal context, got %q", got)
+	}
+}
+
+func TestInvestigateJSONModeStructuredRetryRecoversTerminalMiss(t *testing.T) {
+	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "json")
+
+	client := &researchJSONModeRetryClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected JSON-mode structured retry to recover thesis, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis from JSON-mode retry")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected JSON-mode primary request plus structured retry, got %d", got)
+	}
+	if !client.requests[0].JSONMode {
+		t.Fatal("expected primary request to use strict JSON mode")
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected retry request to use strict JSON mode")
+	}
+	if got := client.requests[1].Messages[1].Content; !strings.Contains(got, "Signal snapshot") {
+		t.Fatalf("expected JSON-mode retry to use compact prompt context, got %q", got)
+	}
+}
+
+func TestInvestigateJSONModeRetryRecoversPrimaryError(t *testing.T) {
+	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "json")
+
+	client := &researchJSONModePrimaryErrorRetryClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected JSON-mode retry to recover primary error, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis from JSON-mode primary error retry")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected primary request plus retry, got %d", got)
+	}
+	if !client.requests[0].JSONMode {
+		t.Fatal("expected primary request to use strict JSON mode")
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected retry request to use strict JSON mode")
+	}
+}
+
+func TestInvestigateRecoversGroundedThesisFromThoughtTrace(t *testing.T) {
+	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "json")
+	t.Setenv("RESEARCH_COMPILER_MODEL", "")
+
+	client := &researchGroundedThoughtFallbackClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+	desk.SetMarketContextService(marketcontext.NewService(researchMarketContextStub{price: 91.25}))
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected grounded thought fallback to recover thesis, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis from grounded fallback")
+	}
+	if thesis.PrimaryInstrument().Symbol != "TLT" {
+		t.Fatalf("expected grounded fallback instrument TLT, got %q", thesis.PrimaryInstrument().Symbol)
+	}
+	if thesis.Direction != model.Long {
+		t.Fatalf("expected grounded fallback direction long, got %s", thesis.Direction)
+	}
+	if thesis.Conviction != 0.68 {
+		t.Fatalf("expected grounded fallback conviction 0.68, got %.2f", thesis.Conviction)
+	}
+	if thesis.EntryPrice != 91.25 {
+		t.Fatalf("expected grounded fallback entry price 91.25, got %.2f", thesis.EntryPrice)
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected primary request plus retry before grounded fallback, got %d", got)
 	}
 }
 

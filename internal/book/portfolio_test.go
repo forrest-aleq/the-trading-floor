@@ -15,6 +15,19 @@ func (stubPositionSource) GetPositions(ctx context.Context) ([]ibkr.IBKRPosition
 	return nil, nil
 }
 
+type stubRuntimeSource struct {
+	positions []ibkr.IBKRPosition
+	summary   *ibkr.AccountSummary
+}
+
+func (s stubRuntimeSource) GetPositions(ctx context.Context) ([]ibkr.IBKRPosition, error) {
+	return s.positions, nil
+}
+
+func (s stubRuntimeSource) GetAccountSummary(ctx context.Context) (*ibkr.AccountSummary, error) {
+	return s.summary, nil
+}
+
 func TestBookMarkKeepsEquityAndUpdatesPnL(t *testing.T) {
 	bk := NewBook(stubPositionSource{}, 1000)
 	bk.SetDeskCapital("desk-1", 1000)
@@ -154,5 +167,55 @@ func TestOpenShadowPositionUsesPositiveFallbackPrice(t *testing.T) {
 	pos = bk.OpenShadowPosition(thesis)
 	if pos.EntryPrice <= 0 {
 		t.Fatalf("expected positive minimum fallback entry price, got %.4f", pos.EntryPrice)
+	}
+}
+
+func TestSnapshotPrefersBrokerAccountSummary(t *testing.T) {
+	bk := NewBook(stubRuntimeSource{
+		summary: &ibkr.AccountSummary{
+			NetLiquidation: 1001986,
+			Cash:           1001986,
+			UnrealizedPnL:  25,
+			RealizedPnL:    -10,
+		},
+	}, 1000)
+
+	bk.reconcile(context.Background())
+	snapshot := bk.Snapshot()
+
+	if snapshot.NAV != 1001986 {
+		t.Fatalf("expected broker nav 1001986, got %.2f", snapshot.NAV)
+	}
+	if snapshot.Cash != 1001986 {
+		t.Fatalf("expected broker cash 1001986, got %.2f", snapshot.Cash)
+	}
+	if snapshot.DailyPnL != 15 {
+		t.Fatalf("expected broker daily pnl 15, got %.2f", snapshot.DailyPnL)
+	}
+}
+
+func TestSnapshotUsesBrokerPositionsForCountsAndExposure(t *testing.T) {
+	bk := NewBook(stubRuntimeSource{
+		summary: &ibkr.AccountSummary{
+			NetLiquidation: 1000000,
+			Cash:           900000,
+		},
+		positions: []ibkr.IBKRPosition{
+			{Symbol: "AAPL", Quantity: 10, AvgCost: 200},
+			{Symbol: "TLT", Quantity: -5, AvgCost: 100},
+		},
+	}, 1000)
+
+	bk.reconcile(context.Background())
+	snapshot := bk.Snapshot()
+
+	if snapshot.OpenPositions != 2 {
+		t.Fatalf("expected 2 broker positions, got %d", snapshot.OpenPositions)
+	}
+	if snapshot.GrossExposure != 2500 {
+		t.Fatalf("expected gross exposure 2500, got %.2f", snapshot.GrossExposure)
+	}
+	if snapshot.NetExposure != 1500 {
+		t.Fatalf("expected net exposure 1500, got %.2f", snapshot.NetExposure)
 	}
 }

@@ -16,6 +16,10 @@ type PositionSource interface {
 	GetPositions(context.Context) ([]ibkr.IBKRPosition, error)
 }
 
+type AccountSource interface {
+	GetAccountSummary(context.Context) (*ibkr.AccountSummary, error)
+}
+
 // Book is the source of truth for portfolio state.
 type Book struct {
 	mu  sync.RWMutex
@@ -23,6 +27,7 @@ type Book struct {
 
 	positions         map[string]*model.Position // position_id -> position
 	positionSource    PositionSource
+	accountSource     AccountSource
 	nav               float64
 	cash              float64
 	grossExposure     float64
@@ -39,6 +44,20 @@ type Book struct {
 	totalTrades       int64
 	initialCapital    float64
 	reconcileInterval time.Duration
+	brokerSync        brokerAccountState
+}
+
+type brokerAccountState struct {
+	connected     bool
+	nav           float64
+	cash          float64
+	dailyPnL      float64
+	unrealizedPnL float64
+	realizedPnL   float64
+	openPositions int
+	grossExposure float64
+	netExposure   float64
+	lastSynced    time.Time
 }
 
 type Discrepancy struct {
@@ -52,10 +71,15 @@ type Discrepancy struct {
 const minShadowEntryPrice = 0.01
 
 func NewBook(positionSource PositionSource, initialCapital float64) *Book {
+	var accountSource AccountSource
+	if source, ok := positionSource.(AccountSource); ok {
+		accountSource = source
+	}
 	return &Book{
 		log:               slog.Default().With("component", "book"),
 		positions:         make(map[string]*model.Position),
 		positionSource:    positionSource,
+		accountSource:     accountSource,
 		nav:               initialCapital,
 		cash:              initialCapital,
 		peakNAV:           initialCapital,
@@ -327,12 +351,26 @@ func (b *Book) Snapshot() PortfolioSnapshot {
 		deskCap[k] = v
 	}
 
+	nav := b.nav
+	cash := b.cash
+	dailyPnL := b.dailyPnL
+	grossExposure := b.grossExposure
+	netExposure := b.netExposure
+	if b.brokerSync.connected && b.brokerSync.nav > 0 {
+		nav = b.brokerSync.nav
+		cash = b.brokerSync.cash
+		dailyPnL = b.brokerSync.dailyPnL
+		grossExposure = b.brokerSync.grossExposure
+		netExposure = b.brokerSync.netExposure
+		openCount = b.brokerSync.openPositions
+	}
+
 	return PortfolioSnapshot{
-		NAV:           b.nav,
-		Cash:          b.cash,
-		GrossExposure: b.grossExposure,
-		NetExposure:   b.netExposure,
-		DailyPnL:      b.dailyPnL,
+		NAV:           nav,
+		Cash:          cash,
+		GrossExposure: grossExposure,
+		NetExposure:   netExposure,
+		DailyPnL:      dailyPnL,
 		WeeklyPnL:     b.weeklyPnL,
 		MonthlyPnL:    b.monthlyPnL,
 		TotalPnL:      b.totalPnL,
@@ -363,6 +401,7 @@ type PortfolioSnapshot struct {
 }
 
 func (b *Book) StartReconcile(ctx context.Context) {
+	b.reconcile(ctx)
 	ticker := time.NewTicker(b.reconcileInterval)
 	defer ticker.Stop()
 
@@ -502,21 +541,27 @@ func (b *Book) recalculateLocked() {
 }
 
 func (b *Book) reconcile(ctx context.Context) {
+	if b.accountSource != nil {
+		summary, err := b.accountSource.GetAccountSummary(ctx)
+		if err != nil {
+			b.log.Error("account summary sync failed", "error", err)
+		} else if summary != nil {
+			b.applyAccountSummary(summary)
+		}
+	}
+
 	if b.positionSource == nil {
 		return
 	}
 
 	ibkrPositions, err := b.positionSource.GetPositions(ctx)
 	if err != nil {
-		b.log.Error("reconciliation failed", "error", err)
+		b.log.Error("position reconciliation failed", "error", err)
 		return
 	}
 
+	b.applyBrokerPositions(ibkrPositions)
 	discrepancies := b.Reconcile(ibkrPositions)
-	if len(discrepancies) == 0 {
-		return
-	}
-
 	for _, d := range discrepancies {
 		b.log.Warn("reconciliation discrepancy",
 			"symbol", d.Symbol,
@@ -526,6 +571,48 @@ func (b *Book) reconcile(ctx context.Context) {
 			"ibkr_avg_cost", d.IBKRAvgCost,
 		)
 	}
+}
+
+func (b *Book) applyAccountSummary(summary *ibkr.AccountSummary) {
+	if summary == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.brokerSync.connected = true
+	if summary.NetLiquidation > 0 {
+		b.brokerSync.nav = summary.NetLiquidation
+	}
+	b.brokerSync.cash = summary.Cash
+	b.brokerSync.unrealizedPnL = summary.UnrealizedPnL
+	b.brokerSync.realizedPnL = summary.RealizedPnL
+	b.brokerSync.dailyPnL = summary.UnrealizedPnL + summary.RealizedPnL
+	b.brokerSync.lastSynced = time.Now()
+}
+
+func (b *Book) applyBrokerPositions(positions []ibkr.IBKRPosition) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	openPositions := 0
+	grossExposure := 0.0
+	netExposure := 0.0
+	for _, pos := range positions {
+		if pos.Quantity == 0 {
+			continue
+		}
+		openPositions++
+		notional := math.Abs(pos.Quantity * pos.AvgCost)
+		grossExposure += notional
+		netExposure += pos.Quantity * pos.AvgCost
+	}
+
+	b.brokerSync.connected = true
+	b.brokerSync.openPositions = openPositions
+	b.brokerSync.grossExposure = grossExposure
+	b.brokerSync.netExposure = netExposure
+	b.brokerSync.lastSynced = time.Now()
 }
 
 func lookupInstrumentPrice(prices map[string]float64, inst model.Instrument) (float64, bool) {

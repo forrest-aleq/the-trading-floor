@@ -63,6 +63,12 @@ func validateLimits(limits Limits) error {
 		return fmt.Errorf("capital_per_desk must be positive")
 	case limits.MinConvictionScore <= 0 || limits.MinConvictionScore > 1:
 		return fmt.Errorf("min_conviction_score must be within (0,1]")
+	case limits.MaxQuoteAgeSeconds < 0:
+		return fmt.Errorf("max_quote_age_seconds must be non-negative")
+	case limits.MaxEquitySpreadBps < 0:
+		return fmt.Errorf("max_equity_spread_bps must be non-negative")
+	case limits.MaxOptionSpreadBps < 0:
+		return fmt.Errorf("max_option_spread_bps must be non-negative")
 	case limits.TotalCapital <= 0:
 		return fmt.Errorf("total_capital must be positive")
 	case limits.MaxGrossExposurePct <= 0:

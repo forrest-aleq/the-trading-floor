@@ -36,12 +36,15 @@ func TestParseLimitsLoadsEmbeddedShape(t *testing.T) {
 		"max_single_position_pct": 12,
 		"max_correlated_positions": 4,
 		"max_open_positions": 8,
-		"capital_per_desk": 30000,
-		"max_position_size_pct": 8,
-		"min_conviction_score": 0.72,
-		"total_capital": 2000000,
-		"max_factor_exposure_pct": 18,
-		"max_drawdown_pct": 9,
+			"capital_per_desk": 30000,
+			"max_position_size_pct": 8,
+			"min_conviction_score": 0.72,
+			"max_quote_age_seconds": 60,
+			"max_equity_spread_bps": 25,
+			"max_option_spread_bps": 250,
+			"total_capital": 2000000,
+			"max_factor_exposure_pct": 18,
+			"max_drawdown_pct": 9,
 		"kill_switch_drawdown_pct": 14,
 		"max_gross_exposure_pct": 160,
 		"max_net_exposure_pct": 90,
@@ -50,7 +53,7 @@ func TestParseLimitsLoadsEmbeddedShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse limits: %v", err)
 	}
-	if limits.MinConvictionScore != 0.72 || limits.CapitalPerDesk != 30000 {
+	if limits.MinConvictionScore != 0.72 || limits.CapitalPerDesk != 30000 || limits.MaxQuoteAgeSeconds != 60 {
 		t.Fatalf("unexpected limits parse result: %+v", limits)
 	}
 }
@@ -60,17 +63,104 @@ func TestParseLimitsRejectsInvalidValues(t *testing.T) {
 		"max_daily_loss_pct": 0,
 		"max_single_position_pct": 12,
 		"max_open_positions": 8,
-		"capital_per_desk": 30000,
-		"min_conviction_score": 1.2,
-		"total_capital": 2000000,
-		"max_gross_exposure_pct": 160,
-		"max_cash_deploy_pct": 70
+			"capital_per_desk": 30000,
+			"min_conviction_score": 1.2,
+			"max_quote_age_seconds": -1,
+			"total_capital": 2000000,
+			"max_gross_exposure_pct": 160,
+			"max_cash_deploy_pct": 70
 	}`))
 	if err == nil {
 		t.Fatal("expected invalid limits to fail")
 	}
 	if !strings.Contains(err.Error(), "max_daily_loss_pct") {
 		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
+func TestGateRejectsStaleQuoteAge(t *testing.T) {
+	gate := NewGate(DefaultLimits())
+
+	order := model.Order{
+		ID:         "order-stale-quote",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Direction:  model.Long,
+		Quantity:   10,
+		LimitPrice: 500,
+		Notional:   5000,
+	}
+	thesis := &model.Thesis{
+		Conviction: 0.9,
+		MarketContext: &model.MarketContext{
+			QuoteAgeSeconds: DefaultLimits().MaxQuoteAgeSeconds + 30,
+			SpreadBps:       5,
+		},
+	}
+	portfolio := PortfolioState{
+		NAV:           100000,
+		Cash:          100000,
+		DeskPositions: map[string]int{},
+		DeskDailyPnL:  map[string]float64{},
+		DeskCapital:   map[string]float64{"desk-a": 25000},
+	}
+
+	decision := gate.Check(order, thesis, portfolio)
+	if decision.Allowed {
+		t.Fatal("expected stale quote to be rejected")
+	}
+	found := false
+	for _, violation := range decision.Violations {
+		if violation.Rule == "stale_quote" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected stale_quote violation, got %+v", decision.Violations)
+	}
+}
+
+func TestGateRejectsWideEquitySpread(t *testing.T) {
+	gate := NewGate(DefaultLimits())
+
+	order := model.Order{
+		ID:         "order-wide-spread",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "QQQ", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Direction:  model.Long,
+		Quantity:   10,
+		LimitPrice: 450,
+		Notional:   4500,
+	}
+	thesis := &model.Thesis{
+		Conviction: 0.9,
+		MarketContext: &model.MarketContext{
+			QuoteAgeSeconds: 3,
+			SpreadBps:       DefaultLimits().MaxEquitySpreadBps + 12,
+		},
+	}
+	portfolio := PortfolioState{
+		NAV:           100000,
+		Cash:          100000,
+		DeskPositions: map[string]int{},
+		DeskDailyPnL:  map[string]float64{},
+		DeskCapital:   map[string]float64{"desk-a": 25000},
+	}
+
+	decision := gate.Check(order, thesis, portfolio)
+	if decision.Allowed {
+		t.Fatal("expected wide spread to be rejected")
+	}
+	found := false
+	for _, violation := range decision.Violations {
+		if violation.Rule == "quote_spread_too_wide" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected quote_spread_too_wide violation, got %+v", decision.Violations)
 	}
 }
 

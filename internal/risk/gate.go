@@ -34,6 +34,9 @@ type Limits struct {
 	// Per-trade
 	MaxPositionSizePct float64 `json:"max_position_size_pct"`
 	MinConvictionScore float64 `json:"min_conviction_score"`
+	MaxQuoteAgeSeconds float64 `json:"max_quote_age_seconds"`
+	MaxEquitySpreadBps float64 `json:"max_equity_spread_bps"`
+	MaxOptionSpreadBps float64 `json:"max_option_spread_bps"`
 
 	// Portfolio-level
 	TotalCapital          float64 `json:"total_capital"`
@@ -117,6 +120,9 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 		if allowed, reason := thesis.EvidenceRiskGate(); !allowed {
 			violations = append(violations, evidenceViolation(reason, thesis))
 		}
+	}
+	if thesis != nil && thesis.MarketContext != nil {
+		violations = append(violations, g.marketQualityViolations(order, thesis.MarketContext)...)
 	}
 
 	// 2. Position size vs desk capital
@@ -225,6 +231,40 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 		Allowed:       true,
 		AdjustedOrder: &adjustedOrder,
 		Token:         token,
+	}
+}
+
+func (g *Gate) marketQualityViolations(order model.Order, marketCtx *model.MarketContext) []model.Violation {
+	if g == nil || marketCtx == nil {
+		return nil
+	}
+
+	violations := make([]model.Violation, 0, 2)
+	if g.limits.MaxQuoteAgeSeconds > 0 && marketCtx.QuoteAgeSeconds > g.limits.MaxQuoteAgeSeconds {
+		violations = append(violations, model.Violation{
+			Rule:    "stale_quote",
+			Limit:   fmt.Sprintf("%.0fs", g.limits.MaxQuoteAgeSeconds),
+			Current: fmt.Sprintf("%.1fs", marketCtx.QuoteAgeSeconds),
+		})
+	}
+
+	spreadLimit := g.quoteSpreadLimit(order.PrimaryInstrument())
+	if spreadLimit > 0 && marketCtx.SpreadBps > spreadLimit {
+		violations = append(violations, model.Violation{
+			Rule:    "quote_spread_too_wide",
+			Limit:   fmt.Sprintf("%.1f bps", spreadLimit),
+			Current: fmt.Sprintf("%.1f bps", marketCtx.SpreadBps),
+		})
+	}
+	return violations
+}
+
+func (g *Gate) quoteSpreadLimit(inst model.Instrument) float64 {
+	switch strings.ToUpper(strings.TrimSpace(inst.SecType)) {
+	case "OPT", "FOP":
+		return g.limits.MaxOptionSpreadBps
+	default:
+		return g.limits.MaxEquitySpreadBps
 	}
 }
 

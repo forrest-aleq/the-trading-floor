@@ -173,10 +173,11 @@ func bestMarketSignalPrice(md *ibkr.MarketData) float64 {
 	}
 }
 
-// DefaultWatchlist returns the small bootstrap set used for regime and
-// cross-asset context before any thesis-specific instruments are added.
+// DefaultWatchlist returns the explicit market-data signal universe. It is
+// intentionally empty by default so desks do not inherit a fake ticker-first
+// market wire; thesis-added instruments still enter dynamically.
 func DefaultWatchlist() []model.Instrument {
-	return marketrefs.BootstrapWatchlist()
+	return marketrefs.MarketSignalWatchlist()
 }
 
 // DefaultEarningsWatchlist is a bounded catalyst universe for the earnings

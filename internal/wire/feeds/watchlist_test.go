@@ -11,7 +11,7 @@ func TestDefaultWatchlistIsReferenceOnly(t *testing.T) {
 	t.Parallel()
 
 	got := symbols(DefaultWatchlist())
-	want := symbols(marketrefs.BootstrapWatchlist())
+	want := symbols(marketrefs.MarketSignalWatchlist())
 
 	if len(got) != len(want) {
 		t.Fatalf("default watchlist size = %d, want %d", len(got), len(want))
@@ -20,6 +20,14 @@ func TestDefaultWatchlistIsReferenceOnly(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("default watchlist[%d] = %s, want %s", i, got[i], want[i])
 		}
+	}
+}
+
+func TestDefaultWatchlistIsEmptyByDefault(t *testing.T) {
+	t.Parallel()
+
+	if got := len(DefaultWatchlist()); got != 0 {
+		t.Fatalf("default watchlist len = %d, want 0", got)
 	}
 }
 

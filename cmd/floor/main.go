@@ -22,6 +22,7 @@ import (
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/internal/marketcontext"
 	"github.com/hnic/trading-floor/internal/marketdata"
+	"github.com/hnic/trading-floor/internal/marketrefs"
 	"github.com/hnic/trading-floor/internal/memory"
 	"github.com/hnic/trading-floor/internal/memory/belief"
 	"github.com/hnic/trading-floor/internal/observe"
@@ -112,7 +113,7 @@ func main() {
 
 	// --- Centralized Market Data ---
 	mdMgr := marketdata.NewManager(ibkrClient, pacing, 0)
-	marketBootstrap := feeds.DefaultWatchlist()
+	marketBootstrap := marketrefs.StartupPricingWatchlist()
 	mdMgr.AddInstruments(marketBootstrap)
 	mdMgr.Subscribe(func(prices map[string]float64) {
 		bk.Mark(prices)

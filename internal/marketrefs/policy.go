@@ -15,9 +15,10 @@ import (
 var embeddedPolicy []byte
 
 type Policy struct {
-	BootstrapWatchlist []model.Instrument `json:"bootstrap_watchlist"`
-	EarningsWatchlist  []model.Instrument `json:"earnings_watchlist"`
-	RegimeInstruments  RegimeInstruments  `json:"regime_instruments"`
+	MarketSignalWatchlist   []model.Instrument `json:"market_signal_watchlist"`
+	StartupPricingWatchlist []model.Instrument `json:"startup_pricing_watchlist"`
+	EarningsWatchlist       []model.Instrument `json:"earnings_watchlist"`
+	RegimeInstruments       RegimeInstruments  `json:"regime_instruments"`
 }
 
 type RegimeInstruments struct {
@@ -42,8 +43,12 @@ func ActivePolicy() Policy {
 	return clonePolicy(policyData)
 }
 
-func BootstrapWatchlist() []model.Instrument {
-	return cloneInstruments(ActivePolicy().BootstrapWatchlist)
+func MarketSignalWatchlist() []model.Instrument {
+	return cloneInstruments(ActivePolicy().MarketSignalWatchlist)
+}
+
+func StartupPricingWatchlist() []model.Instrument {
+	return cloneInstruments(ActivePolicy().StartupPricingWatchlist)
 }
 
 func EarningsWatchlist() []model.Instrument {
@@ -78,15 +83,17 @@ func parsePolicy(raw []byte) (Policy, error) {
 }
 
 func validatePolicy(policy Policy) error {
-	if len(policy.BootstrapWatchlist) == 0 {
-		return fmt.Errorf("market refs policy must define at least one bootstrap instrument")
-	}
 	if len(policy.EarningsWatchlist) == 0 {
 		return fmt.Errorf("market refs policy must define at least one earnings instrument")
 	}
-	for i, inst := range policy.BootstrapWatchlist {
+	for i, inst := range policy.MarketSignalWatchlist {
 		if strings.TrimSpace(inst.Symbol) == "" {
-			return fmt.Errorf("bootstrap watchlist instrument %d has empty symbol", i)
+			return fmt.Errorf("market signal watchlist instrument %d has empty symbol", i)
+		}
+	}
+	for i, inst := range policy.StartupPricingWatchlist {
+		if strings.TrimSpace(inst.Symbol) == "" {
+			return fmt.Errorf("startup pricing watchlist instrument %d has empty symbol", i)
 		}
 	}
 	for i, inst := range policy.EarningsWatchlist {
@@ -107,7 +114,8 @@ func validatePolicy(policy Policy) error {
 }
 
 func normalizePolicy(policy Policy) Policy {
-	policy.BootstrapWatchlist = normalizeInstruments(policy.BootstrapWatchlist)
+	policy.MarketSignalWatchlist = normalizeInstruments(policy.MarketSignalWatchlist)
+	policy.StartupPricingWatchlist = normalizeInstruments(policy.StartupPricingWatchlist)
 	policy.EarningsWatchlist = normalizeInstruments(policy.EarningsWatchlist)
 	policy.RegimeInstruments = RegimeInstruments{
 		Volatility: normalizeInstrument(policy.RegimeInstruments.Volatility),
@@ -136,7 +144,8 @@ func normalizeInstrument(inst model.Instrument) model.Instrument {
 }
 
 func clonePolicy(policy Policy) Policy {
-	policy.BootstrapWatchlist = cloneInstruments(policy.BootstrapWatchlist)
+	policy.MarketSignalWatchlist = cloneInstruments(policy.MarketSignalWatchlist)
+	policy.StartupPricingWatchlist = cloneInstruments(policy.StartupPricingWatchlist)
 	policy.EarningsWatchlist = cloneInstruments(policy.EarningsWatchlist)
 	return policy
 }

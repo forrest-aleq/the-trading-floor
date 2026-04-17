@@ -207,3 +207,45 @@ func TestBestEffortQuoteUsesLiveMarketData(t *testing.T) {
 		t.Fatalf("expected cached volume 880000, got %d", cached.Volume)
 	}
 }
+
+func TestFreshnessReportCountsFreshStaleAndMissingQuotes(t *testing.T) {
+	manager := NewManager(nil, nil, time.Minute)
+	now := time.Now().UTC()
+
+	fresh := model.Instrument{Symbol: "SPY", SecType: "STK", Currency: "USD", Exchange: "SMART"}
+	stale := model.Instrument{Symbol: "QQQ", SecType: "STK", Currency: "USD", Exchange: "SMART"}
+	missing := model.Instrument{Symbol: "IWM", SecType: "STK", Currency: "USD", Exchange: "SMART"}
+
+	manager.UpsertQuote(fresh, model.MarketQuote{
+		ObservedAt: now.Add(-30 * time.Second),
+		Last:       505.2,
+		Bid:        505.1,
+		Ask:        505.3,
+	})
+	manager.UpsertQuote(stale, model.MarketQuote{
+		ObservedAt: now.Add(-5 * time.Minute),
+		Last:       438.7,
+		Bid:        438.6,
+		Ask:        438.8,
+	})
+
+	report := manager.FreshnessReport([]model.Instrument{fresh, stale, missing}, now, 2*time.Minute)
+	if report.Total != 3 {
+		t.Fatalf("expected total 3, got %d", report.Total)
+	}
+	if report.Fresh != 1 {
+		t.Fatalf("expected 1 fresh quote, got %d", report.Fresh)
+	}
+	if report.Stale != 1 {
+		t.Fatalf("expected 1 stale quote, got %d", report.Stale)
+	}
+	if report.Missing != 1 {
+		t.Fatalf("expected 1 missing quote, got %d", report.Missing)
+	}
+	if report.OldestAge < 5*time.Minute-time.Second {
+		t.Fatalf("expected oldest age near 5m, got %s", report.OldestAge)
+	}
+	if report.NewestAge > time.Minute {
+		t.Fatalf("expected newest age under 1m, got %s", report.NewestAge)
+	}
+}

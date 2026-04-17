@@ -369,6 +369,41 @@ func main() {
 		"desks":          40,
 	})
 
+	var entryControl firm.EntryControl
+	if runtimeMode != runtimeModeDev || marketState.Provider != nil {
+		health := newRuntimeHealthSupervisor(runtimeHealthConfig{
+			Broker:           ibkrClient,
+			BrokerSync:       bk,
+			MarketFreshness:  mdMgr,
+			RequiredQuotes:   marketBootstrap,
+			Interval:         readRuntimeDuration("RUNTIME_HEALTH_INTERVAL", 15*time.Second),
+			MaxBrokerSyncAge: readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute),
+			MaxQuoteAge:      readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", 2*time.Minute),
+			OnPolicyChange: func(policy firm.EntryPolicy, details map[string]any) {
+				audit.Record("runtime_entry_policy", "", "", map[string]any{
+					"mode":          policy.Mode,
+					"allow_entries": policy.AllowEntries,
+					"reason":        policy.Reason,
+					"updated_at":    policy.UpdatedAt,
+					"details":       details,
+				})
+			},
+		})
+		entryControl = health
+		health.EvaluateNow(time.Now().UTC())
+		observe.SafeGo(slog.Default().With("component", "runtime"), "runtime health loop panic", func() {
+			health.Run(ctx)
+		}, "task", "runtime_health")
+		slog.Info("runtime health supervisor initialized",
+			"required_quotes", len(marketBootstrap),
+			"interval", readRuntimeDuration("RUNTIME_HEALTH_INTERVAL", 15*time.Second),
+			"max_broker_sync_age", readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute),
+			"max_quote_age", readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", 2*time.Minute),
+		)
+	} else {
+		slog.Warn("runtime health supervisor disabled in dev mode without live market data provider")
+	}
+
 	feedCount := registerDefaultFeeds(wireMgr, marketState.Provider)
 
 	// --- Floor + Desks ---
@@ -404,6 +439,7 @@ func main() {
 			OnTrade:       floor.RecordTrade,
 			Watchlist:     mdMgr.AddInstruments,
 			PublishSignal: wireMgr.Publish,
+			EntryControl:  entryControl,
 		})
 		desksByID[d.id] = desk
 		floor.AddDesk(desk)

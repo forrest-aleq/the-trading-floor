@@ -56,6 +56,7 @@ type Desk struct {
 	onTrade     func()
 	watchlist   func([]model.Instrument)
 	publish     func(context.Context, signal.Signal) error
+	entryCtl    EntryControl
 
 	minConviction    float64
 	councilThreshold float64
@@ -89,6 +90,7 @@ type DeskConfig struct {
 	OnTrade       func()
 	Watchlist     func([]model.Instrument)
 	PublishSignal func(context.Context, signal.Signal) error
+	EntryControl  EntryControl
 
 	MinConviction    float64
 	CouncilThreshold float64
@@ -152,6 +154,7 @@ func NewDesk(cfg DeskConfig) *Desk {
 		onTrade:          cfg.OnTrade,
 		watchlist:        cfg.Watchlist,
 		publish:          cfg.PublishSignal,
+		entryCtl:         cfg.EntryControl,
 		minConviction:    cfg.MinConviction,
 		councilThreshold: cfg.CouncilThreshold,
 		regime: model.Regime{
@@ -365,6 +368,23 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	if autonomy.Mode == model.Supervised {
 		thesis.PositionSize *= 0.5
 	}
+	if policy := d.currentEntryPolicy(); !policy.AllowEntries {
+		d.log.Warn("entry blocked by runtime health policy",
+			"thesis_id", thesis.ID,
+			"symbol", thesis.DisplaySymbol(),
+			"mode", policy.Mode,
+			"reason", policy.Reason,
+			"updated_at", policy.UpdatedAt,
+		)
+		if policy.Reason != "" {
+			thesis.CounterArgs = append(thesis.CounterArgs, "runtime_health:"+policy.Reason)
+		} else {
+			thesis.CounterArgs = append(thesis.CounterArgs, "runtime_health:entries_disabled")
+		}
+		d.persistThesis(ctx, thesis)
+		d.recordAntiPortfolio(ctx, thesis, "blocked_by_runtime_health")
+		return
+	}
 	d.research.HydrateThesisPricing(ctx, thesis)
 	d.normalizePositionSize(thesis)
 
@@ -503,6 +523,20 @@ func (d *Desk) MarkPendingExecution(ctx context.Context, thesis *model.Thesis, p
 		"broker_order_id", pending.OrderID,
 		"order_status", pending.Status,
 	)
+}
+
+func (d *Desk) currentEntryPolicy() EntryPolicy {
+	if d == nil || d.entryCtl == nil {
+		return NormalEntryPolicy(time.Now().UTC())
+	}
+	policy := d.entryCtl.CurrentEntryPolicy()
+	if policy.Mode == "" {
+		return NormalEntryPolicy(time.Now().UTC())
+	}
+	if policy.UpdatedAt.IsZero() {
+		policy.UpdatedAt = time.Now().UTC()
+	}
+	return policy
 }
 
 func (d *Desk) RecordExecutionFill(ctx context.Context, fill *model.Fill) (*model.Position, error) {

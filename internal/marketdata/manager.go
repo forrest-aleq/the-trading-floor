@@ -19,6 +19,16 @@ type PricePoint struct {
 	Price      float64
 }
 
+type QuoteFreshnessReport struct {
+	AsOf      time.Time     `json:"as_of"`
+	Total     int           `json:"total"`
+	Fresh     int           `json:"fresh"`
+	Stale     int           `json:"stale"`
+	Missing   int           `json:"missing"`
+	NewestAge time.Duration `json:"newest_age,omitempty"`
+	OldestAge time.Duration `json:"oldest_age,omitempty"`
+}
+
 const maxHistoryPointsPerInstrument = 256
 
 // Manager is a centralized market data subscription manager.
@@ -113,6 +123,55 @@ func (m *Manager) LatestQuote(inst model.Instrument) (model.MarketQuote, bool) {
 		return quote, true
 	}
 	return model.MarketQuote{}, false
+}
+
+func (m *Manager) FreshnessReport(instruments []model.Instrument, now time.Time, maxAge time.Duration) QuoteFreshnessReport {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	report := QuoteFreshnessReport{
+		AsOf:  now,
+		Total: len(instruments),
+	}
+	if len(instruments) == 0 {
+		return report
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, inst := range instruments {
+		quote, ok := m.lookupQuoteLocked(inst)
+		if !ok || quote.ReferencePrice() <= 0 {
+			report.Missing++
+			continue
+		}
+
+		observedAt := quote.ObservedAt
+		if observedAt.IsZero() {
+			report.Missing++
+			continue
+		}
+
+		age := now.Sub(observedAt.UTC())
+		if age < 0 {
+			age = 0
+		}
+		if report.Fresh+report.Stale == 0 || age < report.NewestAge {
+			report.NewestAge = age
+		}
+		if age > report.OldestAge {
+			report.OldestAge = age
+		}
+
+		if maxAge > 0 && age > maxAge {
+			report.Stale++
+			continue
+		}
+		report.Fresh++
+	}
+
+	return report
 }
 
 // BestEffortPrice resolves the best available price for an instrument using the
@@ -457,6 +516,17 @@ func (m *Manager) lookupHistoryLocked(inst model.Instrument) []PricePoint {
 		return nil
 	}
 	return m.history[symbol]
+}
+
+func (m *Manager) lookupQuoteLocked(inst model.Instrument) (model.MarketQuote, bool) {
+	if quote, ok := m.quotes[inst.Key()]; ok && quote.ReferencePrice() > 0 {
+		return quote, true
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	if quote, ok := m.quotes[symbol]; ok && quote.ReferencePrice() > 0 {
+		return quote, true
+	}
+	return model.MarketQuote{}, false
 }
 
 func (m *Manager) instrumentCandidates(inst model.Instrument) []model.Instrument {

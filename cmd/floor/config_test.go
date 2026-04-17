@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hnic/trading-floor/internal/book"
+	"github.com/hnic/trading-floor/internal/firm"
 	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/wire"
 	"github.com/hnic/trading-floor/pkg/model"
@@ -179,5 +181,107 @@ func TestValidateRuntimeReadinessRejectsBrokerBackedMarketStateInPaperMode(t *te
 	})
 	if err == nil {
 		t.Fatal("expected paper readiness validation to reject broker-backed market state")
+	}
+}
+
+type stubHealthBroker struct {
+	connected bool
+}
+
+func (b stubHealthBroker) IsConnected() bool { return b.connected }
+
+type stubHealthBook struct {
+	status book.BrokerSyncStatus
+}
+
+func (b stubHealthBook) BrokerSyncStatus() book.BrokerSyncStatus { return b.status }
+
+type stubHealthMarket struct {
+	report marketdata.QuoteFreshnessReport
+}
+
+func (m stubHealthMarket) FreshnessReport(_ []model.Instrument, now time.Time, _ time.Duration) marketdata.QuoteFreshnessReport {
+	report := m.report
+	if report.AsOf.IsZero() {
+		report.AsOf = now
+	}
+	return report
+}
+
+func TestRuntimeHealthDisablesEntriesWhenBrokerDisconnected(t *testing.T) {
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker:          stubHealthBroker{connected: false},
+		BrokerSync:      stubHealthBook{},
+		MarketFreshness: stubHealthMarket{},
+		RequiredQuotes:  []model.Instrument{{Symbol: "SPY", SecType: "STK", Currency: "USD"}},
+	})
+
+	policy := supervisor.EvaluateNow(time.Now().UTC())
+	if policy.AllowEntries {
+		t.Fatal("expected broker disconnect to disable entries")
+	}
+	if policy.Mode != firm.EntryModeEntriesDisabled {
+		t.Fatalf("expected entries disabled mode, got %s", policy.Mode)
+	}
+	if policy.Reason != "broker_disconnected" {
+		t.Fatalf("expected broker_disconnected reason, got %q", policy.Reason)
+	}
+}
+
+func TestRuntimeHealthDisablesEntriesWhenQuotesAreStale(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:  true,
+			LastSynced: now.Add(-30 * time.Second),
+		}},
+		MarketFreshness: stubHealthMarket{report: marketdata.QuoteFreshnessReport{
+			Total:   2,
+			Fresh:   1,
+			Stale:   1,
+			Missing: 0,
+		}},
+		RequiredQuotes: []model.Instrument{
+			{Symbol: "SPY", SecType: "STK", Currency: "USD"},
+			{Symbol: "QQQ", SecType: "STK", Currency: "USD"},
+		},
+	})
+
+	policy := supervisor.EvaluateNow(now)
+	if policy.AllowEntries {
+		t.Fatal("expected stale quotes to disable entries")
+	}
+	if policy.Reason != "market_data_stale:1" {
+		t.Fatalf("expected market_data_stale:1 reason, got %q", policy.Reason)
+	}
+}
+
+func TestRuntimeHealthAllowsEntriesWhenBrokerAndQuotesAreHealthy(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:  true,
+			LastSynced: now.Add(-30 * time.Second),
+		}},
+		MarketFreshness: stubHealthMarket{report: marketdata.QuoteFreshnessReport{
+			Total:   2,
+			Fresh:   2,
+			Stale:   0,
+			Missing: 0,
+		}},
+		RequiredQuotes: []model.Instrument{
+			{Symbol: "SPY", SecType: "STK", Currency: "USD"},
+			{Symbol: "QQQ", SecType: "STK", Currency: "USD"},
+		},
+	})
+
+	policy := supervisor.EvaluateNow(now)
+	if !policy.AllowEntries {
+		t.Fatalf("expected healthy runtime to allow entries, got reason %q", policy.Reason)
+	}
+	if policy.Mode != firm.EntryModeNormal {
+		t.Fatalf("expected normal mode, got %s", policy.Mode)
 	}
 }

@@ -37,12 +37,14 @@ func (s scriptedLLM) Complete(_ context.Context, req llm.Request) (*llm.Response
 
 type runtimeStubBroker struct {
 	connected atomic.Bool
+	orders    atomic.Int32
 	err       error
 }
 
 func (b *runtimeStubBroker) IsConnected() bool { return b.connected.Load() }
 func (b *runtimeStubBroker) IsPaper() bool     { return true }
 func (b *runtimeStubBroker) PlaceOrder(_ context.Context, o model.Order) (*model.Fill, error) {
+	b.orders.Add(1)
 	if b.err != nil {
 		return nil, b.err
 	}
@@ -64,6 +66,14 @@ func (b *runtimeStubBroker) GetPositions(_ context.Context) ([]ibkr.IBKRPosition
 }
 func (b *runtimeStubBroker) GetAccountSummary(_ context.Context) (*ibkr.AccountSummary, error) {
 	return &ibkr.AccountSummary{NetLiquidation: 1_000_000, Cash: 1_000_000}, nil
+}
+
+type runtimeStaticEntryControl struct {
+	policy firm.EntryPolicy
+}
+
+func (c runtimeStaticEntryControl) CurrentEntryPolicy() firm.EntryPolicy {
+	return c.policy
 }
 
 func TestDeskSkipsCouncilForSmallPctAndSpawnsSubTeam(t *testing.T) {
@@ -236,6 +246,67 @@ func TestControlDeskSkipsEngramBoost(t *testing.T) {
 
 	if thesisA.Conviction <= thesisB.Conviction {
 		t.Fatalf("expected Group A conviction boost from engrams, got A=%.2f B=%.2f", thesisA.Conviction, thesisB.Conviction)
+	}
+}
+
+func TestDeskBlocksEntryWhenRuntimeHealthDisablesEntries(t *testing.T) {
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "AAPL", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        100.0,
+		"target_price":       110.0,
+		"stop_loss":          95.0,
+		"conviction":         0.8,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.01,
+		"strategy":           "event",
+		"evidence":           []string{"earnings beat", "guide raised"},
+		"counter_args":       []string{"already priced"},
+		"kill_rules":         []map[string]any{{"condition": "price_below_stop", "threshold": 95.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"crowded trade"},
+		"missing_data":          []string{"flow"},
+		"historical_analogues":  []string{"prior beats"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"AAPL","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.9,"category":"corporate","reasoning":"earnings surprise"}`},
+		scriptedLLM{response: string(researchResp)},
+		scriptedLLM{response: string(prosecuteResp)},
+	)
+
+	broker := &runtimeStubBroker{}
+	desk, bk, _ := newRuntimeDeskWithBrokerAndEntryControl(
+		t,
+		"A",
+		"corporate",
+		router,
+		nil,
+		nil,
+		nil,
+		broker,
+		runtimeStaticEntryControl{policy: firm.DisabledEntryPolicy("broker_sync_stale:3m0s", time.Now().UTC())},
+	)
+
+	desk.Process(context.Background(), signal.Signal{
+		ID:        "sig-runtime-health-block",
+		Source:    "test",
+		Type:      signal.TypeNews,
+		Category:  "corporate",
+		Timestamp: time.Now(),
+		Urgency:   0.9,
+		Raw:       []byte(`AAPL beats earnings estimates and raises guidance`),
+	})
+
+	if got := len(bk.GetOpenPositions()); got != 0 {
+		t.Fatalf("expected runtime health to block new entries, got %d open positions", got)
+	}
+	if got := broker.orders.Load(); got != 0 {
+		t.Fatalf("expected broker not to receive blocked order, got %d submissions", got)
 	}
 }
 
@@ -884,10 +955,14 @@ func newRuntimeDesk(t *testing.T, group string, router *llm.Router, engrams *mem
 func newRuntimeDeskWithOptions(t *testing.T, group, domain string, router *llm.Router, engrams *memory.EngramStore, graph *belief.Graph, publish func(context.Context, signal.Signal) error) (*firm.Desk, *book.Book, *belief.Graph) {
 	t.Helper()
 
-	return newRuntimeDeskWithBroker(t, group, domain, router, engrams, graph, publish, nil)
+	return newRuntimeDeskWithBrokerAndEntryControl(t, group, domain, router, engrams, graph, publish, nil, nil)
 }
 
 func newRuntimeDeskWithBroker(t *testing.T, group, domain string, router *llm.Router, engrams *memory.EngramStore, graph *belief.Graph, publish func(context.Context, signal.Signal) error, broker *runtimeStubBroker) (*firm.Desk, *book.Book, *belief.Graph) {
+	return newRuntimeDeskWithBrokerAndEntryControl(t, group, domain, router, engrams, graph, publish, broker, nil)
+}
+
+func newRuntimeDeskWithBrokerAndEntryControl(t *testing.T, group, domain string, router *llm.Router, engrams *memory.EngramStore, graph *belief.Graph, publish func(context.Context, signal.Signal) error, broker *runtimeStubBroker, entryControl firm.EntryControl) (*firm.Desk, *book.Book, *belief.Graph) {
 	t.Helper()
 
 	if broker == nil {
@@ -923,6 +998,7 @@ func newRuntimeDeskWithBroker(t *testing.T, group, domain string, router *llm.Ro
 		Beliefs:       beliefGraph,
 		Engrams:       engrams,
 		PublishSignal: publish,
+		EntryControl:  entryControl,
 	})
 
 	return desk, bk, beliefGraph

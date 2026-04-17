@@ -60,6 +60,19 @@ type brokerAccountState struct {
 	lastSynced    time.Time
 }
 
+type BrokerSyncStatus struct {
+	Connected     bool
+	NAV           float64
+	Cash          float64
+	DailyPnL      float64
+	UnrealizedPnL float64
+	RealizedPnL   float64
+	OpenPositions int
+	GrossExposure float64
+	NetExposure   float64
+	LastSynced    time.Time
+}
+
 type Discrepancy struct {
 	Symbol      string
 	BookQty     float64
@@ -386,6 +399,24 @@ func (b *Book) Snapshot() PortfolioSnapshot {
 		DeskPositions: deskPos,
 		DeskCapital:   deskCap,
 		TotalTrades:   b.totalTrades,
+	}
+}
+
+func (b *Book) BrokerSyncStatus() BrokerSyncStatus {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	return BrokerSyncStatus{
+		Connected:     b.brokerSync.connected,
+		NAV:           b.brokerSync.nav,
+		Cash:          b.brokerSync.cash,
+		DailyPnL:      b.brokerSync.dailyPnL,
+		UnrealizedPnL: b.brokerSync.unrealizedPnL,
+		RealizedPnL:   b.brokerSync.realizedPnL,
+		OpenPositions: b.brokerSync.openPositions,
+		GrossExposure: b.brokerSync.grossExposure,
+		NetExposure:   b.brokerSync.netExposure,
+		LastSynced:    b.brokerSync.lastSynced,
 	}
 }
 

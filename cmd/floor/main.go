@@ -127,15 +127,22 @@ func main() {
 	}
 	mdMgr := marketdata.NewManager(marketState.Provider, marketState.RequestBudget, 0)
 	marketBootstrap := marketrefs.StartupPricingWatchlist()
+	var positionWriter *positionPersistenceWriter
+	if db != nil {
+		positionWriter = newPositionPersistenceWriter(
+			db,
+			readRuntimeDuration("POSITION_PERSIST_FLUSH_INTERVAL", 2*time.Second),
+			readRuntimeDuration("POSITION_PERSIST_WRITE_TIMEOUT", 15*time.Second),
+		)
+		observe.SafeGo(slog.Default().With("component", "runtime"), "position persistence loop panic", func() {
+			positionWriter.Run(ctx)
+		}, "task", "position_persist")
+	}
 	mdMgr.AddInstruments(marketBootstrap)
 	mdMgr.Subscribe(func(prices map[string]float64) {
 		bk.Mark(prices)
-		if db != nil {
-			for _, pos := range bk.GetOpenPositions() {
-				if err := db.UpsertPosition(ctx, pos); err != nil {
-					slog.Warn("persist mark-to-market failed", "position_id", pos.ID, "error", err)
-				}
-			}
+		if positionWriter != nil {
+			positionWriter.Enqueue(bk.GetOpenPositions())
 		}
 	})
 	if marketState.Provider != nil {

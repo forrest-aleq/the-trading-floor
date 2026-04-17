@@ -453,16 +453,20 @@ func main() {
 	}, "task", "ceo")
 
 	// --- Regime Detector ---
-	regimeDetector := regime.NewDetector(ibkrClient, func(old, newRegime model.Regime) {
-		ceo.ForceRegimeShift(newRegime)
-		audit.Record("regime_shift", "", "", map[string]any{
-			"old": old.Key(),
-			"new": newRegime.Key(),
+	if marketrefs.RegimeDetectionEnabled() {
+		regimeDetector := regime.NewDetector(ibkrClient, func(old, newRegime model.Regime) {
+			ceo.ForceRegimeShift(newRegime)
+			audit.Record("regime_shift", "", "", map[string]any{
+				"old": old.Key(),
+				"new": newRegime.Key(),
+			})
 		})
-	})
-	observe.SafeGo(slog.Default().With("component", "runtime"), "regime detector panic", func() {
-		regimeDetector.Run(ctx)
-	}, "task", "regime_detector")
+		observe.SafeGo(slog.Default().With("component", "runtime"), "regime detector panic", func() {
+			regimeDetector.Run(ctx)
+		}, "task", "regime_detector")
+	} else {
+		slog.Info("regime detector disabled by market refs policy")
+	}
 
 	groupA, groupB := 0, 0
 	for _, d := range desks {

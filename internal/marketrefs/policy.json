@@ -1,13 +1,8 @@
 {
   "market_signal_watchlist": [],
   "startup_pricing_watchlist": [],
-  "earnings_watchlist": [
-    { "symbol": "AAPL", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
-    { "symbol": "MSFT", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
-    { "symbol": "NVDA", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
-    { "symbol": "AMZN", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
-    { "symbol": "GOOGL", "sec_type": "STK", "exchange": "SMART", "currency": "USD" }
-  ],
+  "earnings_watchlist": [],
+  "regime_detection_mode": "off",
   "regime_instruments": {
     "volatility": { "symbol": "VIX", "sec_type": "IND", "exchange": "CBOE", "currency": "USD" },
     "trend": { "symbol": "SPY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },

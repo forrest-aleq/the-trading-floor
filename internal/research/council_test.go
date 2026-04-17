@@ -155,6 +155,7 @@ func TestCouncilSynthesizeHonorsWeightsAndRecommendations(t *testing.T) {
 
 func TestCouncilPerspectiveUsesThoughtModeForQwen(t *testing.T) {
 	t.Setenv("COUNCIL_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("COUNCIL_RESPONSE_MODE", "thought")
 
 	client := &councilStubClient{}
 	council := NewCouncil(llm.NewRouter(client, client, client))
@@ -179,6 +180,7 @@ func TestCouncilPerspectiveUsesThoughtModeForQwen(t *testing.T) {
 
 func TestCouncilPerspectiveCompilerFallbackRecoversStructuredJSON(t *testing.T) {
 	t.Setenv("COUNCIL_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("COUNCIL_RESPONSE_MODE", "thought")
 	t.Setenv("COUNCIL_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
 
 	client := &councilCompilerFallbackClient{}
@@ -210,6 +212,7 @@ func TestCouncilPerspectiveCompilerFallbackRecoversStructuredJSON(t *testing.T) 
 
 func TestCouncilPerspectiveAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T) {
 	t.Setenv("COUNCIL_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("COUNCIL_RESPONSE_MODE", "thought")
 
 	client := &councilTerminalBlockClient{}
 	council := NewCouncil(llm.NewRouter(client, client, client))
@@ -228,6 +231,7 @@ func TestCouncilPerspectiveAcceptsTerminalJSONBlockWithoutCompilerFallback(t *te
 
 func TestCouncilPerspectiveStructuredRetryRecoversBeforeCompilerFallback(t *testing.T) {
 	t.Setenv("COUNCIL_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("COUNCIL_RESPONSE_MODE", "thought")
 
 	client := &councilStructuredRetryClient{}
 	council := NewCouncil(llm.NewRouter(client, client, client))

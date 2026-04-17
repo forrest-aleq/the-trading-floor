@@ -47,6 +47,14 @@ func TestDefaultEarningsWatchlistIsCorporateUniverse(t *testing.T) {
 	}
 }
 
+func TestDefaultEarningsWatchlistIsEmptyByDefault(t *testing.T) {
+	t.Parallel()
+
+	if got := len(DefaultEarningsWatchlist()); got != 0 {
+		t.Fatalf("default earnings watchlist len = %d, want 0", got)
+	}
+}
+
 func TestMarketSignalStateOnlyEmitsMeaningfulMoves(t *testing.T) {
 	t.Parallel()
 

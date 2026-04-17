@@ -554,11 +554,13 @@ func (e *Engine) requestConfig() scannerRequestConfig {
 	}
 
 	return scannerRequestConfig{
-		systemPrompt:     e.structuredPrompt,
-		jsonMode:         true,
-		timeout:          scannerRequestTimeout,
-		maxTokens:        scannerMaxTokens,
-		compactMaxTokens: scannerCompactMaxTokens,
+		systemPrompt:            e.structuredPrompt,
+		jsonMode:                true,
+		timeout:                 scannerRequestTimeout,
+		maxTokens:               scannerMaxTokens,
+		compactMaxTokens:        scannerCompactMaxTokens,
+		allowCompilerFallback:   e.compilerModel != "",
+		allowStructuredFallback: false,
 	}
 }
 

@@ -18,6 +18,7 @@ type Policy struct {
 	MarketSignalWatchlist   []model.Instrument `json:"market_signal_watchlist"`
 	StartupPricingWatchlist []model.Instrument `json:"startup_pricing_watchlist"`
 	EarningsWatchlist       []model.Instrument `json:"earnings_watchlist"`
+	RegimeDetectionMode     string             `json:"regime_detection_mode"`
 	RegimeInstruments       RegimeInstruments  `json:"regime_instruments"`
 }
 
@@ -59,6 +60,10 @@ func ActiveRegimeInstruments() RegimeInstruments {
 	return ActivePolicy().RegimeInstruments
 }
 
+func RegimeDetectionEnabled() bool {
+	return ActivePolicy().RegimeDetectionMode == "proxy"
+}
+
 func loadPolicy() (Policy, error) {
 	raw := embeddedPolicy
 	if path := strings.TrimSpace(os.Getenv("MARKET_REFS_POLICY_FILE")); path != "" {
@@ -76,16 +81,14 @@ func parsePolicy(raw []byte) (Policy, error) {
 	if err := json.Unmarshal(raw, &policy); err != nil {
 		return Policy{}, fmt.Errorf("decode market refs policy: %w", err)
 	}
+	policy = normalizePolicy(policy)
 	if err := validatePolicy(policy); err != nil {
 		return Policy{}, err
 	}
-	return normalizePolicy(policy), nil
+	return policy, nil
 }
 
 func validatePolicy(policy Policy) error {
-	if len(policy.EarningsWatchlist) == 0 {
-		return fmt.Errorf("market refs policy must define at least one earnings instrument")
-	}
 	for i, inst := range policy.MarketSignalWatchlist {
 		if strings.TrimSpace(inst.Symbol) == "" {
 			return fmt.Errorf("market signal watchlist instrument %d has empty symbol", i)
@@ -102,6 +105,8 @@ func validatePolicy(policy Policy) error {
 		}
 	}
 	switch {
+	case policy.RegimeDetectionMode != "" && policy.RegimeDetectionMode != "off" && policy.RegimeDetectionMode != "proxy":
+		return fmt.Errorf("regime_detection_mode must be one of off|proxy")
 	case strings.TrimSpace(policy.RegimeInstruments.Volatility.Symbol) == "":
 		return fmt.Errorf("regime volatility instrument must define a symbol")
 	case strings.TrimSpace(policy.RegimeInstruments.Trend.Symbol) == "":
@@ -117,6 +122,10 @@ func normalizePolicy(policy Policy) Policy {
 	policy.MarketSignalWatchlist = normalizeInstruments(policy.MarketSignalWatchlist)
 	policy.StartupPricingWatchlist = normalizeInstruments(policy.StartupPricingWatchlist)
 	policy.EarningsWatchlist = normalizeInstruments(policy.EarningsWatchlist)
+	policy.RegimeDetectionMode = strings.ToLower(strings.TrimSpace(policy.RegimeDetectionMode))
+	if policy.RegimeDetectionMode == "" {
+		policy.RegimeDetectionMode = "off"
+	}
 	policy.RegimeInstruments = RegimeInstruments{
 		Volatility: normalizeInstrument(policy.RegimeInstruments.Volatility),
 		Trend:      normalizeInstrument(policy.RegimeInstruments.Trend),

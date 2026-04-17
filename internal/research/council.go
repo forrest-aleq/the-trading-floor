@@ -62,11 +62,15 @@ type VoiceTelemetryProvider interface {
 func NewCouncil(llmRouter *llm.Router) *Council {
 	selectedModel := criticalSelectedModel()
 	policy := activePromptPolicy()
+	responseMode := strings.TrimSpace(os.Getenv("COUNCIL_RESPONSE_MODE"))
+	if responseMode == "" {
+		responseMode = "json"
+	}
 	return &Council{
 		log:            slog.Default().With("component", "council"),
 		llm:            llmRouter,
 		selectedModel:  selectedModel,
-		responseMode:   detectStructuredResponseMode(os.Getenv("COUNCIL_RESPONSE_MODE"), selectedModel),
+		responseMode:   detectStructuredResponseMode(responseMode, selectedModel),
 		compilerModel:  structuredCompilerModel("COUNCIL_COMPILER_MODEL"),
 		thoughtPrefix:  policy.councilThoughtPrefix,
 		compilerPrompt: policy.councilCompilerPrompt,

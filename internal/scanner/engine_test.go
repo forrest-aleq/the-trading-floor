@@ -433,6 +433,42 @@ func TestEvaluateFallsBackToCompilerWhenThoughtModeMissesFinalBlock(t *testing.T
 	}
 }
 
+func TestEvaluateFallsBackToCompilerWhenStructuredModeMissesJSON(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+	t.Setenv("SCANNER_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
+
+	client := &scannerCompilerFallbackClient{}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	opp, ok := engine.Evaluate(context.Background(), signal.Signal{
+		ID:         "sig-structured-compiler",
+		Source:     "ft",
+		Type:       signal.TypeNews,
+		Category:   "macro",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: "Markets reprice after hawkish central bank surprise.",
+	}, "macro")
+	if !ok || opp == nil {
+		t.Fatal("expected compiler fallback to recover a structured decision in json mode")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected scanner pass and compiler pass, got %d requests", got)
+	}
+	if !client.requests[0].JSONMode {
+		t.Fatal("expected structured scanner pass to request JSON mode")
+	}
+	if !client.requests[1].JSONMode {
+		t.Fatal("expected compiler pass to request JSON mode")
+	}
+	if client.requests[1].Model != "gemma-the-writer-mighty-sword-9b" {
+		t.Fatalf("unexpected compiler model %q", client.requests[1].Model)
+	}
+	if opp.Direction != model.Short || len(opp.Instruments) != 1 || opp.Instruments[0].Symbol != "TLT" {
+		t.Fatalf("unexpected compiler fallback opportunity: %+v", opp)
+	}
+}
+
 func TestEvaluateFallsBackToStructuredJSONAfterThoughtTimeouts(t *testing.T) {
 	t.Setenv("SCANNER_MODEL", "qwen/qwen3.5-9b")
 

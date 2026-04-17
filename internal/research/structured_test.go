@@ -58,3 +58,30 @@ func TestHasStructuredBudgetRespectsExpiredContext(t *testing.T) {
 		t.Fatal("expected expired context to report no remaining structured budget")
 	}
 }
+
+func TestResearchStructuredStagesDefaultToJSONMode(t *testing.T) {
+	t.Setenv("RESEARCH_RESPONSE_MODE", "")
+	t.Setenv("PROSECUTION_RESPONSE_MODE", "")
+	t.Setenv("COUNCIL_RESPONSE_MODE", "")
+
+	desk := NewDesk(nil, 0.65)
+	if desk.responseMode != structuredResponseModeJSON {
+		t.Fatalf("desk response mode = %s, want %s", desk.responseMode, structuredResponseModeJSON)
+	}
+
+	prosecutor := NewProsecutor(nil)
+	if prosecutor.responseMode != structuredResponseModeJSON {
+		t.Fatalf("prosecutor response mode = %s, want %s", prosecutor.responseMode, structuredResponseModeJSON)
+	}
+
+	council := NewCouncil(nil)
+	if council.responseMode != structuredResponseModeJSON {
+		t.Fatalf("council response mode = %s, want %s", council.responseMode, structuredResponseModeJSON)
+	}
+}
+
+func TestStructuredResponseModeOverrideStillSupportsThoughtMode(t *testing.T) {
+	if got := detectStructuredResponseMode("thought", "qwen/qwen3.5-35b-a3b"); got != structuredResponseModeThought {
+		t.Fatalf("detectStructuredResponseMode(thought) = %s, want %s", got, structuredResponseModeThought)
+	}
+}

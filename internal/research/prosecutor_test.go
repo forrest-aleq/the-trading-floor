@@ -94,6 +94,7 @@ func (s *prosecutorArrayClient) Complete(_ context.Context, req llm.Request) (*l
 
 func TestProsecutorUsesThoughtModeForQwen(t *testing.T) {
 	t.Setenv("PROSECUTION_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("PROSECUTION_RESPONSE_MODE", "thought")
 
 	client := &prosecutorStubClient{}
 	prosecutor := NewProsecutor(llm.NewRouter(client, client, client))
@@ -115,6 +116,7 @@ func TestProsecutorUsesThoughtModeForQwen(t *testing.T) {
 
 func TestProsecutorCompilerFallbackRecoversStructuredVerdict(t *testing.T) {
 	t.Setenv("PROSECUTION_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("PROSECUTION_RESPONSE_MODE", "thought")
 	t.Setenv("PROSECUTION_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
 
 	client := &prosecutorCompilerFallbackClient{}
@@ -143,6 +145,7 @@ func TestProsecutorCompilerFallbackRecoversStructuredVerdict(t *testing.T) {
 
 func TestProsecutorAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T) {
 	t.Setenv("PROSECUTION_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("PROSECUTION_RESPONSE_MODE", "thought")
 
 	client := &prosecutorTerminalBlockClient{}
 	prosecutor := NewProsecutor(llm.NewRouter(client, client, client))
@@ -158,6 +161,7 @@ func TestProsecutorAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T)
 
 func TestProsecutorStructuredRetryRecoversBeforeCompilerFallback(t *testing.T) {
 	t.Setenv("PROSECUTION_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("PROSECUTION_RESPONSE_MODE", "thought")
 
 	client := &prosecutorStructuredRetryClient{}
 	prosecutor := NewProsecutor(llm.NewRouter(client, client, client))

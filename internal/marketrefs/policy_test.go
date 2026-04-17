@@ -8,7 +8,7 @@ func TestParsePolicyRequiresRegimeInstruments(t *testing.T) {
 	_, err := parsePolicy([]byte(`{
 	  "market_signal_watchlist":[],
 	  "startup_pricing_watchlist":[],
-	  "earnings_watchlist":[{"symbol":"AAPL","sec_type":"STK","exchange":"SMART","currency":"USD"}],
+	  "earnings_watchlist":[],
 	  "regime_instruments":{"volatility":{"symbol":"VIX","sec_type":"IND","exchange":"CBOE","currency":"USD"}}
 	}`))
 	if err == nil {
@@ -23,6 +23,7 @@ func TestParsePolicyNormalizesInstruments(t *testing.T) {
 	  "market_signal_watchlist":[{"symbol":" spy ","sec_type":"stk","exchange":"smart","currency":"usd"}],
 	  "startup_pricing_watchlist":[{"symbol":" qqq ","sec_type":"stk","exchange":"smart","currency":"usd"}],
 	  "earnings_watchlist":[{"symbol":" aapl ","sec_type":"stk","exchange":"smart","currency":"usd"}],
+	  "regime_detection_mode":" proxy ",
 	  "regime_instruments":{
 	    "volatility":{"symbol":" vix ","sec_type":"ind","exchange":"cboe","currency":"usd"},
 	    "trend":{"symbol":" spy ","sec_type":"stk","exchange":"smart","currency":"usd"},
@@ -41,6 +42,9 @@ func TestParsePolicyNormalizesInstruments(t *testing.T) {
 	if got := policy.EarningsWatchlist[0].Symbol; got != "AAPL" {
 		t.Fatalf("earnings symbol = %s, want AAPL", got)
 	}
+	if got := policy.RegimeDetectionMode; got != "proxy" {
+		t.Fatalf("regime detection mode = %s, want proxy", got)
+	}
 	if got := policy.RegimeInstruments.Volatility.Symbol; got != "VIX" {
 		t.Fatalf("volatility symbol = %s, want VIX", got)
 	}
@@ -52,7 +56,7 @@ func TestParsePolicyAllowsEmptySignalAndStartupWatchlists(t *testing.T) {
 	policy, err := parsePolicy([]byte(`{
 	  "market_signal_watchlist":[],
 	  "startup_pricing_watchlist":[],
-	  "earnings_watchlist":[{"symbol":"AAPL","sec_type":"STK","exchange":"SMART","currency":"USD"}],
+	  "earnings_watchlist":[],
 	  "regime_instruments":{
 	    "volatility":{"symbol":"VIX","sec_type":"IND","exchange":"CBOE","currency":"USD"},
 	    "trend":{"symbol":"SPY","sec_type":"STK","exchange":"SMART","currency":"USD"},
@@ -67,5 +71,30 @@ func TestParsePolicyAllowsEmptySignalAndStartupWatchlists(t *testing.T) {
 	}
 	if len(policy.StartupPricingWatchlist) != 0 {
 		t.Fatalf("startup pricing watchlist len = %d, want 0", len(policy.StartupPricingWatchlist))
+	}
+	if policy.RegimeDetectionMode != "off" {
+		t.Fatalf("regime detection mode = %s, want off", policy.RegimeDetectionMode)
+	}
+}
+
+func TestParsePolicyAllowsEmptyEarningsUniverse(t *testing.T) {
+	t.Parallel()
+
+	policy, err := parsePolicy([]byte(`{
+	  "market_signal_watchlist":[],
+	  "startup_pricing_watchlist":[],
+	  "earnings_watchlist":[],
+	  "regime_detection_mode":"off",
+	  "regime_instruments":{
+	    "volatility":{"symbol":"VIX","sec_type":"IND","exchange":"CBOE","currency":"USD"},
+	    "trend":{"symbol":"SPY","sec_type":"STK","exchange":"SMART","currency":"USD"},
+	    "risk":{"symbol":"TLT","sec_type":"STK","exchange":"SMART","currency":"USD"}
+	  }
+	}`))
+	if err != nil {
+		t.Fatalf("parsePolicy returned error: %v", err)
+	}
+	if len(policy.EarningsWatchlist) != 0 {
+		t.Fatalf("earnings watchlist len = %d, want 0", len(policy.EarningsWatchlist))
 	}
 }

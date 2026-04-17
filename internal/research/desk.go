@@ -120,12 +120,16 @@ func NewDesk(llmRouter *llm.Router, minConviction float64) *Desk {
 		minConviction = 0.65
 	}
 	policy := activePromptPolicy()
+	responseMode := strings.TrimSpace(os.Getenv("RESEARCH_RESPONSE_MODE"))
+	if responseMode == "" {
+		responseMode = "json"
+	}
 	return &Desk{
 		log:            slog.Default().With("component", "research"),
 		llm:            llmRouter,
 		minConviction:  minConviction,
 		selectedModel:  researchSelectedModel(),
-		responseMode:   detectStructuredResponseMode(os.Getenv("RESEARCH_RESPONSE_MODE"), researchSelectedModel()),
+		responseMode:   detectStructuredResponseMode(responseMode, researchSelectedModel()),
 		retryModel:     structuredRetryModel("RESEARCH_RETRY_MODEL", structuredCompilerModel("RESEARCH_COMPILER_MODEL"), researchSelectedModel()),
 		compilerModel:  structuredCompilerModel("RESEARCH_COMPILER_MODEL"),
 		systemPrompt:   policy.researchPrompt,

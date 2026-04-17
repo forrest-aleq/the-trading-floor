@@ -30,11 +30,15 @@ type Prosecutor struct {
 func NewProsecutor(llmRouter *llm.Router) *Prosecutor {
 	selectedModel := criticalSelectedModel()
 	policy := activePromptPolicy()
+	responseMode := strings.TrimSpace(os.Getenv("PROSECUTION_RESPONSE_MODE"))
+	if responseMode == "" {
+		responseMode = "json"
+	}
 	return &Prosecutor{
 		log:            slog.Default().With("component", "prosecutor"),
 		llm:            llmRouter,
 		selectedModel:  selectedModel,
-		responseMode:   detectStructuredResponseMode(os.Getenv("PROSECUTION_RESPONSE_MODE"), selectedModel),
+		responseMode:   detectStructuredResponseMode(responseMode, selectedModel),
 		compilerModel:  structuredCompilerModel("PROSECUTION_COMPILER_MODEL"),
 		systemPrompt:   policy.prosecutionPrompt,
 		thoughtPrefix:  policy.prosecutionThoughtPrefix,

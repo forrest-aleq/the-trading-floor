@@ -125,6 +125,7 @@ func (s *researchPrimaryErrorRetryClient) Complete(_ context.Context, req llm.Re
 
 func TestInvestigateUsesThoughtModeForQwenResearch(t *testing.T) {
 	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "thought")
 
 	client := &researchStubClient{}
 	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
@@ -243,6 +244,7 @@ func (s *researchStringNumericClient) Complete(_ context.Context, req llm.Reques
 
 func TestInvestigateCompilerFallbackRecoversStructuredThesis(t *testing.T) {
 	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "thought")
 	t.Setenv("RESEARCH_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
 
 	client := &researchCompilerFallbackClient{}
@@ -274,6 +276,7 @@ func TestInvestigateCompilerFallbackRecoversStructuredThesis(t *testing.T) {
 
 func TestInvestigateAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T) {
 	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "thought")
 
 	client := &researchTerminalBlockClient{}
 	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
@@ -292,6 +295,7 @@ func TestInvestigateAcceptsTerminalJSONBlockWithoutCompilerFallback(t *testing.T
 
 func TestInvestigateStructuredRetryRecoversBeforeCompilerFallback(t *testing.T) {
 	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "thought")
 
 	client := &researchStructuredRetryClient{}
 	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
@@ -340,6 +344,7 @@ func TestInvestigateDetailedMarksLowConvictionAsReject(t *testing.T) {
 
 func TestInvestigateRecoversWithStructuredRetryAfterPrimaryError(t *testing.T) {
 	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.5-35b-a3b")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "thought")
 	t.Setenv("RESEARCH_COMPILER_MODEL", "gemma-the-writer-mighty-sword-9b")
 
 	client := &researchPrimaryErrorRetryClient{}

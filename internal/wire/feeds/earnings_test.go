@@ -1,6 +1,10 @@
 package feeds
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/hnic/trading-floor/pkg/model"
+)
 
 func TestResolveFMPAPIKeyPrecedence(t *testing.T) {
 	t.Setenv("FMP_API_KEY", "from-fmp")
@@ -20,5 +24,30 @@ func TestResolveFMPAPIKeyFallsBackToLegacyAlias(t *testing.T) {
 
 	if got := resolveFMPAPIKey(""); got != "from-legacy" {
 		t.Fatalf("resolved key = %q, want from-legacy", got)
+	}
+}
+
+func TestNewEarningsFeedAllowsUnboundedUniverseWhenWatchlistEmpty(t *testing.T) {
+	t.Parallel()
+
+	feed := NewEarningsFeed("key", nil)
+	if len(feed.watch) != 0 {
+		t.Fatalf("watchlist len = %d, want 0", len(feed.watch))
+	}
+}
+
+func TestNewEarningsFeedOnlyTracksStockSymbols(t *testing.T) {
+	t.Parallel()
+
+	feed := NewEarningsFeed("key", []model.Instrument{
+		{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		{Symbol: "ES", SecType: "FUT", Exchange: "CME", Currency: "USD"},
+		{Symbol: "  ", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+	})
+	if len(feed.watch) != 1 {
+		t.Fatalf("watchlist len = %d, want 1", len(feed.watch))
+	}
+	if _, ok := feed.watch["AAPL"]; !ok {
+		t.Fatal("expected AAPL to be tracked")
 	}
 }

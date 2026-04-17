@@ -155,6 +155,24 @@ func (m *Manager) BestEffortPrice(ctx context.Context, inst model.Instrument) (m
 	return model.Instrument{}, 0, false
 }
 
+func (m *Manager) BestEffortQuote(ctx context.Context, inst model.Instrument) (model.Instrument, model.MarketQuote, bool) {
+	candidates := m.instrumentCandidates(inst)
+	for _, candidate := range candidates {
+		if quote, ok := m.cachedQuote(candidate); ok && quote.ReferencePrice() > 0 {
+			return candidate, quote, true
+		}
+	}
+	for _, candidate := range candidates {
+		quote, ok := m.liveQuote(ctx, candidate)
+		if !ok || quote.ReferencePrice() <= 0 {
+			continue
+		}
+		m.storeQuote(candidate, quote)
+		return candidate, quote, true
+	}
+	return model.Instrument{}, model.MarketQuote{}, false
+}
+
 func (m *Manager) PriceChange(inst model.Instrument, window time.Duration) (float64, bool) {
 	if window <= 0 {
 		return 0, false
@@ -477,6 +495,74 @@ func (m *Manager) cachedPrice(inst model.Instrument) (float64, bool) {
 		return price, true
 	}
 	return 0, false
+}
+
+func (m *Manager) cachedQuote(inst model.Instrument) (model.MarketQuote, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if quote, ok := m.quotes[inst.Key()]; ok && quote.ReferencePrice() > 0 {
+		return quote, true
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	if symbol == "" {
+		return model.MarketQuote{}, false
+	}
+	if quote, ok := m.quotes[symbol]; ok && quote.ReferencePrice() > 0 {
+		return quote, true
+	}
+	return model.MarketQuote{}, false
+}
+
+func (m *Manager) liveQuote(ctx context.Context, inst model.Instrument) (model.MarketQuote, bool) {
+	if m == nil || m.client == nil || inst.Symbol == "" {
+		return model.MarketQuote{}, false
+	}
+	if m.pacing != nil {
+		if err := m.pacing.AcquireMessage(ctx); err != nil {
+			return model.MarketQuote{}, false
+		}
+	}
+	md, err := m.client.ReqMarketData(ctx, inst)
+	if err != nil || md == nil {
+		return model.MarketQuote{}, false
+	}
+	quoteTime := time.Now().UTC()
+	if md.Timestamp > 0 {
+		quoteTime = time.UnixMilli(md.Timestamp).UTC()
+	}
+	quote := model.MarketQuote{
+		ObservedAt: quoteTime,
+		Last:       md.Last,
+		Bid:        md.Bid,
+		Ask:        md.Ask,
+		Volume:     md.Volume,
+	}
+	return quote, quote.ReferencePrice() > 0
+}
+
+func (m *Manager) storeQuote(inst model.Instrument, quote model.MarketQuote) {
+	if quote.ReferencePrice() <= 0 || inst.Symbol == "" {
+		return
+	}
+
+	price := quote.ReferencePrice()
+	observedAt := quote.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := inst.Key()
+	m.quotes[key] = quote
+	m.prices[key] = price
+	m.appendHistoryLocked(key, price, observedAt)
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	if symbol != "" {
+		m.quotes[symbol] = quote
+		m.prices[symbol] = price
+		m.appendHistoryLocked(symbol, price, observedAt)
+	}
 }
 
 func realizedVolatility(points []PricePoint) (float64, bool) {

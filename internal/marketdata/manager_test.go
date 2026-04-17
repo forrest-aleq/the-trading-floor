@@ -176,3 +176,35 @@ func TestRealizedVolatilityUsesRollingHistory(t *testing.T) {
 		t.Fatalf("expected positive realized volatility, got %.2f", vol)
 	}
 }
+
+func TestBestEffortQuoteUsesLiveMarketData(t *testing.T) {
+	manager := NewManager(stubHistoricalClient{
+		md: &ibkr.MarketData{
+			Timestamp: time.Now().UnixMilli(),
+			Last:      211.4,
+			Bid:       211.3,
+			Ask:       211.5,
+			Volume:    880000,
+		},
+	}, nil, time.Minute)
+
+	inst := model.Instrument{Symbol: "IWM", SecType: "STK", Currency: "USD", Exchange: "SMART"}
+	resolved, quote, ok := manager.BestEffortQuote(context.Background(), inst)
+	if !ok {
+		t.Fatal("expected best-effort quote to succeed")
+	}
+	if resolved.Symbol != "IWM" {
+		t.Fatalf("expected resolved symbol IWM, got %s", resolved.Symbol)
+	}
+	if quote.Last != 211.4 || quote.Bid != 211.3 || quote.Ask != 211.5 {
+		t.Fatalf("unexpected quote %+v", quote)
+	}
+
+	cached, ok := manager.LatestQuote(inst)
+	if !ok {
+		t.Fatal("expected best-effort quote to populate cache")
+	}
+	if cached.Volume != 880000 {
+		t.Fatalf("expected cached volume 880000, got %d", cached.Volume)
+	}
+}

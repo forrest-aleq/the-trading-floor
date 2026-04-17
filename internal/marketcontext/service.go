@@ -33,6 +33,10 @@ type realizedVolatilityView interface {
 	RealizedVolatility(model.Instrument, time.Duration) (float64, bool)
 }
 
+type quoteResolver interface {
+	BestEffortQuote(context.Context, model.Instrument) (model.Instrument, model.MarketQuote, bool)
+}
+
 func NewService(prices PriceView) *Service {
 	return &Service{
 		prices: prices,
@@ -120,6 +124,11 @@ func (s *Service) BuildThesisContext(ctx context.Context, thesis *model.Thesis) 
 		if priceInst.Symbol == "" {
 			priceInst = inst
 		}
+		if resolvedQuoteInst, quote, ok := s.bestEffortQuote(ctx, priceInst); ok {
+			base.Instrument = mergeInstrument(priceInst, resolvedQuoteInst)
+			applyMarketQuote(base, quote)
+			priceInst = base.Instrument
+		}
 		if change, ok := s.prices.PriceChange(priceInst, 15*time.Minute); ok {
 			base.Return15mPct = change
 		}
@@ -195,6 +204,23 @@ func (s *Service) bestEffortPrice(ctx context.Context, inst model.Instrument) (m
 	return model.Instrument{}, 0, false
 }
 
+func (s *Service) bestEffortQuote(ctx context.Context, inst model.Instrument) (model.Instrument, model.MarketQuote, bool) {
+	if s == nil || s.prices == nil || inst.Symbol == "" {
+		return model.Instrument{}, model.MarketQuote{}, false
+	}
+	if resolver, ok := s.prices.(quoteResolver); ok {
+		if resolved, quote, ok := resolver.BestEffortQuote(ctx, inst); ok {
+			return resolved, quote, true
+		}
+	}
+	if cached, ok := s.prices.(quoteView); ok {
+		if quote, ok := cached.LatestQuote(inst); ok {
+			return inst, quote, true
+		}
+	}
+	return model.Instrument{}, model.MarketQuote{}, false
+}
+
 func primaryInstrument(instruments []model.Instrument) model.Instrument {
 	if len(instruments) == 0 {
 		return model.Instrument{}
@@ -234,7 +260,13 @@ func (s *Service) applyQuoteState(ctx *model.MarketContext, inst model.Instrumen
 		ctx.Notes = appendNote(ctx.Notes, "live quote unavailable")
 		return
 	}
+	applyMarketQuote(ctx, quote)
+}
 
+func applyMarketQuote(ctx *model.MarketContext, quote model.MarketQuote) {
+	if ctx == nil || quote.ReferencePrice() <= 0 {
+		return
+	}
 	ctx.BidPrice = quote.Bid
 	ctx.AskPrice = quote.Ask
 	ctx.MidPrice = quote.MidPrice()

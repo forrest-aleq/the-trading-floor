@@ -59,6 +59,23 @@ func (blockingPriceView) BestEffortPrice(ctx context.Context, _ model.Instrument
 	return model.Instrument{}, 0, false
 }
 
+type resolverOnlyPriceView struct {
+	stubPriceView
+	resolved model.Instrument
+}
+
+func (s resolverOnlyPriceView) LatestQuote(model.Instrument) (model.MarketQuote, bool) {
+	return model.MarketQuote{}, false
+}
+
+func (s resolverOnlyPriceView) BestEffortQuote(_ context.Context, inst model.Instrument) (model.Instrument, model.MarketQuote, bool) {
+	resolved := s.resolved
+	if resolved.Symbol == "" {
+		resolved = inst
+	}
+	return resolved, s.quote, s.quote.ReferencePrice() > 0
+}
+
 func TestBuildOpportunityContextIncludesConsensusAndPricePath(t *testing.T) {
 	service := NewService(stubPriceView{
 		price: 101.25,
@@ -203,5 +220,51 @@ func TestBuildThesisContextRespectsCallerDeadline(t *testing.T) {
 	}
 	if enriched.CurrentPrice != 0 {
 		t.Fatalf("expected no hydrated price, got %.2f", enriched.CurrentPrice)
+	}
+}
+
+func TestBuildThesisContextUsesBestEffortQuoteWhenCacheIsCold(t *testing.T) {
+	service := NewService(resolverOnlyPriceView{
+		stubPriceView: stubPriceView{
+			price: 402.6,
+			change: map[time.Duration]float64{
+				15 * time.Minute: 0.4,
+			},
+			quote: model.MarketQuote{
+				ObservedAt: time.Now().Add(-2 * time.Second),
+				Bid:        402.5,
+				Ask:        402.7,
+				Volume:     2500000,
+			},
+		},
+		resolved: model.Instrument{
+			Symbol:   "SPY",
+			SecType:  "STK",
+			Currency: "USD",
+			Exchange: "SMART",
+		},
+	})
+
+	thesis := &model.Thesis{
+		Instrument: model.Instrument{
+			Symbol:   "SPY",
+			SecType:  "STK",
+			Currency: "USD",
+			Exchange: "SMART",
+		},
+	}
+
+	ctx := service.BuildThesisContext(context.Background(), thesis)
+	if ctx == nil {
+		t.Fatal("expected thesis context")
+	}
+	if ctx.BidPrice != 402.5 || ctx.AskPrice != 402.7 {
+		t.Fatalf("unexpected quote %.2f / %.2f", ctx.BidPrice, ctx.AskPrice)
+	}
+	if ctx.LastVolume != 2500000 {
+		t.Fatalf("expected last volume 2500000, got %d", ctx.LastVolume)
+	}
+	if ctx.CurrentPrice != 402.6 {
+		t.Fatalf("expected current price 402.6, got %.2f", ctx.CurrentPrice)
 	}
 }

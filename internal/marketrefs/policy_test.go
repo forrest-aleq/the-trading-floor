@@ -98,3 +98,21 @@ func TestParsePolicyAllowsEmptyEarningsUniverse(t *testing.T) {
 		t.Fatalf("earnings watchlist len = %d, want 0", len(policy.EarningsWatchlist))
 	}
 }
+
+func TestEmbeddedPolicyBootstrapsSeriousReferenceUniverse(t *testing.T) {
+	t.Parallel()
+
+	policy, err := parsePolicy(embeddedPolicy)
+	if err != nil {
+		t.Fatalf("parsePolicy returned error: %v", err)
+	}
+	if policy.RegimeDetectionMode != "proxy" {
+		t.Fatalf("regime detection mode = %s, want proxy", policy.RegimeDetectionMode)
+	}
+	if len(policy.StartupPricingWatchlist) < 6 {
+		t.Fatalf("startup pricing watchlist len = %d, want at least 6", len(policy.StartupPricingWatchlist))
+	}
+	if len(policy.EarningsWatchlist) < 6 {
+		t.Fatalf("earnings watchlist len = %d, want at least 6", len(policy.EarningsWatchlist))
+	}
+}

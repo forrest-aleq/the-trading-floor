@@ -1,8 +1,30 @@
 {
   "market_signal_watchlist": [],
-  "startup_pricing_watchlist": [],
-  "earnings_watchlist": [],
-  "regime_detection_mode": "off",
+  "startup_pricing_watchlist": [
+    { "symbol": "SPY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "QQQ", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "IWM", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "DIA", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "TLT", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "HYG", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "GLD", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "USO", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "SMH", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "VIX", "sec_type": "IND", "exchange": "CBOE", "currency": "USD" }
+  ],
+  "earnings_watchlist": [
+    { "symbol": "AAPL", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "MSFT", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "NVDA", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "AMZN", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "GOOGL", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "META", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "TSLA", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "AMD", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "LLY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "JPM", "sec_type": "STK", "exchange": "SMART", "currency": "USD" }
+  ],
+  "regime_detection_mode": "proxy",
   "regime_instruments": {
     "volatility": { "symbol": "VIX", "sec_type": "IND", "exchange": "CBOE", "currency": "USD" },
     "trend": { "symbol": "SPY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },

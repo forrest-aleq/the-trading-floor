@@ -3,6 +3,7 @@ package marketdata
 import (
 	"context"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +34,8 @@ type Manager struct {
 	mu            sync.RWMutex
 	watchlist     map[string]model.Instrument // instrument key -> instrument
 	prices        map[string]float64          // instrument key -> last price
-	history       map[string][]PricePoint     // instrument key/symbol -> rolling history
+	quotes        map[string]model.MarketQuote
+	history       map[string][]PricePoint // instrument key/symbol -> rolling history
 	suppressUntil map[string]time.Time
 	subscribers   []Subscriber
 }
@@ -59,6 +61,7 @@ func NewManager(client MarketDataClient, pacing *ibkr.PacingBudget, interval tim
 		interval:      interval,
 		watchlist:     make(map[string]model.Instrument),
 		prices:        make(map[string]float64),
+		quotes:        make(map[string]model.MarketQuote),
 		history:       make(map[string][]PricePoint),
 		suppressUntil: make(map[string]time.Time),
 	}
@@ -106,6 +109,20 @@ func (m *Manager) LatestPrice(inst model.Instrument) (float64, bool) {
 		return price, true
 	}
 	return 0, false
+}
+
+func (m *Manager) LatestQuote(inst model.Instrument) (model.MarketQuote, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if quote, ok := m.quotes[inst.Key()]; ok && quote.ReferencePrice() > 0 {
+		return quote, true
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	if quote, ok := m.quotes[symbol]; ok && quote.ReferencePrice() > 0 {
+		return quote, true
+	}
+	return model.MarketQuote{}, false
 }
 
 // BestEffortPrice resolves the best available price for an instrument using the
@@ -175,6 +192,37 @@ func (m *Manager) PriceChange(inst model.Instrument, window time.Duration) (floa
 	return ((latest.Price - baseline.Price) / baseline.Price) * 100, true
 }
 
+func (m *Manager) RealizedVolatility(inst model.Instrument, window time.Duration) (float64, bool) {
+	if window <= 0 {
+		return 0, false
+	}
+
+	m.mu.RLock()
+	history := append([]PricePoint(nil), m.lookupHistoryLocked(inst)...)
+	m.mu.RUnlock()
+	if len(history) < 3 {
+		return 0, false
+	}
+
+	latest := history[len(history)-1]
+	cutoff := latest.ObservedAt.Add(-window)
+	points := make([]PricePoint, 0, len(history))
+	for _, point := range history {
+		if point.Price <= 0 {
+			continue
+		}
+		if point.ObservedAt.Before(cutoff) {
+			continue
+		}
+		points = append(points, point)
+	}
+	if len(points) < 3 {
+		return 0, false
+	}
+
+	return realizedVolatility(points)
+}
+
 // Run polls IBKR for market data on the shared watchlist and distributes updates.
 func (m *Manager) Run(ctx context.Context) {
 	m.poll(ctx)
@@ -205,6 +253,7 @@ func (m *Manager) poll(ctx context.Context) {
 	}
 
 	prices := make(map[string]float64)
+	quotes := make(map[string]model.MarketQuote)
 	timestamp := time.Now().UTC()
 	for _, inst := range instruments {
 		if ctx.Err() != nil {
@@ -243,6 +292,17 @@ func (m *Manager) poll(ctx context.Context) {
 			continue
 		}
 		prices[key] = price
+		quoteTime := timestamp
+		if md.Timestamp > 0 {
+			quoteTime = time.UnixMilli(md.Timestamp).UTC()
+		}
+		quotes[key] = model.MarketQuote{
+			ObservedAt: quoteTime,
+			Last:       md.Last,
+			Bid:        md.Bid,
+			Ask:        md.Ask,
+			Volume:     md.Volume,
+		}
 	}
 
 	if len(prices) == 0 {
@@ -260,10 +320,16 @@ func (m *Manager) poll(ctx context.Context) {
 			continue
 		}
 		m.appendHistoryLocked(key, price, timestamp)
+		if quote, ok := quotes[key]; ok && quote.ReferencePrice() > 0 {
+			m.quotes[key] = quote
+		}
 		symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
 		if symbol != "" {
 			m.prices[symbol] = price
 			m.appendHistoryLocked(symbol, price, timestamp)
+			if quote, ok := quotes[key]; ok && quote.ReferencePrice() > 0 {
+				m.quotes[symbol] = quote
+			}
 		}
 	}
 	subs := make([]Subscriber, len(m.subscribers))
@@ -411,4 +477,52 @@ func (m *Manager) cachedPrice(inst model.Instrument) (float64, bool) {
 		return price, true
 	}
 	return 0, false
+}
+
+func realizedVolatility(points []PricePoint) (float64, bool) {
+	if len(points) < 3 {
+		return 0, false
+	}
+
+	returns := make([]float64, 0, len(points)-1)
+	totalIntervalSeconds := 0.0
+	for i := 1; i < len(points); i++ {
+		prev := points[i-1]
+		curr := points[i]
+		if prev.Price <= 0 || curr.Price <= 0 {
+			continue
+		}
+		interval := curr.ObservedAt.Sub(prev.ObservedAt).Seconds()
+		if interval <= 0 {
+			continue
+		}
+		returns = append(returns, math.Log(curr.Price/prev.Price))
+		totalIntervalSeconds += interval
+	}
+	if len(returns) < 2 || totalIntervalSeconds <= 0 {
+		return 0, false
+	}
+
+	mean := 0.0
+	for _, ret := range returns {
+		mean += ret
+	}
+	mean /= float64(len(returns))
+
+	variance := 0.0
+	for _, ret := range returns {
+		diff := ret - mean
+		variance += diff * diff
+	}
+	variance /= float64(len(returns) - 1)
+	if variance <= 0 {
+		return 0, false
+	}
+
+	avgIntervalSeconds := totalIntervalSeconds / float64(len(returns))
+	if avgIntervalSeconds <= 0 {
+		return 0, false
+	}
+	annualization := math.Sqrt((365 * 24 * time.Hour).Seconds() / avgIntervalSeconds)
+	return math.Sqrt(variance) * annualization * 100, true
 }

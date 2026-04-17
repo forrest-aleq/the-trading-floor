@@ -23,7 +23,7 @@ func TestDefaultWatchlistIsReferenceOnly(t *testing.T) {
 	}
 }
 
-func TestDefaultWatchlistIsEmptyByDefault(t *testing.T) {
+func TestDefaultWatchlistRemainsTickerSilentByDefault(t *testing.T) {
 	t.Parallel()
 
 	if got := len(DefaultWatchlist()); got != 0 {
@@ -47,11 +47,11 @@ func TestDefaultEarningsWatchlistIsCorporateUniverse(t *testing.T) {
 	}
 }
 
-func TestDefaultEarningsWatchlistIsEmptyByDefault(t *testing.T) {
+func TestDefaultEarningsWatchlistBootstrapsCatalystUniverse(t *testing.T) {
 	t.Parallel()
 
-	if got := len(DefaultEarningsWatchlist()); got != 0 {
-		t.Fatalf("default earnings watchlist len = %d, want 0", got)
+	if got := len(DefaultEarningsWatchlist()); got < 6 {
+		t.Fatalf("default earnings watchlist len = %d, want at least 6", got)
 	}
 }
 

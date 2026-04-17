@@ -25,6 +25,14 @@ type priceResolver interface {
 	BestEffortPrice(context.Context, model.Instrument) (model.Instrument, float64, bool)
 }
 
+type quoteView interface {
+	LatestQuote(model.Instrument) (model.MarketQuote, bool)
+}
+
+type realizedVolatilityView interface {
+	RealizedVolatility(model.Instrument, time.Duration) (float64, bool)
+}
+
 func NewService(prices PriceView) *Service {
 	return &Service{
 		prices: prices,
@@ -60,6 +68,8 @@ func (s *Service) BuildOpportunityContext(opp *model.Opportunity, sig signal.Sig
 		if change, ok := s.prices.PriceChange(inst, 4*time.Hour); ok {
 			ctx.Return4hPct = change
 		}
+		s.applyQuoteState(ctx, inst)
+		s.applyRealizedVolatility(ctx, inst)
 	}
 
 	if extracted := extractConsensusSnapshot(sig); extracted != nil {
@@ -119,6 +129,8 @@ func (s *Service) BuildThesisContext(ctx context.Context, thesis *model.Thesis) 
 		if change, ok := s.prices.PriceChange(priceInst, 4*time.Hour); ok {
 			base.Return4hPct = change
 		}
+		s.applyQuoteState(base, priceInst)
+		s.applyRealizedVolatility(base, priceInst)
 	}
 
 	if !base.ImpliedMoveAvailable {
@@ -208,17 +220,77 @@ func relativeSurprise(actual, estimate float64) float64 {
 	return math.Abs(actual-estimate) / math.Abs(estimate)
 }
 
+func (s *Service) applyQuoteState(ctx *model.MarketContext, inst model.Instrument) {
+	if s == nil || s.prices == nil || ctx == nil || inst.Symbol == "" {
+		return
+	}
+	view, ok := s.prices.(quoteView)
+	if !ok {
+		ctx.Notes = appendNote(ctx.Notes, "live quote unavailable")
+		return
+	}
+	quote, ok := view.LatestQuote(inst)
+	if !ok {
+		ctx.Notes = appendNote(ctx.Notes, "live quote unavailable")
+		return
+	}
+
+	ctx.BidPrice = quote.Bid
+	ctx.AskPrice = quote.Ask
+	ctx.MidPrice = quote.MidPrice()
+	ctx.SpreadBps = quote.SpreadBps()
+	ctx.LastVolume = quote.Volume
+	if !quote.ObservedAt.IsZero() {
+		ageSeconds := time.Since(quote.ObservedAt).Seconds()
+		if ageSeconds > 0 {
+			ctx.QuoteAgeSeconds = ageSeconds
+		}
+	}
+	if ctx.CurrentPrice <= 0 {
+		ctx.CurrentPrice = quote.ReferencePrice()
+	}
+}
+
+func (s *Service) applyRealizedVolatility(ctx *model.MarketContext, inst model.Instrument) {
+	if s == nil || s.prices == nil || ctx == nil || inst.Symbol == "" {
+		return
+	}
+	view, ok := s.prices.(realizedVolatilityView)
+	if !ok {
+		ctx.Notes = appendNote(ctx.Notes, "realized volatility unavailable")
+		return
+	}
+	if vol, ok := view.RealizedVolatility(inst, 24*time.Hour); ok {
+		ctx.RealizedVol1dPct = vol
+	}
+	if vol, ok := view.RealizedVolatility(inst, 5*24*time.Hour); ok {
+		ctx.RealizedVol5dPct = vol
+	}
+	if ctx.RealizedVol1dPct <= 0 && ctx.RealizedVol5dPct <= 0 {
+		ctx.Notes = appendNote(ctx.Notes, "realized volatility unavailable")
+	}
+}
+
 func FormatForPrompt(ctx *model.MarketContext) string {
 	if ctx == nil {
 		return ""
 	}
 
-	lines := make([]string, 0, 8)
+	lines := make([]string, 0, 12)
 	if ctx.Instrument.Symbol != "" {
 		lines = append(lines, "Primary instrument: "+ctx.Instrument.Label())
 	}
 	if ctx.CurrentPrice > 0 {
 		lines = append(lines, "Current price: "+formatFloat(ctx.CurrentPrice))
+	}
+	if ctx.BidPrice > 0 || ctx.AskPrice > 0 {
+		lines = append(lines, "Top of book: bid="+formatFloat(ctx.BidPrice)+" ask="+formatFloat(ctx.AskPrice)+" mid="+formatFloat(ctx.MidPrice)+" spread_bps="+formatFloat(ctx.SpreadBps))
+	}
+	if ctx.LastVolume > 0 {
+		lines = append(lines, "Last observed volume: "+strconv.FormatInt(ctx.LastVolume, 10))
+	}
+	if ctx.QuoteAgeSeconds > 0 {
+		lines = append(lines, "Quote age seconds: "+formatFloat(ctx.QuoteAgeSeconds))
 	}
 	if ctx.SignalAgeMinutes > 0 {
 		lines = append(lines, "Signal age minutes: "+formatFloat(ctx.SignalAgeMinutes))
@@ -231,6 +303,12 @@ func FormatForPrompt(ctx *model.MarketContext) string {
 	}
 	if ctx.Return4hPct != 0 {
 		lines = append(lines, "Return 4h pct: "+formatFloat(ctx.Return4hPct))
+	}
+	if ctx.RealizedVol1dPct != 0 {
+		lines = append(lines, "Realized vol 1d pct: "+formatFloat(ctx.RealizedVol1dPct))
+	}
+	if ctx.RealizedVol5dPct != 0 {
+		lines = append(lines, "Realized vol 5d pct: "+formatFloat(ctx.RealizedVol5dPct))
 	}
 	if ctx.ConsensusAvailable {
 		lines = append(lines, "Consensus snapshot: eps="+formatFloat(ctx.ActualEPS)+" vs est="+formatFloat(ctx.EstimatedEPS)+", revenue="+formatFloat(ctx.ActualRevenue)+" vs est="+formatFloat(ctx.EstimatedRevenue))

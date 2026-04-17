@@ -174,9 +174,17 @@ type MarketContext struct {
 	SnapshotAt           time.Time  `json:"snapshot_at"`
 	Instrument           Instrument `json:"instrument"`
 	CurrentPrice         float64    `json:"current_price,omitempty"`
+	BidPrice             float64    `json:"bid_price,omitempty"`
+	AskPrice             float64    `json:"ask_price,omitempty"`
+	MidPrice             float64    `json:"mid_price,omitempty"`
+	SpreadBps            float64    `json:"spread_bps,omitempty"`
+	LastVolume           int64      `json:"last_volume,omitempty"`
+	QuoteAgeSeconds      float64    `json:"quote_age_seconds,omitempty"`
 	Return15mPct         float64    `json:"return_15m_pct,omitempty"`
 	Return1hPct          float64    `json:"return_1h_pct,omitempty"`
 	Return4hPct          float64    `json:"return_4h_pct,omitempty"`
+	RealizedVol1dPct     float64    `json:"realized_vol_1d_pct,omitempty"`
+	RealizedVol5dPct     float64    `json:"realized_vol_5d_pct,omitempty"`
 	SignalAgeMinutes     float64    `json:"signal_age_minutes,omitempty"`
 	ConsensusAvailable   bool       `json:"consensus_available,omitempty"`
 	ActualEPS            float64    `json:"actual_eps,omitempty"`
@@ -187,6 +195,47 @@ type MarketContext struct {
 	ImpliedMoveAvailable bool       `json:"implied_move_available,omitempty"`
 	ImpliedMovePct       float64    `json:"implied_move_pct,omitempty"`
 	Notes                []string   `json:"notes,omitempty"`
+}
+
+type MarketQuote struct {
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+	Last       float64   `json:"last,omitempty"`
+	Bid        float64   `json:"bid,omitempty"`
+	Ask        float64   `json:"ask,omitempty"`
+	Volume     int64     `json:"volume,omitempty"`
+}
+
+func (q MarketQuote) MidPrice() float64 {
+	switch {
+	case q.Bid > 0 && q.Ask > 0:
+		return (q.Bid + q.Ask) / 2
+	case q.Last > 0:
+		return q.Last
+	case q.Bid > 0:
+		return q.Bid
+	case q.Ask > 0:
+		return q.Ask
+	default:
+		return 0
+	}
+}
+
+func (q MarketQuote) ReferencePrice() float64 {
+	if q.Last > 0 {
+		return q.Last
+	}
+	return q.MidPrice()
+}
+
+func (q MarketQuote) SpreadBps() float64 {
+	if q.Bid <= 0 || q.Ask <= 0 {
+		return 0
+	}
+	mid := q.MidPrice()
+	if mid <= 0 {
+		return 0
+	}
+	return ((q.Ask - q.Bid) / mid) * 10000
 }
 
 type QuantScenario struct {

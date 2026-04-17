@@ -3,6 +3,7 @@ package feeds
 import (
 	"testing"
 
+	"github.com/hnic/trading-floor/internal/marketrefs"
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
@@ -10,7 +11,7 @@ func TestDefaultWatchlistIsReferenceOnly(t *testing.T) {
 	t.Parallel()
 
 	got := symbols(DefaultWatchlist())
-	want := []string{"SPY", "QQQ", "IWM", "DIA", "VIX", "GLD", "USO", "TLT", "XLE", "XLF"}
+	want := symbols(marketrefs.BootstrapWatchlist())
 
 	if len(got) != len(want) {
 		t.Fatalf("default watchlist size = %d, want %d", len(got), len(want))
@@ -26,7 +27,7 @@ func TestDefaultEarningsWatchlistIsCorporateUniverse(t *testing.T) {
 	t.Parallel()
 
 	got := symbols(DefaultEarningsWatchlist())
-	want := []string{"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"}
+	want := symbols(marketrefs.EarningsWatchlist())
 
 	if len(got) != len(want) {
 		t.Fatalf("earnings watchlist size = %d, want %d", len(got), len(want))

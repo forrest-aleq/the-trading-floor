@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hnic/trading-floor/internal/execution/ibkr"
+	"github.com/hnic/trading-floor/internal/marketrefs"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
@@ -175,28 +176,11 @@ func bestMarketSignalPrice(md *ibkr.MarketData) float64 {
 // DefaultWatchlist returns the small bootstrap set used for regime and
 // cross-asset context before any thesis-specific instruments are added.
 func DefaultWatchlist() []model.Instrument {
-	return []model.Instrument{
-		{Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "QQQ", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "IWM", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "DIA", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "VIX", SecType: "IND", Exchange: "CBOE", Currency: "USD"},
-		{Symbol: "GLD", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "USO", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "TLT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "XLE", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "XLF", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-	}
+	return marketrefs.BootstrapWatchlist()
 }
 
 // DefaultEarningsWatchlist is a bounded catalyst universe for the earnings
 // calendar feed. It is intentionally separate from the market bootstrap set.
 func DefaultEarningsWatchlist() []model.Instrument {
-	return []model.Instrument{
-		{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "NVDA", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "AMZN", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-		{Symbol: "GOOGL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-	}
+	return marketrefs.EarningsWatchlist()
 }

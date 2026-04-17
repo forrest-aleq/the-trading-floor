@@ -1,0 +1,26 @@
+{
+  "bootstrap_watchlist": [
+    { "symbol": "SPY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "QQQ", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "IWM", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "DIA", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "VIX", "sec_type": "IND", "exchange": "CBOE", "currency": "USD" },
+    { "symbol": "GLD", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "USO", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "TLT", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "XLE", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "XLF", "sec_type": "STK", "exchange": "SMART", "currency": "USD" }
+  ],
+  "earnings_watchlist": [
+    { "symbol": "AAPL", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "MSFT", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "NVDA", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "AMZN", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "GOOGL", "sec_type": "STK", "exchange": "SMART", "currency": "USD" }
+  ],
+  "regime_instruments": {
+    "volatility": { "symbol": "VIX", "sec_type": "IND", "exchange": "CBOE", "currency": "USD" },
+    "trend": { "symbol": "SPY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    "risk": { "symbol": "TLT", "sec_type": "STK", "exchange": "SMART", "currency": "USD" }
+  }
+}

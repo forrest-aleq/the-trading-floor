@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hnic/trading-floor/internal/execution/ibkr"
+	"github.com/hnic/trading-floor/internal/marketrefs"
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
@@ -70,11 +71,12 @@ func (d *Detector) Run(ctx context.Context) {
 }
 
 func (d *Detector) detect(ctx context.Context) {
+	regimeRefs := marketrefs.ActiveRegimeInstruments()
+
 	// Fetch VIX for volatility regime
-	vixInst := model.Instrument{Symbol: "VIX", SecType: "IND", Exchange: "CBOE", Currency: "USD"}
-	vixData, err := d.client.ReqMarketData(ctx, vixInst)
+	vixData, err := d.client.ReqMarketData(ctx, regimeRefs.Volatility)
 	if err != nil {
-		d.log.Warn("regime: VIX fetch failed", "error", err)
+		d.log.Warn("regime: volatility fetch failed", "instrument", regimeRefs.Volatility.Label(), "error", err)
 		return
 	}
 
@@ -87,18 +89,16 @@ func (d *Detector) detect(ctx context.Context) {
 	}
 
 	// Fetch SPY for trend detection
-	spyInst := model.Instrument{Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD"}
-	spyData, err := d.client.ReqMarketData(ctx, spyInst)
+	spyData, err := d.client.ReqMarketData(ctx, regimeRefs.Trend)
 	if err != nil {
-		d.log.Warn("regime: SPY fetch failed", "error", err)
+		d.log.Warn("regime: trend fetch failed", "instrument", regimeRefs.Trend.Label(), "error", err)
 		return
 	}
 
 	// Fetch TLT for risk regime (bond proxy)
-	tltInst := model.Instrument{Symbol: "TLT", SecType: "STK", Exchange: "SMART", Currency: "USD"}
-	tltData, err := d.client.ReqMarketData(ctx, tltInst)
+	tltData, err := d.client.ReqMarketData(ctx, regimeRefs.Risk)
 	if err != nil {
-		d.log.Warn("regime: TLT fetch failed", "error", err)
+		d.log.Warn("regime: risk fetch failed", "instrument", regimeRefs.Risk.Label(), "error", err)
 		// Non-fatal, continue with partial data
 		tltData = &ibkr.MarketData{}
 	}

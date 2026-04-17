@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"github.com/joho/godotenv"
 
+	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/store"
+	"github.com/hnic/trading-floor/pkg/model"
 )
 
 func main() {
@@ -20,25 +23,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
-	db, err := store.NewDB(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ctl: cannot connect to database: %v\n", err)
-		fmt.Fprintf(os.Stderr, "set DATABASE_URL or create a .env file\n")
-		os.Exit(1)
-	}
-	defer db.Close()
-
 	switch os.Args[1] {
+	case "market":
+		cmdMarket()
 	case "positions":
+		ctx, db := mustOpenDB()
+		defer db.Close()
 		cmdPositions(ctx, db)
 	case "theses":
+		ctx, db := mustOpenDB()
+		defer db.Close()
 		cmdTheses(ctx, db)
 	case "anti":
+		ctx, db := mustOpenDB()
+		defer db.Close()
 		cmdAntiPortfolio(ctx, db)
 	case "ab":
+		ctx, db := mustOpenDB()
+		defer db.Close()
 		cmdABTest(ctx, db)
 	case "events":
+		ctx, db := mustOpenDB()
+		defer db.Close()
 		cmdEvents(ctx, db)
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: unknown command '%s'\n", os.Args[1])
@@ -51,11 +57,67 @@ func usage() {
 	fmt.Println("usage: ctl <command>")
 	fmt.Println()
 	fmt.Println("commands:")
+	fmt.Println("  market [SYMBOL]  Show live market data from the configured market data provider")
 	fmt.Println("  positions     List all open positions from the database")
 	fmt.Println("  theses        List recent theses with status")
 	fmt.Println("  anti          Show anti-portfolio (rejected theses)")
 	fmt.Println("  ab            Show A/B test comparison")
 	fmt.Println("  events        Show recent event log entries")
+}
+
+func mustOpenDB() (context.Context, *store.DB) {
+	ctx := context.Background()
+	db, err := store.NewDB(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: cannot connect to database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "set DATABASE_URL or create a .env file\n")
+		os.Exit(1)
+	}
+	return ctx, db
+}
+
+func cmdMarket() {
+	symbol := "SPY"
+	if len(os.Args) >= 3 && os.Args[2] != "" {
+		symbol = os.Args[2]
+	}
+
+	provider, err := marketdata.NewFMPProvider("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ctl market: %v\n", err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	inst := model.Instrument{
+		Symbol:   symbol,
+		SecType:  "STK",
+		Exchange: "SMART",
+		Currency: "USD",
+	}
+	if symbol == "VIX" {
+		inst.SecType = "IND"
+		inst.Exchange = "CBOE"
+	}
+
+	snapshot, err := provider.Snapshot(ctx, inst)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ctl market: fetch %s failed: %v\n", symbol, err)
+		os.Exit(1)
+	}
+
+	out, _ := json.MarshalIndent(map[string]any{
+		"provider":    "fmp",
+		"symbol":      symbol,
+		"last":        snapshot.Last,
+		"bid":         snapshot.Bid,
+		"ask":         snapshot.Ask,
+		"volume":      snapshot.Volume,
+		"observed_at": snapshot.ObservedAt,
+	}, "", "  ")
+	fmt.Println(string(out))
 }
 
 func cmdPositions(ctx context.Context, db *store.DB) {

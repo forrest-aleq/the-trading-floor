@@ -1,4 +1,4 @@
-.PHONY: build run test lint clean ctl backfill migrate service-install service-uninstall service-status service-restart
+.PHONY: build run test lint clean ctl market backfill migrate service-install service-uninstall service-status service-restart
 
 BINARY=trading-floor
 CMD_DIR=./cmd
@@ -22,6 +22,9 @@ clean:
 
 ctl: build
 	./bin/ctl $(ARGS)
+
+market: build
+	./bin/ctl market $(ARGS)
 
 backfill: build
 	./bin/backfill $(ARGS)

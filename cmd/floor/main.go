@@ -58,6 +58,13 @@ func main() {
 	slog.Info("=== THE TRADING FLOOR ===", "session_id", sessionID)
 	slog.Info("initializing autonomous trading system")
 
+	runtimeMode, err := loadRuntimeMode()
+	if err != nil {
+		slog.Error("invalid runtime mode", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("runtime mode selected", "mode", runtimeMode)
+
 	// --- LLM ---
 	llmRouter := llm.DefaultRouter()
 	slog.Info("LLM router initialized",
@@ -129,6 +136,30 @@ func main() {
 		mdMgr.Run(ctx)
 	}, "task", "marketdata")
 	slog.Info("market data manager initialized", "watchlist", len(marketBootstrap))
+
+	if err := validateRuntimeReadiness(runtimeReadiness{
+		Mode:                   runtimeMode,
+		DBReady:                db != nil,
+		BrokerConnected:        ibkrClient.IsConnected(),
+		BrokerPaper:            ibkrClient.IsPaper(),
+		StartupPricingReady:    len(marketBootstrap) > 0,
+		EarningsUniverseReady:  len(marketrefs.EarningsWatchlist()) > 0,
+		RegimeDetectionEnabled: marketrefs.RegimeDetectionEnabled(),
+		RiskTokenConfigured:    hasConfiguredRiskTokenSecret(),
+	}); err != nil {
+		slog.Error("runtime readiness validation failed",
+			"mode", runtimeMode,
+			"db_ready", db != nil,
+			"broker_connected", ibkrClient.IsConnected(),
+			"broker_paper", ibkrClient.IsPaper(),
+			"startup_watchlist", len(marketBootstrap),
+			"earnings_watchlist", len(marketrefs.EarningsWatchlist()),
+			"regime_detection", marketrefs.RegimeDetectionEnabled(),
+			"risk_token_configured", hasConfiguredRiskTokenSecret(),
+			"error", err,
+		)
+		os.Exit(1)
+	}
 
 	// --- Wire (Signal Feeds) ---
 	wireMgr := wire.NewManager()

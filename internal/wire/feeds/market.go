@@ -51,7 +51,7 @@ func (f *MarketFeed) Name() string { return "market" }
 
 func (f *MarketFeed) Start(ctx context.Context, out chan<- signal.Signal) error {
 	if f.client == nil {
-		f.log.Info("market feed disabled; no market state provider configured")
+		f.log.Info("market feed disabled; no market data provider configured")
 		<-ctx.Done()
 		return ctx.Err()
 	}

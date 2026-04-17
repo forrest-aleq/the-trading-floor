@@ -57,10 +57,10 @@ func validateRuntimeReadiness(readiness runtimeReadiness) error {
 			return fmt.Errorf("paper mode requires a paper IBKR session")
 		}
 		if !readiness.MarketStateConfigured {
-			return fmt.Errorf("paper mode requires an explicit market state provider; TWS is broker/account only")
+			return fmt.Errorf("paper mode requires an explicit market data provider; TWS is broker/account only")
 		}
 		if readiness.MarketStateBrokerBacked {
-			return fmt.Errorf("paper mode requires a non-broker market state provider; TWS is broker/account only")
+			return fmt.Errorf("paper mode requires a non-broker market data provider; TWS is broker/account only")
 		}
 		if !readiness.StartupPricingReady {
 			return fmt.Errorf("paper mode requires a non-empty startup pricing watchlist")
@@ -83,10 +83,10 @@ func validateRuntimeReadiness(readiness runtimeReadiness) error {
 			return fmt.Errorf("live mode requires a non-paper IBKR session")
 		}
 		if !readiness.MarketStateConfigured {
-			return fmt.Errorf("live mode requires an explicit market state provider; TWS is broker/account only")
+			return fmt.Errorf("live mode requires an explicit market data provider; TWS is broker/account only")
 		}
 		if readiness.MarketStateBrokerBacked {
-			return fmt.Errorf("live mode requires a non-broker market state provider; TWS is broker/account only")
+			return fmt.Errorf("live mode requires a non-broker market data provider; TWS is broker/account only")
 		}
 		if !readiness.StartupPricingReady {
 			return fmt.Errorf("live mode requires a non-empty startup pricing watchlist")

@@ -90,14 +90,44 @@ func TestLoadRuntimeModeRejectsUnknownValue(t *testing.T) {
 }
 
 func TestReadMarketStateProviderDefaultsToNone(t *testing.T) {
+	t.Setenv("MARKET_DATA_PROVIDER", "")
 	t.Setenv("MARKET_STATE_PROVIDER", "")
+	t.Setenv("FMP_API_KEY", "")
+	t.Setenv("EARNINGS_API_KEY", "")
 
 	mode, err := readMarketStateProviderMode()
 	if err != nil {
 		t.Fatalf("readMarketStateProviderMode returned error: %v", err)
 	}
 	if mode != marketStateProviderNone {
-		t.Fatalf("market state provider = %s, want %s", mode, marketStateProviderNone)
+		t.Fatalf("market data provider = %s, want %s", mode, marketStateProviderNone)
+	}
+}
+
+func TestReadMarketStateProviderUsesNewEnvName(t *testing.T) {
+	t.Setenv("MARKET_DATA_PROVIDER", "fmp")
+	t.Setenv("MARKET_STATE_PROVIDER", "")
+
+	mode, err := readMarketStateProviderMode()
+	if err != nil {
+		t.Fatalf("readMarketStateProviderMode returned error: %v", err)
+	}
+	if mode != marketStateProviderFMP {
+		t.Fatalf("market data provider = %s, want %s", mode, marketStateProviderFMP)
+	}
+}
+
+func TestReadMarketStateProviderDefaultsToFMPWhenKeyExists(t *testing.T) {
+	t.Setenv("MARKET_DATA_PROVIDER", "")
+	t.Setenv("MARKET_STATE_PROVIDER", "")
+	t.Setenv("FMP_API_KEY", "test-key")
+
+	mode, err := readMarketStateProviderMode()
+	if err != nil {
+		t.Fatalf("readMarketStateProviderMode returned error: %v", err)
+	}
+	if mode != marketStateProviderFMP {
+		t.Fatalf("market data provider = %s, want %s", mode, marketStateProviderFMP)
 	}
 }
 

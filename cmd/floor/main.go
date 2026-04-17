@@ -122,7 +122,7 @@ func main() {
 	// --- Centralized Market Data ---
 	marketState, err := loadMarketStateProvider(ibkrClient, ibkrClient, pacing)
 	if err != nil {
-		slog.Error("invalid market state provider", "error", err)
+		slog.Error("invalid market data provider", "error", err)
 		os.Exit(1)
 	}
 	mdMgr := marketdata.NewManager(marketState.Provider, marketState.RequestBudget, 0)
@@ -142,13 +142,13 @@ func main() {
 		observe.SafeGo(slog.Default().With("component", "runtime"), "market data loop panic", func() {
 			mdMgr.Run(ctx)
 		}, "task", "marketdata")
-		slog.Info("market state manager initialized",
+		slog.Info("market data manager initialized",
 			"provider", marketState.Mode,
 			"watchlist", len(marketBootstrap),
 			"broker_backed", marketState.BrokerBacked,
 		)
 	} else {
-		slog.Warn("market state manager initialized without live provider; cache-only mode",
+		slog.Warn("market data manager initialized without live provider; cache-only mode",
 			"provider", marketState.Mode,
 			"watchlist", len(marketBootstrap),
 		)
@@ -172,9 +172,9 @@ func main() {
 			"db_ready", db != nil,
 			"broker_connected", ibkrClient.IsConnected(),
 			"broker_paper", ibkrClient.IsPaper(),
-			"market_state_provider", marketState.Mode,
-			"market_state_configured", marketState.Provider != nil,
-			"market_state_broker_backed", marketState.BrokerBacked,
+			"market_data_provider", marketState.Mode,
+			"market_data_configured", marketState.Provider != nil,
+			"market_data_broker_backed", marketState.BrokerBacked,
 			"startup_watchlist", len(marketBootstrap),
 			"earnings_watchlist", len(marketrefs.EarningsWatchlist()),
 			"regime_detection", marketrefs.RegimeDetectionEnabled(),
@@ -591,7 +591,7 @@ func main() {
 	// --- Regime Detector ---
 	if marketrefs.RegimeDetectionEnabled() {
 		if marketState.Provider == nil {
-			slog.Warn("regime detector disabled; no live market state provider configured")
+			slog.Warn("regime detector disabled; no live market data provider configured")
 		} else {
 			regimeDetector := regime.NewDetector(marketState.Provider, func(old, newRegime model.Regime) {
 				ceo.ForceRegimeShift(newRegime)

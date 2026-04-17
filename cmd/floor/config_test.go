@@ -1,10 +1,26 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/wire"
+	"github.com/hnic/trading-floor/pkg/model"
 )
+
+type stubMarketStateProvider struct{}
+
+func (stubMarketStateProvider) Snapshot(context.Context, model.Instrument) (*marketdata.Snapshot, error) {
+	return &marketdata.Snapshot{
+		Last:       100,
+		Bid:        99.5,
+		Ask:        100.5,
+		Volume:     1000,
+		ObservedAt: time.Now().UTC(),
+	}, nil
+}
 
 func TestFullDeskConfigBalancedAB(t *testing.T) {
 	desks := fullDeskConfig()
@@ -42,7 +58,7 @@ func TestRegisterDefaultFeedsRegistersExtendedWireSurface(t *testing.T) {
 	t.Setenv("ALT_DATA_SOURCES", "")
 
 	wireMgr := wire.NewManager()
-	count := registerDefaultFeeds(wireMgr, &fakeBroker{})
+	count := registerDefaultFeeds(wireMgr, stubMarketStateProvider{})
 	if count != 8 {
 		t.Fatalf("expected 8 registered feeds, got %d", count)
 	}
@@ -73,14 +89,28 @@ func TestLoadRuntimeModeRejectsUnknownValue(t *testing.T) {
 	}
 }
 
+func TestReadMarketStateProviderDefaultsToNone(t *testing.T) {
+	t.Setenv("MARKET_STATE_PROVIDER", "")
+
+	mode, err := readMarketStateProviderMode()
+	if err != nil {
+		t.Fatalf("readMarketStateProviderMode returned error: %v", err)
+	}
+	if mode != marketStateProviderNone {
+		t.Fatalf("market state provider = %s, want %s", mode, marketStateProviderNone)
+	}
+}
+
 func TestValidateRuntimeReadinessRequiresPaperBrokerForPaperMode(t *testing.T) {
 	err := validateRuntimeReadiness(runtimeReadiness{
 		Mode:                   runtimeModePaper,
 		DBReady:                true,
 		BrokerConnected:        true,
 		BrokerPaper:            false,
+		MarketStateConfigured:  true,
 		StartupPricingReady:    true,
 		RegimeDetectionEnabled: true,
+		RegimeDetectorReady:    true,
 	})
 	if err == nil {
 		t.Fatal("expected paper readiness validation to fail without paper broker")
@@ -93,12 +123,31 @@ func TestValidateRuntimeReadinessRequiresExplicitRiskTokenForLiveMode(t *testing
 		DBReady:                true,
 		BrokerConnected:        true,
 		BrokerPaper:            false,
+		MarketStateConfigured:  true,
 		StartupPricingReady:    true,
 		EarningsUniverseReady:  true,
 		RegimeDetectionEnabled: true,
+		RegimeDetectorReady:    true,
 		RiskTokenConfigured:    false,
 	})
 	if err == nil {
 		t.Fatal("expected live readiness validation to fail without explicit risk token")
+	}
+}
+
+func TestValidateRuntimeReadinessRejectsBrokerBackedMarketStateInPaperMode(t *testing.T) {
+	err := validateRuntimeReadiness(runtimeReadiness{
+		Mode:                    runtimeModePaper,
+		DBReady:                 true,
+		BrokerConnected:         true,
+		BrokerPaper:             true,
+		MarketStateConfigured:   true,
+		MarketStateBrokerBacked: true,
+		StartupPricingReady:     true,
+		RegimeDetectionEnabled:  true,
+		RegimeDetectorReady:     true,
+	})
+	if err == nil {
+		t.Fatal("expected paper readiness validation to reject broker-backed market state")
 	}
 }

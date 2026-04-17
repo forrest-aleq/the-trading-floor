@@ -6,27 +6,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hnic/trading-floor/internal/execution/ibkr"
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
 type stubHistoricalClient struct {
 	marketErr error
-	md        *ibkr.MarketData
-	bars      []ibkr.HistoricalBar
+	md        *Snapshot
+	bars      []HistoricalBar
 }
 
-func (s stubHistoricalClient) ReqMarketData(context.Context, model.Instrument) (*ibkr.MarketData, error) {
+func (s stubHistoricalClient) Snapshot(context.Context, model.Instrument) (*Snapshot, error) {
 	if s.marketErr != nil {
 		return nil, s.marketErr
 	}
 	if s.md != nil {
 		return s.md, nil
 	}
-	return &ibkr.MarketData{}, nil
+	return &Snapshot{}, nil
 }
 
-func (s stubHistoricalClient) HistoricalBars(context.Context, model.Instrument, time.Time, string, string, string, bool) ([]ibkr.HistoricalBar, error) {
+func (s stubHistoricalClient) HistoricalBars(context.Context, model.Instrument, time.Time, string, string, string, bool) ([]HistoricalBar, error) {
 	return s.bars, nil
 }
 
@@ -65,7 +64,7 @@ func TestPriceChangeUsesRollingHistory(t *testing.T) {
 func TestPollFallsBackToHistoricalPriceWhenLiveDataUnavailable(t *testing.T) {
 	manager := NewManager(stubHistoricalClient{
 		marketErr: errors.New("subscription missing"),
-		bars: []ibkr.HistoricalBar{
+		bars: []HistoricalBar{
 			{Time: time.Now().Add(-2 * time.Hour), Close: 98.5},
 			{Time: time.Now().Add(-time.Hour), Close: 101.25},
 		},
@@ -87,7 +86,7 @@ func TestPollFallsBackToHistoricalPriceWhenLiveDataUnavailable(t *testing.T) {
 func TestBestEffortPriceUsesSameSymbolWatchlistCandidate(t *testing.T) {
 	manager := NewManager(stubHistoricalClient{
 		marketErr: errors.New("subscription missing"),
-		bars: []ibkr.HistoricalBar{
+		bars: []HistoricalBar{
 			{Time: time.Now().Add(-2 * time.Hour), Close: 18.1},
 			{Time: time.Now().Add(-time.Hour), Close: 18.4},
 		},
@@ -119,12 +118,12 @@ func TestBestEffortPriceUsesSameSymbolWatchlistCandidate(t *testing.T) {
 
 func TestPollRecordsLatestQuote(t *testing.T) {
 	manager := NewManager(stubHistoricalClient{
-		md: &ibkr.MarketData{
-			Timestamp: time.Now().UnixMilli(),
-			Last:      432.1,
-			Bid:       432.0,
-			Ask:       432.2,
-			Volume:    1250000,
+		md: &Snapshot{
+			ObservedAt: time.Now().UTC(),
+			Last:       432.1,
+			Bid:        432.0,
+			Ask:        432.2,
+			Volume:     1250000,
 		},
 	}, nil, time.Minute)
 
@@ -179,12 +178,12 @@ func TestRealizedVolatilityUsesRollingHistory(t *testing.T) {
 
 func TestBestEffortQuoteUsesLiveMarketData(t *testing.T) {
 	manager := NewManager(stubHistoricalClient{
-		md: &ibkr.MarketData{
-			Timestamp: time.Now().UnixMilli(),
-			Last:      211.4,
-			Bid:       211.3,
-			Ask:       211.5,
-			Volume:    880000,
+		md: &Snapshot{
+			ObservedAt: time.Now().UTC(),
+			Last:       211.4,
+			Bid:        211.3,
+			Ask:        211.5,
+			Volume:     880000,
 		},
 	}, nil, time.Minute)
 

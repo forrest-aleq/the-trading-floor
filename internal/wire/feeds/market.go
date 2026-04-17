@@ -8,14 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hnic/trading-floor/internal/execution/ibkr"
+	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/marketrefs"
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/hnic/trading-floor/pkg/signal"
 )
 
 type MarketDataClient interface {
-	ReqMarketData(context.Context, model.Instrument) (*ibkr.MarketData, error)
+	Snapshot(context.Context, model.Instrument) (*marketdata.Snapshot, error)
 }
 
 // MarketFeed polls market data from IBKR and emits it as wire signals.
@@ -50,6 +50,12 @@ func NewMarketFeed(client MarketDataClient, watchlist []model.Instrument) *Marke
 func (f *MarketFeed) Name() string { return "market" }
 
 func (f *MarketFeed) Start(ctx context.Context, out chan<- signal.Signal) error {
+	if f.client == nil {
+		f.log.Info("market feed disabled; no market state provider configured")
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
 	ticker := time.NewTicker(f.interval)
 	defer ticker.Stop()
 
@@ -65,42 +71,47 @@ func (f *MarketFeed) Start(ctx context.Context, out chan<- signal.Signal) error 
 					continue
 				}
 
-				md, err := f.client.ReqMarketData(ctx, inst)
-				if err != nil {
+				snapshot, err := f.client.Snapshot(ctx, inst)
+				if err != nil || snapshot == nil {
 					backoff := state.source.RecordFailure(time.Now(), marketDataBackoff(err, f.interval))
 					f.log.Warn("market data error", "symbol", inst.Symbol, "error", err, "retry_after", backoff)
 					continue
 				}
 				state.source.RecordSuccess()
 
-				price := bestMarketSignalPrice(md)
+				price := bestMarketSignalPrice(snapshot)
 				if !state.shouldEmit(price) {
 					continue
 				}
 
 				raw, err := json.Marshal(map[string]any{
 					"symbol": inst.Symbol,
-					"last":   md.Last,
-					"bid":    md.Bid,
-					"ask":    md.Ask,
-					"volume": md.Volume,
+					"last":   snapshot.Last,
+					"bid":    snapshot.Bid,
+					"ask":    snapshot.Ask,
+					"volume": snapshot.Volume,
 				})
 				if err != nil {
 					f.log.Warn("market data marshal failed", "symbol", inst.Symbol, "error", err)
 					continue
 				}
 
+				timestamp := snapshot.ObservedAt.UTC()
+				if timestamp.IsZero() {
+					timestamp = time.Now().UTC()
+				}
+
 				sig := signal.Signal{
 					ID:        fmt.Sprintf("mkt-%s-%d", inst.Symbol, time.Now().UnixMilli()),
-					Source:    "ibkr-market",
+					Source:    "market-state",
 					Type:      signal.TypePrice,
 					Category:  "market",
-					Timestamp: time.UnixMilli(md.Timestamp).UTC(),
+					Timestamp: timestamp,
 					Urgency:   0.3,
 					Entities:  []signal.Entity{{Name: inst.Symbol, Type: "instrument"}},
 					Raw:       raw,
 					Translated: fmt.Sprintf("Market data %s last %.2f bid %.2f ask %.2f volume %d",
-						inst.Symbol, md.Last, md.Bid, md.Ask, md.Volume),
+						inst.Symbol, snapshot.Last, snapshot.Bid, snapshot.Ask, snapshot.Volume),
 				}
 
 				select {
@@ -147,6 +158,9 @@ func (s *marketSignalState) shouldEmit(price float64) bool {
 }
 
 func marketDataBackoff(err error, interval time.Duration) time.Duration {
+	if err == nil {
+		return interval
+	}
 	message := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(message, "not subscribed"),
@@ -158,16 +172,18 @@ func marketDataBackoff(err error, interval time.Duration) time.Duration {
 	}
 }
 
-func bestMarketSignalPrice(md *ibkr.MarketData) float64 {
+func bestMarketSignalPrice(snapshot *marketdata.Snapshot) float64 {
 	switch {
-	case md.Last > 0:
-		return md.Last
-	case md.Bid > 0 && md.Ask > 0:
-		return (md.Bid + md.Ask) / 2
-	case md.Bid > 0:
-		return md.Bid
-	case md.Ask > 0:
-		return md.Ask
+	case snapshot == nil:
+		return 0
+	case snapshot.Last > 0:
+		return snapshot.Last
+	case snapshot.Bid > 0 && snapshot.Ask > 0:
+		return (snapshot.Bid + snapshot.Ask) / 2
+	case snapshot.Bid > 0:
+		return snapshot.Bid
+	case snapshot.Ask > 0:
+		return snapshot.Ask
 	default:
 		return 0
 	}

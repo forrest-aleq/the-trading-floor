@@ -120,7 +120,12 @@ func main() {
 	slog.Info("book and execution initialized")
 
 	// --- Centralized Market Data ---
-	mdMgr := marketdata.NewManager(ibkrClient, pacing, 0)
+	marketState, err := loadMarketStateProvider(ibkrClient, ibkrClient, pacing)
+	if err != nil {
+		slog.Error("invalid market state provider", "error", err)
+		os.Exit(1)
+	}
+	mdMgr := marketdata.NewManager(marketState.Provider, marketState.RequestBudget, 0)
 	marketBootstrap := marketrefs.StartupPricingWatchlist()
 	mdMgr.AddInstruments(marketBootstrap)
 	mdMgr.Subscribe(func(prices map[string]float64) {
@@ -133,29 +138,47 @@ func main() {
 			}
 		}
 	})
-	observe.SafeGo(slog.Default().With("component", "runtime"), "market data loop panic", func() {
-		mdMgr.Run(ctx)
-	}, "task", "marketdata")
-	slog.Info("market data manager initialized", "watchlist", len(marketBootstrap))
+	if marketState.Provider != nil {
+		observe.SafeGo(slog.Default().With("component", "runtime"), "market data loop panic", func() {
+			mdMgr.Run(ctx)
+		}, "task", "marketdata")
+		slog.Info("market state manager initialized",
+			"provider", marketState.Mode,
+			"watchlist", len(marketBootstrap),
+			"broker_backed", marketState.BrokerBacked,
+		)
+	} else {
+		slog.Warn("market state manager initialized without live provider; cache-only mode",
+			"provider", marketState.Mode,
+			"watchlist", len(marketBootstrap),
+		)
+	}
 
 	if err := validateRuntimeReadiness(runtimeReadiness{
-		Mode:                   runtimeMode,
-		DBReady:                db != nil,
-		BrokerConnected:        ibkrClient.IsConnected(),
-		BrokerPaper:            ibkrClient.IsPaper(),
-		StartupPricingReady:    len(marketBootstrap) > 0,
-		EarningsUniverseReady:  len(marketrefs.EarningsWatchlist()) > 0,
-		RegimeDetectionEnabled: marketrefs.RegimeDetectionEnabled(),
-		RiskTokenConfigured:    hasConfiguredRiskTokenSecret(),
+		Mode:                    runtimeMode,
+		DBReady:                 db != nil,
+		BrokerConnected:         ibkrClient.IsConnected(),
+		BrokerPaper:             ibkrClient.IsPaper(),
+		MarketStateConfigured:   marketState.Provider != nil,
+		MarketStateBrokerBacked: marketState.BrokerBacked,
+		StartupPricingReady:     len(marketBootstrap) > 0,
+		EarningsUniverseReady:   len(marketrefs.EarningsWatchlist()) > 0,
+		RegimeDetectionEnabled:  marketrefs.RegimeDetectionEnabled(),
+		RegimeDetectorReady:     marketrefs.RegimeDetectionEnabled() && marketState.Provider != nil,
+		RiskTokenConfigured:     hasConfiguredRiskTokenSecret(),
 	}); err != nil {
 		slog.Error("runtime readiness validation failed",
 			"mode", runtimeMode,
 			"db_ready", db != nil,
 			"broker_connected", ibkrClient.IsConnected(),
 			"broker_paper", ibkrClient.IsPaper(),
+			"market_state_provider", marketState.Mode,
+			"market_state_configured", marketState.Provider != nil,
+			"market_state_broker_backed", marketState.BrokerBacked,
 			"startup_watchlist", len(marketBootstrap),
 			"earnings_watchlist", len(marketrefs.EarningsWatchlist()),
 			"regime_detection", marketrefs.RegimeDetectionEnabled(),
+			"regime_detector_ready", marketrefs.RegimeDetectionEnabled() && marketState.Provider != nil,
 			"risk_token_configured", hasConfiguredRiskTokenSecret(),
 			"error", err,
 		)
@@ -346,7 +369,7 @@ func main() {
 		"desks":          40,
 	})
 
-	feedCount := registerDefaultFeeds(wireMgr, ibkrClient)
+	feedCount := registerDefaultFeeds(wireMgr, marketState.Provider)
 
 	// --- Floor + Desks ---
 	floor := firm.NewFloor(wireMgr, sessionID)
@@ -567,16 +590,20 @@ func main() {
 
 	// --- Regime Detector ---
 	if marketrefs.RegimeDetectionEnabled() {
-		regimeDetector := regime.NewDetector(ibkrClient, func(old, newRegime model.Regime) {
-			ceo.ForceRegimeShift(newRegime)
-			audit.Record("regime_shift", "", "", map[string]any{
-				"old": old.Key(),
-				"new": newRegime.Key(),
+		if marketState.Provider == nil {
+			slog.Warn("regime detector disabled; no live market state provider configured")
+		} else {
+			regimeDetector := regime.NewDetector(marketState.Provider, func(old, newRegime model.Regime) {
+				ceo.ForceRegimeShift(newRegime)
+				audit.Record("regime_shift", "", "", map[string]any{
+					"old": old.Key(),
+					"new": newRegime.Key(),
+				})
 			})
-		})
-		observe.SafeGo(slog.Default().With("component", "runtime"), "regime detector panic", func() {
-			regimeDetector.Run(ctx)
-		}, "task", "regime_detector")
+			observe.SafeGo(slog.Default().With("component", "runtime"), "regime detector panic", func() {
+				regimeDetector.Run(ctx)
+			}, "task", "regime_detector")
+		}
 	} else {
 		slog.Info("regime detector disabled by market refs policy")
 	}
@@ -823,13 +850,15 @@ func registerDefaultFeeds(wireMgr *wire.Manager, marketClient feeds.MarketDataCl
 
 	feedSet := []wire.Feed{
 		feeds.NewNewsFeed(nil),
-		feeds.NewMarketFeed(marketClient, marketWatchlist),
 		feeds.NewEDGARFeed(),
 		feeds.NewSocialFeed(),
 		feeds.NewMacroFeed(os.Getenv("FRED_API_KEY")),
 		feeds.NewTelegramFeed(nil),
 		feeds.NewEarningsFeed(os.Getenv("FMP_API_KEY"), earningsWatchlist),
 		feeds.NewAlternativeFeed(nil),
+	}
+	if marketClient != nil {
+		feedSet = append(feedSet, feeds.NewMarketFeed(marketClient, marketWatchlist))
 	}
 
 	for _, feed := range feedSet {

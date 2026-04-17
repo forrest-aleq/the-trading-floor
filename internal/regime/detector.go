@@ -6,14 +6,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hnic/trading-floor/internal/execution/ibkr"
+	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/marketrefs"
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
 // MarketDataFetcher fetches market data for regime detection.
 type MarketDataFetcher interface {
-	ReqMarketData(context.Context, model.Instrument) (*ibkr.MarketData, error)
+	Snapshot(context.Context, model.Instrument) (*marketdata.Snapshot, error)
 }
 
 // OnShift is called when a regime transition is detected.
@@ -74,8 +74,8 @@ func (d *Detector) detect(ctx context.Context) {
 	regimeRefs := marketrefs.ActiveRegimeInstruments()
 
 	// Fetch VIX for volatility regime
-	vixData, err := d.client.ReqMarketData(ctx, regimeRefs.Volatility)
-	if err != nil {
+	vixData, err := d.client.Snapshot(ctx, regimeRefs.Volatility)
+	if err != nil || vixData == nil {
 		d.log.Warn("regime: volatility fetch failed", "instrument", regimeRefs.Volatility.Label(), "error", err)
 		return
 	}
@@ -89,18 +89,18 @@ func (d *Detector) detect(ctx context.Context) {
 	}
 
 	// Fetch SPY for trend detection
-	spyData, err := d.client.ReqMarketData(ctx, regimeRefs.Trend)
-	if err != nil {
+	spyData, err := d.client.Snapshot(ctx, regimeRefs.Trend)
+	if err != nil || spyData == nil {
 		d.log.Warn("regime: trend fetch failed", "instrument", regimeRefs.Trend.Label(), "error", err)
 		return
 	}
 
 	// Fetch TLT for risk regime (bond proxy)
-	tltData, err := d.client.ReqMarketData(ctx, regimeRefs.Risk)
-	if err != nil {
+	tltData, err := d.client.Snapshot(ctx, regimeRefs.Risk)
+	if err != nil || tltData == nil {
 		d.log.Warn("regime: risk fetch failed", "instrument", regimeRefs.Risk.Label(), "error", err)
 		// Non-fatal, continue with partial data
-		tltData = &ibkr.MarketData{}
+		tltData = &marketdata.Snapshot{}
 	}
 
 	newRegime := classify(vixLevel, spyData, tltData)
@@ -126,7 +126,7 @@ func (d *Detector) detect(ctx context.Context) {
 	}
 }
 
-func classify(vix float64, spy, tlt *ibkr.MarketData) model.Regime {
+func classify(vix float64, spy, tlt *marketdata.Snapshot) model.Regime {
 	r := model.Regime{
 		Liquidity: "normal",
 	}

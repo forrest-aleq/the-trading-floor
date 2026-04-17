@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hnic/trading-floor/internal/execution/ibkr"
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
@@ -27,8 +26,8 @@ const maxHistoryPointsPerInstrument = 256
 // maintains a shared watchlist and distributes updates to subscribers.
 type Manager struct {
 	log      *slog.Logger
-	client   MarketDataClient
-	pacing   *ibkr.PacingBudget
+	client   SnapshotProvider
+	budget   RequestBudget
 	interval time.Duration
 
 	mu            sync.RWMutex
@@ -40,24 +39,15 @@ type Manager struct {
 	subscribers   []Subscriber
 }
 
-// MarketDataClient is the interface for fetching market data.
-type MarketDataClient interface {
-	ReqMarketData(context.Context, model.Instrument) (*ibkr.MarketData, error)
-}
-
-type historicalPriceClient interface {
-	HistoricalBars(context.Context, model.Instrument, time.Time, string, string, string, bool) ([]ibkr.HistoricalBar, error)
-}
-
 // NewManager creates a new centralized market data manager.
-func NewManager(client MarketDataClient, pacing *ibkr.PacingBudget, interval time.Duration) *Manager {
+func NewManager(client SnapshotProvider, budget RequestBudget, interval time.Duration) *Manager {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
 	return &Manager{
 		log:           slog.Default().With("component", "marketdata"),
 		client:        client,
-		pacing:        pacing,
+		budget:        budget,
 		interval:      interval,
 		watchlist:     make(map[string]model.Instrument),
 		prices:        make(map[string]float64),
@@ -243,6 +233,16 @@ func (m *Manager) RealizedVolatility(inst model.Instrument, window time.Duration
 
 // Run polls IBKR for market data on the shared watchlist and distributes updates.
 func (m *Manager) Run(ctx context.Context) {
+	if m == nil {
+		<-ctx.Done()
+		return
+	}
+	if m.client == nil {
+		m.log.Info("market state manager running cache-only; no live provider configured")
+		<-ctx.Done()
+		return
+	}
+
 	m.poll(ctx)
 
 	ticker := time.NewTicker(m.interval)
@@ -259,6 +259,10 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) poll(ctx context.Context) {
+	if m == nil || m.client == nil {
+		return
+	}
+
 	m.mu.RLock()
 	instruments := make([]model.Instrument, 0, len(m.watchlist))
 	for _, inst := range m.watchlist {
@@ -283,14 +287,14 @@ func (m *Manager) poll(ctx context.Context) {
 		}
 
 		// Respect pacing budget
-		if m.pacing != nil {
-			if err := m.pacing.AcquireMessage(ctx); err != nil {
+		if m.budget != nil {
+			if err := m.budget.Acquire(ctx); err != nil {
 				return
 			}
 		}
 
-		md, err := m.client.ReqMarketData(ctx, inst)
-		if err != nil {
+		snapshot, err := m.client.Snapshot(ctx, inst)
+		if err != nil || snapshot == nil {
 			if fallback, ok := m.historicalFallbackPrice(ctx, inst); ok {
 				prices[key] = fallback
 				continue
@@ -302,7 +306,7 @@ func (m *Manager) poll(ctx context.Context) {
 		}
 		m.clearSuppression(key)
 
-		price := bestPrice(md)
+		price := bestPrice(snapshot)
 		if price <= 0 {
 			if fallback, ok := m.historicalFallbackPrice(ctx, inst); ok {
 				prices[key] = fallback
@@ -311,15 +315,15 @@ func (m *Manager) poll(ctx context.Context) {
 		}
 		prices[key] = price
 		quoteTime := timestamp
-		if md.Timestamp > 0 {
-			quoteTime = time.UnixMilli(md.Timestamp).UTC()
+		if !snapshot.ObservedAt.IsZero() {
+			quoteTime = snapshot.ObservedAt.UTC()
 		}
 		quotes[key] = model.MarketQuote{
 			ObservedAt: quoteTime,
-			Last:       md.Last,
-			Bid:        md.Bid,
-			Ask:        md.Ask,
-			Volume:     md.Volume,
+			Last:       snapshot.Last,
+			Bid:        snapshot.Bid,
+			Ask:        snapshot.Ask,
+			Volume:     snapshot.Volume,
 		}
 	}
 
@@ -360,7 +364,7 @@ func (m *Manager) poll(ctx context.Context) {
 }
 
 func (m *Manager) historicalFallbackPrice(ctx context.Context, inst model.Instrument) (float64, bool) {
-	client, ok := m.client.(historicalPriceClient)
+	client, ok := m.client.(HistoricalProvider)
 	if !ok || inst.Symbol == "" {
 		return 0, false
 	}
@@ -379,16 +383,18 @@ func (m *Manager) historicalFallbackPrice(ctx context.Context, inst model.Instru
 	return 0, false
 }
 
-func bestPrice(md *ibkr.MarketData) float64 {
+func bestPrice(snapshot *Snapshot) float64 {
 	switch {
-	case md.Last > 0:
-		return md.Last
-	case md.Bid > 0 && md.Ask > 0:
-		return (md.Bid + md.Ask) / 2
-	case md.Bid > 0:
-		return md.Bid
-	case md.Ask > 0:
-		return md.Ask
+	case snapshot == nil:
+		return 0
+	case snapshot.Last > 0:
+		return snapshot.Last
+	case snapshot.Bid > 0 && snapshot.Ask > 0:
+		return (snapshot.Bid + snapshot.Ask) / 2
+	case snapshot.Bid > 0:
+		return snapshot.Bid
+	case snapshot.Ask > 0:
+		return snapshot.Ask
 	default:
 		return 0
 	}
@@ -414,6 +420,9 @@ func (m *Manager) clearSuppression(key string) {
 }
 
 func marketDataBackoff(err error, interval time.Duration) time.Duration {
+	if err == nil {
+		return interval
+	}
 	message := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(message, "not subscribed"),
@@ -517,27 +526,52 @@ func (m *Manager) liveQuote(ctx context.Context, inst model.Instrument) (model.M
 	if m == nil || m.client == nil || inst.Symbol == "" {
 		return model.MarketQuote{}, false
 	}
-	if m.pacing != nil {
-		if err := m.pacing.AcquireMessage(ctx); err != nil {
+	if m.budget != nil {
+		if err := m.budget.Acquire(ctx); err != nil {
 			return model.MarketQuote{}, false
 		}
 	}
-	md, err := m.client.ReqMarketData(ctx, inst)
-	if err != nil || md == nil {
+	snapshot, err := m.client.Snapshot(ctx, inst)
+	if err != nil || snapshot == nil {
 		return model.MarketQuote{}, false
 	}
 	quoteTime := time.Now().UTC()
-	if md.Timestamp > 0 {
-		quoteTime = time.UnixMilli(md.Timestamp).UTC()
+	if !snapshot.ObservedAt.IsZero() {
+		quoteTime = snapshot.ObservedAt.UTC()
 	}
 	quote := model.MarketQuote{
 		ObservedAt: quoteTime,
-		Last:       md.Last,
-		Bid:        md.Bid,
-		Ask:        md.Ask,
-		Volume:     md.Volume,
+		Last:       snapshot.Last,
+		Bid:        snapshot.Bid,
+		Ask:        snapshot.Ask,
+		Volume:     snapshot.Volume,
 	}
 	return quote, quote.ReferencePrice() > 0
+}
+
+// UpsertQuote allows external daemons to feed the local market-state cache
+// without coupling deliberation-time code to live network requests.
+func (m *Manager) UpsertQuote(inst model.Instrument, quote model.MarketQuote) {
+	m.storeQuote(inst, quote)
+}
+
+// UpsertSnapshot allows external daemons to feed provider-neutral snapshots into
+// the local cache.
+func (m *Manager) UpsertSnapshot(inst model.Instrument, snapshot Snapshot) {
+	if inst.Symbol == "" {
+		return
+	}
+	quoteTime := snapshot.ObservedAt
+	if quoteTime.IsZero() {
+		quoteTime = time.Now().UTC()
+	}
+	m.storeQuote(inst, model.MarketQuote{
+		ObservedAt: quoteTime,
+		Last:       snapshot.Last,
+		Bid:        snapshot.Bid,
+		Ask:        snapshot.Ask,
+		Volume:     snapshot.Volume,
+	})
 }
 
 func (m *Manager) storeQuote(inst model.Instrument, quote model.MarketQuote) {

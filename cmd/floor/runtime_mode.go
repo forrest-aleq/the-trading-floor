@@ -15,14 +15,17 @@ const (
 )
 
 type runtimeReadiness struct {
-	Mode                   runtimeMode
-	DBReady                bool
-	BrokerConnected        bool
-	BrokerPaper            bool
-	StartupPricingReady    bool
-	EarningsUniverseReady  bool
-	RegimeDetectionEnabled bool
-	RiskTokenConfigured    bool
+	Mode                    runtimeMode
+	DBReady                 bool
+	BrokerConnected         bool
+	BrokerPaper             bool
+	MarketStateConfigured   bool
+	MarketStateBrokerBacked bool
+	StartupPricingReady     bool
+	EarningsUniverseReady   bool
+	RegimeDetectionEnabled  bool
+	RegimeDetectorReady     bool
+	RiskTokenConfigured     bool
 }
 
 func loadRuntimeMode() (runtimeMode, error) {
@@ -53,11 +56,20 @@ func validateRuntimeReadiness(readiness runtimeReadiness) error {
 		if !readiness.BrokerPaper {
 			return fmt.Errorf("paper mode requires a paper IBKR session")
 		}
+		if !readiness.MarketStateConfigured {
+			return fmt.Errorf("paper mode requires an explicit market state provider; TWS is broker/account only")
+		}
+		if readiness.MarketStateBrokerBacked {
+			return fmt.Errorf("paper mode requires a non-broker market state provider; TWS is broker/account only")
+		}
 		if !readiness.StartupPricingReady {
 			return fmt.Errorf("paper mode requires a non-empty startup pricing watchlist")
 		}
 		if !readiness.RegimeDetectionEnabled {
 			return fmt.Errorf("paper mode requires regime detection to be enabled")
+		}
+		if !readiness.RegimeDetectorReady {
+			return fmt.Errorf("paper mode requires regime detection to have live market state access")
 		}
 		return nil
 	case runtimeModeLive:
@@ -70,6 +82,12 @@ func validateRuntimeReadiness(readiness runtimeReadiness) error {
 		if readiness.BrokerPaper {
 			return fmt.Errorf("live mode requires a non-paper IBKR session")
 		}
+		if !readiness.MarketStateConfigured {
+			return fmt.Errorf("live mode requires an explicit market state provider; TWS is broker/account only")
+		}
+		if readiness.MarketStateBrokerBacked {
+			return fmt.Errorf("live mode requires a non-broker market state provider; TWS is broker/account only")
+		}
 		if !readiness.StartupPricingReady {
 			return fmt.Errorf("live mode requires a non-empty startup pricing watchlist")
 		}
@@ -78,6 +96,9 @@ func validateRuntimeReadiness(readiness runtimeReadiness) error {
 		}
 		if !readiness.RegimeDetectionEnabled {
 			return fmt.Errorf("live mode requires regime detection to be enabled")
+		}
+		if !readiness.RegimeDetectorReady {
+			return fmt.Errorf("live mode requires regime detection to have live market state access")
 		}
 		if !readiness.RiskTokenConfigured {
 			return fmt.Errorf("live mode requires an explicit RISK_TOKEN_SECRET with at least 32 characters")

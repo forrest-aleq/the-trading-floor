@@ -56,6 +56,9 @@ func (b *runtimeStubBroker) PlaceOrder(_ context.Context, o model.Order) (*model
 	}, nil
 }
 func (b *runtimeStubBroker) CancelOrder(_ context.Context, _ int64) error { return nil }
+func (b *runtimeStubBroker) GetOrderStatus(_ context.Context, _ model.Order, _ int64) (*ibkr.OrderLookup, error) {
+	return nil, nil
+}
 func (b *runtimeStubBroker) GetPositions(_ context.Context) ([]ibkr.IBKRPosition, error) {
 	return nil, nil
 }
@@ -382,7 +385,7 @@ func TestTreatmentDeskExecutesLiveWhenCompetenceIsKnown(t *testing.T) {
 	}
 }
 
-func TestDeskFallsBackToShadowWhenPaperOrderTimesOutAfterAcceptance(t *testing.T) {
+func TestDeskLeavesPendingPaperOrderOutOfBookUntilFillReconciliation(t *testing.T) {
 	researchResp, _ := json.Marshal(map[string]any{
 		"instrument":         map[string]any{"symbol": "AAPL", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
 		"direction":          "long",
@@ -464,13 +467,12 @@ func TestDeskFallsBackToShadowWhenPaperOrderTimesOutAfterAcceptance(t *testing.T
 		Raw:       []byte(`AAPL event catalyst forms`),
 	})
 
-	pos := fetchOpenPosition(t, bk)
-	if !pos.Shadow {
-		t.Fatal("expected shadow fallback for pending paper order")
+	if positions := bk.GetOpenPositions(); len(positions) != 0 {
+		t.Fatalf("expected no book position while broker order is still pending, got %d", len(positions))
 	}
 }
 
-func TestDeskFallsBackToShadowWhenPaperExecutionTimesOut(t *testing.T) {
+func TestDeskDoesNotInventShadowPositionWhenPaperExecutionTimesOut(t *testing.T) {
 	researchResp, _ := json.Marshal(map[string]any{
 		"instrument":         map[string]any{"symbol": "TLT", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
 		"direction":          "long",
@@ -546,9 +548,8 @@ func TestDeskFallsBackToShadowWhenPaperExecutionTimesOut(t *testing.T) {
 		Raw:       []byte(`Fed official comments on rate path`),
 	})
 
-	pos := fetchOpenPosition(t, bk)
-	if !pos.Shadow {
-		t.Fatal("expected shadow fallback for paper execution timeout")
+	if positions := bk.GetOpenPositions(); len(positions) != 0 {
+		t.Fatalf("expected no book position when broker confirmation is missing, got %d", len(positions))
 	}
 }
 

@@ -101,6 +101,12 @@ func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Posit
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if fill != nil {
+		if existing, ok := b.positions[fill.OrderID]; ok && existing != nil && existing.Status == "open" && !existing.Shadow {
+			return existing
+		}
+	}
+
 	pos := b.newPosition(fill, thesis)
 	b.positions[pos.ID] = pos
 	b.deskPositions[pos.DeskID]++
@@ -484,6 +490,14 @@ func (b *Book) GetOpenPositions() []*model.Position {
 		}
 	}
 	return open
+}
+
+func (b *Book) GetPosition(positionID string) (*model.Position, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	pos, ok := b.positions[positionID]
+	return pos, ok
 }
 
 func (b *Book) ResetDaily() {

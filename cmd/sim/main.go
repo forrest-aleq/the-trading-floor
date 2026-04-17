@@ -171,6 +171,9 @@ func (f *fakeBroker) PlaceOrder(ctx context.Context, order model.Order) (*model.
 }
 
 func (f *fakeBroker) CancelOrder(ctx context.Context, orderID int64) error { return nil }
+func (f *fakeBroker) GetOrderStatus(ctx context.Context, order model.Order, orderID int64) (*ibkr.OrderLookup, error) {
+	return nil, nil
+}
 
 func (f *fakeBroker) GetPositions(ctx context.Context) ([]ibkr.IBKRPosition, error) {
 	return nil, nil

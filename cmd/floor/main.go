@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -407,6 +408,87 @@ func main() {
 		}
 		return thesis, thesis != nil
 	}
+
+	// --- Working Order Monitor ---
+	workingOrderPollInterval := readRuntimeDuration("EXECUTION_WORKING_ORDER_POLL_INTERVAL", 15*time.Second)
+	stalePaperOrderAge := readRuntimeDuration("EXECUTION_STALE_PAPER_ORDER_AGE", 2*time.Minute)
+	observe.SafeGo(slog.Default().With("component", "runtime"), "working order loop panic", func() {
+		if workingOrderPollInterval <= 0 {
+			return
+		}
+
+		runWorkingOrderPass := func() {
+			refreshCtx, refreshCancel := context.WithTimeout(ctx, 10*time.Second)
+			updates := execMgr.RefreshWorkingOrders(refreshCtx)
+			refreshCancel()
+
+			for _, update := range updates {
+				desk := desksByID[update.Snapshot.DeskID]
+				if desk == nil {
+					slog.Warn("working order update for unknown desk",
+						"desk_id", update.Snapshot.DeskID,
+						"order_id", update.Snapshot.OrderID,
+						"state", update.Snapshot.State,
+					)
+					continue
+				}
+				switch update.Snapshot.State {
+				case execution.OrderStateFilled:
+					if _, err := desk.RecordExecutionFill(ctx, update.Fill); err != nil {
+						slog.Warn("reconcile broker fill failed",
+							"desk_id", update.Snapshot.DeskID,
+							"order_id", update.Snapshot.OrderID,
+							"error", err,
+						)
+					}
+				case execution.OrderStateCancelled, execution.OrderStateFailed:
+					desk.ResolvePendingExecution(ctx, update.Snapshot.OrderID, update.Snapshot.State, update.Snapshot.BrokerStatus)
+				}
+			}
+
+			if !execMgr.IsPaper() || stalePaperOrderAge <= 0 {
+				return
+			}
+			now := time.Now().UTC()
+			for _, working := range execMgr.WorkingOrders() {
+				if strings.EqualFold(working.BrokerStatus, "cancel_requested") {
+					continue
+				}
+				if working.SubmittedAt.IsZero() || now.Sub(working.SubmittedAt) < stalePaperOrderAge {
+					continue
+				}
+				cancelCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				err := execMgr.CancelWorkingOrder(cancelCtx, working.OrderID)
+				cancel()
+				if err != nil {
+					slog.Warn("cancel stale paper working order failed",
+						"order_id", working.OrderID,
+						"broker_order_id", working.BrokerOrderID,
+						"error", err,
+					)
+					continue
+				}
+				slog.Warn("stale paper working order cancel requested",
+					"order_id", working.OrderID,
+					"broker_order_id", working.BrokerOrderID,
+					"age", now.Sub(working.SubmittedAt),
+					"symbol", working.DisplaySymbol,
+				)
+			}
+		}
+
+		runWorkingOrderPass()
+		ticker := time.NewTicker(workingOrderPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runWorkingOrderPass()
+			}
+		}
+	}, "task", "working_orders")
 
 	// --- Position Monitor ---
 	orderCompiler := orderflow.NewCompiler()

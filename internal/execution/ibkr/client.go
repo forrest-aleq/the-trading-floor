@@ -75,6 +75,19 @@ type PendingOrderError struct {
 	Reason  string
 }
 
+type OrderLookup struct {
+	OrderID           int64
+	Status            string
+	FilledQuantity    float64
+	RemainingQuantity float64
+	AvgFillPrice      float64
+	LastFillPrice     float64
+	UpdatedAt         time.Time
+	Active            bool
+	Done              bool
+	Fill              *model.Fill
+}
+
 func (e *PendingOrderError) Error() string {
 	if e == nil {
 		return "pending order"
@@ -207,6 +220,14 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 		return nil, fmt.Errorf("order did not complete")
 	}
 
+	return materializeFill(order, trade, contract, resolvedLegs)
+}
+
+func materializeFill(order model.Order, trade *ibsync.Trade, contract *ibsync.Contract, resolvedLegs []model.TradeLeg) (*model.Fill, error) {
+	if trade == nil {
+		return nil, fmt.Errorf("nil trade")
+	}
+
 	fills := trade.Fills()
 	if len(fills) == 0 {
 		return nil, fmt.Errorf("order completed without fills")
@@ -238,7 +259,7 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 			filledAt = fill.Time
 		}
 
-		if !order.IsMultiLeg() || fill.Contract == nil || fill.Execution == nil || fill.Contract.SecType == "BAG" {
+		if !order.IsMultiLeg() || fill.Contract == nil || fill.Contract.SecType == "BAG" {
 			continue
 		}
 		key := contractKey(fill.Contract)
@@ -291,13 +312,13 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 		if len(legFills) > 0 && instrument.Multiplier == "" {
 			instrument.Multiplier = legFills[0].Instrument.Multiplier
 		}
-	} else {
+	} else if contract != nil {
 		instrument.ConID = contract.ConID
 		if contract.Multiplier != "" {
 			instrument.Multiplier = contract.Multiplier
 		}
 	}
-	if contract.Multiplier != "" {
+	if contract != nil && contract.Multiplier != "" {
 		instrument.Multiplier = contract.Multiplier
 	}
 
@@ -368,6 +389,44 @@ func (c *Client) CancelOrder(ctx context.Context, orderID int64) error {
 	}
 
 	return fmt.Errorf("order %d not found", orderID)
+}
+
+func (c *Client) GetOrderStatus(ctx context.Context, order model.Order, orderID int64) (*OrderLookup, error) {
+	ib := c.conn.IB()
+	if ib == nil {
+		return nil, fmt.Errorf("not connected to IBKR")
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	for _, trade := range ib.Trades() {
+		if trade == nil || trade.Order == nil || trade.Order.OrderID != orderID {
+			continue
+		}
+		lookup := &OrderLookup{
+			OrderID:           orderID,
+			Status:            strings.TrimSpace(string(trade.OrderStatus.Status)),
+			FilledQuantity:    trade.OrderStatus.Filled.Float(),
+			RemainingQuantity: trade.OrderStatus.Remaining.Float(),
+			AvgFillPrice:      trade.OrderStatus.AvgFillPrice,
+			LastFillPrice:     trade.OrderStatus.LastFillPrice,
+			UpdatedAt:         time.Now().UTC(),
+			Active:            trade.IsActive() || trade.OrderStatus.IsActive(),
+			Done:              trade.IsDone() || trade.OrderStatus.IsDone(),
+		}
+		if lookup.Done {
+			fill, err := materializeFill(order, trade, trade.Contract, append([]model.TradeLeg(nil), order.Legs...))
+			if err == nil {
+				lookup.Fill = fill
+			}
+		}
+		return lookup, nil
+	}
+
+	return nil, fmt.Errorf("order %d not found", orderID)
 }
 
 func (c *Client) GetPositions(ctx context.Context) ([]IBKRPosition, error) {

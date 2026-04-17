@@ -182,6 +182,9 @@ func (b *probeBroker) PlaceOrder(ctx context.Context, order model.Order) (*model
 }
 
 func (b *probeBroker) CancelOrder(ctx context.Context, orderID int64) error { return nil }
+func (b *probeBroker) GetOrderStatus(ctx context.Context, order model.Order, orderID int64) (*ibkr.OrderLookup, error) {
+	return nil, nil
+}
 
 func (b *probeBroker) GetPositions(ctx context.Context) ([]ibkr.IBKRPosition, error) {
 	return nil, nil

@@ -49,7 +49,10 @@ func (b *stubBroker) PlaceOrder(_ context.Context, o model.Order) (*model.Fill, 
 		FilledAt:   time.Now(),
 	}, nil
 }
-func (b *stubBroker) CancelOrder(_ context.Context, _ int64) error                { return nil }
+func (b *stubBroker) CancelOrder(_ context.Context, _ int64) error { return nil }
+func (b *stubBroker) GetOrderStatus(_ context.Context, _ model.Order, _ int64) (*ibkr.OrderLookup, error) {
+	return nil, nil
+}
 func (b *stubBroker) GetPositions(_ context.Context) ([]ibkr.IBKRPosition, error) { return nil, nil }
 func (b *stubBroker) GetAccountSummary(_ context.Context) (*ibkr.AccountSummary, error) {
 	return &ibkr.AccountSummary{NetLiquidation: 1_000_000, Cash: 1_000_000}, nil

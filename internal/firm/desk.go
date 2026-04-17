@@ -3,6 +3,7 @@ package firm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"os"
@@ -433,21 +434,14 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		if err != nil {
 			var pending *execution.PendingFillError
 			if errors.As(err, &pending) {
-				pos = d.book.OpenShadowPosition(thesis)
-				thesis.Status = model.ThesisNursery
-				d.log.Warn("execution timed out after broker acceptance; routed to shadow book",
-					"thesis_id", thesis.ID,
-					"symbol", thesis.DisplaySymbol(),
-					"order_status", pending.Status,
-				)
+				d.MarkPendingExecution(ctx, thesis, pending)
 			} else if d.execution != nil && d.execution.IsPaper() && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
-				pos = d.book.OpenShadowPosition(thesis)
-				thesis.Status = model.ThesisNursery
-				d.log.Warn("paper execution timed out; routed to shadow book",
+				d.log.Warn("paper execution timed out before broker confirmation",
 					"thesis_id", thesis.ID,
 					"symbol", thesis.DisplaySymbol(),
 					"error", err,
 				)
+				return
 			} else {
 				d.log.Error("execution failed", "thesis_id", thesis.ID, "error", err)
 				return
@@ -467,6 +461,19 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		d.onTrade()
 	}
 
+	if pos == nil {
+		d.log.Info("order staged for live broker execution",
+			"thesis_id", thesis.ID,
+			"symbol", thesis.DisplaySymbol(),
+			"desk", d.ID,
+			"ab_group", d.ABGroup,
+			"autonomy_mode", thesis.AutonomyMode,
+			"status", thesis.Status,
+			"time", time.Now().Format(time.RFC3339),
+		)
+		return
+	}
+
 	d.log.Info("trade executed",
 		"thesis_id", thesis.ID,
 		"symbol", pos.DisplaySymbol(),
@@ -480,6 +487,88 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		"autonomy_mode", thesis.AutonomyMode,
 		"shadow", pos.Shadow,
 		"time", time.Now().Format(time.RFC3339),
+	)
+}
+
+func (d *Desk) MarkPendingExecution(ctx context.Context, thesis *model.Thesis, pending *execution.PendingFillError) {
+	if d == nil || thesis == nil || pending == nil {
+		return
+	}
+	thesis.Status = model.ThesisPending
+	d.rememberThesis(thesis)
+	d.persistThesis(ctx, thesis)
+	d.log.Warn("execution pending at broker; thesis left out of book until fill reconciliation",
+		"thesis_id", thesis.ID,
+		"symbol", thesis.DisplaySymbol(),
+		"broker_order_id", pending.OrderID,
+		"order_status", pending.Status,
+	)
+}
+
+func (d *Desk) RecordExecutionFill(ctx context.Context, fill *model.Fill) (*model.Position, error) {
+	if d == nil || fill == nil {
+		return nil, errors.New("nil desk or fill")
+	}
+	if existing, ok := d.book.GetPosition(fill.OrderID); ok && existing.Status == "open" && !existing.Shadow {
+		return existing, nil
+	}
+
+	thesis, ok := d.GetThesis(fill.OrderID)
+	if !ok && d.store != nil {
+		loaded, err := d.store.GetThesis(ctx, fill.OrderID)
+		if err != nil {
+			return nil, err
+		}
+		thesis = loaded
+	}
+	if thesis == nil {
+		return nil, fmt.Errorf("thesis %s not found for execution fill", fill.OrderID)
+	}
+
+	pos := d.book.OpenPosition(fill, thesis)
+	thesis.Status = model.ThesisActive
+	d.rememberThesis(thesis)
+	d.persistThesis(ctx, thesis)
+	d.persistPosition(ctx, pos)
+	if d.onTrade != nil && pos != nil && !pos.Shadow {
+		d.onTrade()
+	}
+
+	d.log.Info("reconciled broker fill into book",
+		"thesis_id", thesis.ID,
+		"symbol", pos.DisplaySymbol(),
+		"price", pos.EntryPrice,
+		"quantity", pos.Quantity,
+		"broker_order_id", fill.IBKROrderID,
+	)
+	return pos, nil
+}
+
+func (d *Desk) ResolvePendingExecution(ctx context.Context, orderID string, state execution.OrderState, brokerStatus string) {
+	if d == nil || orderID == "" {
+		return
+	}
+	thesis, ok := d.GetThesis(orderID)
+	if !ok && d.store != nil {
+		loaded, err := d.store.GetThesis(ctx, orderID)
+		if err == nil {
+			thesis = loaded
+		}
+	}
+	if thesis == nil || thesis.Status != model.ThesisPending {
+		return
+	}
+	if state == execution.OrderStateFilled {
+		return
+	}
+
+	thesis.Status = model.ThesisProsecuted
+	d.rememberThesis(thesis)
+	d.persistThesis(ctx, thesis)
+	d.log.Warn("pending execution resolved without position activation",
+		"thesis_id", thesis.ID,
+		"state", state,
+		"broker_status", brokerStatus,
 	)
 }
 

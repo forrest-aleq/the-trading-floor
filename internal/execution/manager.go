@@ -19,6 +19,7 @@ type Broker interface {
 	IsPaper() bool
 	PlaceOrder(context.Context, model.Order) (*model.Fill, error)
 	CancelOrder(context.Context, int64) error
+	GetOrderStatus(context.Context, model.Order, int64) (*ibkr.OrderLookup, error)
 	GetPositions(context.Context) ([]ibkr.IBKRPosition, error)
 	GetAccountSummary(context.Context) (*ibkr.AccountSummary, error)
 }
@@ -30,6 +31,7 @@ type Manager struct {
 
 	mu               sync.Mutex
 	submitted        map[string]cachedFill
+	tracked          map[string]*trackedOrder
 	group            singleflight.Group
 	submittedTTL     time.Duration
 	cleanupInterval  time.Duration
@@ -43,6 +45,7 @@ func NewManager(ibkrClient Broker) *Manager {
 		ibkr:            ibkrClient,
 		log:             slog.Default().With("component", "execution"),
 		submitted:       make(map[string]cachedFill),
+		tracked:         make(map[string]*trackedOrder),
 		submittedTTL:    24 * time.Hour,
 		cleanupInterval: 15 * time.Minute,
 	}
@@ -107,6 +110,7 @@ func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model
 		if err != nil {
 			var pending *ibkr.PendingOrderError
 			if errors.As(err, &pending) {
+				m.recordPendingOrder(order, pending)
 				return nil, &PendingFillError{
 					OrderID: pending.OrderID,
 					Status:  pending.Status,
@@ -117,9 +121,11 @@ func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model
 				"thesis_id", order.ThesisID,
 				"error", err,
 			)
+			m.recordFailedOrder(order, err)
 			return nil, fmt.Errorf("place order: %w", err)
 		}
 
+		m.recordFilledOrder(order, fill)
 		m.log.Info("order filled",
 			"thesis_id", order.ThesisID,
 			"symbol", fill.DisplaySymbol(),
@@ -175,6 +181,10 @@ func (m *Manager) submitOnce(ctx context.Context, orderID string, fn func() (*mo
 		return fn()
 	}
 
+	if snapshot, ok := m.lookupWorkingOrderSnapshot(orderID); ok {
+		m.log.Warn("duplicate working order submission suppressed", "order_id", orderID, "broker_order_id", snapshot.BrokerOrderID)
+		return nil, normalizePendingOrderError(snapshot)
+	}
 	if fill, ok := m.lookupSubmitted(orderID); ok {
 		m.log.Warn("duplicate order submission suppressed", "order_id", orderID)
 		return fill, nil
@@ -279,6 +289,15 @@ func (m *Manager) pruneExpiredLocked(now time.Time) {
 			continue
 		}
 		delete(m.submitted, orderID)
+	}
+	for orderID, tracked := range m.tracked {
+		if tracked == nil || tracked.snapshot.IsWorking() {
+			continue
+		}
+		if tracked.snapshot.UpdatedAt.IsZero() || now.Sub(tracked.snapshot.UpdatedAt) <= m.submittedTTL {
+			continue
+		}
+		delete(m.tracked, orderID)
 	}
 	m.lastCacheCleanup = now
 }

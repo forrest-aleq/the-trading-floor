@@ -17,6 +17,9 @@ type testBroker struct {
 	calls     atomic.Int64
 	delay     time.Duration
 	err       error
+	mu        sync.Mutex
+	lookups   map[int64]*ibkr.OrderLookup
+	cancelled []int64
 }
 
 func (b *testBroker) IsConnected() bool { return b.connected.Load() }
@@ -38,12 +41,26 @@ func (b *testBroker) PlaceOrder(_ context.Context, order model.Order) (*model.Fi
 		FilledAt:   time.Now().UTC(),
 	}, nil
 }
-func (b *testBroker) CancelOrder(_ context.Context, _ int64) error { return nil }
+func (b *testBroker) CancelOrder(_ context.Context, orderID int64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cancelled = append(b.cancelled, orderID)
+	return nil
+}
 func (b *testBroker) GetPositions(_ context.Context) ([]ibkr.IBKRPosition, error) {
 	return nil, nil
 }
 func (b *testBroker) GetAccountSummary(_ context.Context) (*ibkr.AccountSummary, error) {
 	return &ibkr.AccountSummary{}, nil
+}
+func (b *testBroker) GetOrderStatus(_ context.Context, _ model.Order, orderID int64) (*ibkr.OrderLookup, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if lookup, ok := b.lookups[orderID]; ok {
+		cp := *lookup
+		return &cp, nil
+	}
+	return nil, nil
 }
 
 func TestSubmitSuppressesDuplicateOrderIDs(t *testing.T) {
@@ -230,5 +247,140 @@ func TestSubmitPrefersBrokerPendingResultOverContextDeadline(t *testing.T) {
 	}
 	if pending.OrderID != 99 {
 		t.Fatalf("expected order id 99, got %d", pending.OrderID)
+	}
+}
+
+func TestSubmitSuppressesDuplicateWhileBrokerOrderWorking(t *testing.T) {
+	broker := &testBroker{
+		err: &ibkr.PendingOrderError{
+			OrderID: 77,
+			Status:  "Submitted",
+			Reason:  "accepted but still working",
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+
+	order := model.Order{
+		ID:         "order-working",
+		ThesisID:   "thesis-working",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "QQQ", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   1,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected initial pending fill error")
+	}
+	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected duplicate submit to be suppressed as pending")
+	}
+	if broker.calls.Load() != 1 {
+		t.Fatalf("expected one broker call while order is still working, got %d", broker.calls.Load())
+	}
+}
+
+func TestRefreshWorkingOrdersPromotesFill(t *testing.T) {
+	broker := &testBroker{
+		err: &ibkr.PendingOrderError{
+			OrderID: 88,
+			Status:  "Submitted",
+			Reason:  "accepted but still working",
+		},
+		lookups: map[int64]*ibkr.OrderLookup{
+			88: {
+				OrderID:           88,
+				Status:            "Filled",
+				FilledQuantity:    2,
+				RemainingQuantity: 0,
+				AvgFillPrice:      101.25,
+				LastFillPrice:     101.25,
+				UpdatedAt:         time.Now().UTC(),
+				Done:              true,
+				Fill: &model.Fill{
+					OrderID:     "order-refresh",
+					IBKROrderID: 88,
+					Instrument:  model.Instrument{Symbol: "QQQ", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+					Direction:   model.Long,
+					Quantity:    2,
+					AvgPrice:    101.25,
+					FilledAt:    time.Now().UTC(),
+				},
+			},
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+
+	order := model.Order{
+		ID:         "order-refresh",
+		ThesisID:   "thesis-refresh",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "QQQ", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   2,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 101,
+	}
+
+	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected initial pending fill error")
+	}
+
+	updates := manager.RefreshWorkingOrders(context.Background())
+	if len(updates) != 1 {
+		t.Fatalf("expected one working order update, got %d", len(updates))
+	}
+	if updates[0].Snapshot.State != OrderStateFilled {
+		t.Fatalf("expected filled state, got %s", updates[0].Snapshot.State)
+	}
+	if updates[0].Fill == nil || updates[0].Fill.AvgPrice != 101.25 {
+		t.Fatalf("expected reconciled fill, got %+v", updates[0].Fill)
+	}
+	if snapshot, ok := manager.OrderStatus(order.ID); !ok || snapshot.State != OrderStateFilled {
+		t.Fatalf("expected tracked order to move to filled, got ok=%v snapshot=%+v", ok, snapshot)
+	}
+}
+
+func TestCancelWorkingOrderMarksCancelRequested(t *testing.T) {
+	broker := &testBroker{
+		err: &ibkr.PendingOrderError{
+			OrderID: 91,
+			Status:  "Submitted",
+			Reason:  "accepted but still working",
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+
+	order := model.Order{
+		ID:         "order-cancel",
+		ThesisID:   "thesis-cancel",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "SPY", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   1,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected initial pending fill error")
+	}
+	if err := manager.CancelWorkingOrder(context.Background(), order.ID); err != nil {
+		t.Fatalf("cancel working order failed: %v", err)
+	}
+	if len(broker.cancelled) != 1 || broker.cancelled[0] != 91 {
+		t.Fatalf("expected broker cancel for order 91, got %+v", broker.cancelled)
+	}
+	snapshot, ok := manager.OrderStatus(order.ID)
+	if !ok {
+		t.Fatal("expected tracked order snapshot after cancel request")
+	}
+	if snapshot.BrokerStatus != "cancel_requested" {
+		t.Fatalf("expected cancel_requested broker status, got %q", snapshot.BrokerStatus)
 	}
 }

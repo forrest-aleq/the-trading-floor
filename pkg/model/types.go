@@ -273,6 +273,7 @@ type ThesisStatus string
 const (
 	ThesisEmbryo     ThesisStatus = "embryo"
 	ThesisNursery    ThesisStatus = "nursery"
+	ThesisPending    ThesisStatus = "pending_execution"
 	ThesisProsecuted ThesisStatus = "prosecuted"
 	ThesisActive     ThesisStatus = "active"
 	ThesisResolved   ThesisStatus = "resolved"

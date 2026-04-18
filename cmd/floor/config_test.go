@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -208,6 +209,12 @@ func (m stubHealthMarket) FreshnessReport(_ []model.Instrument, now time.Time, _
 	return report
 }
 
+type stubHealthStore struct {
+	err error
+}
+
+func (s stubHealthStore) Ping(context.Context) error { return s.err }
+
 func TestRuntimeHealthDisablesEntriesWhenBrokerDisconnected(t *testing.T) {
 	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
 		Broker:          stubHealthBroker{connected: false},
@@ -283,5 +290,34 @@ func TestRuntimeHealthAllowsEntriesWhenBrokerAndQuotesAreHealthy(t *testing.T) {
 	}
 	if policy.Mode != firm.EntryModeNormal {
 		t.Fatalf("expected normal mode, got %s", policy.Mode)
+	}
+}
+
+func TestRuntimeHealthDisablesEntriesWhenPersistenceProbeFails(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:  true,
+			LastSynced: now.Add(-30 * time.Second),
+		}},
+		MarketFreshness: stubHealthMarket{report: marketdata.QuoteFreshnessReport{
+			Total:   1,
+			Fresh:   1,
+			Stale:   0,
+			Missing: 0,
+		}},
+		PersistenceProbe: stubHealthStore{err: errors.New("postgres unavailable")},
+		RequiredQuotes: []model.Instrument{
+			{Symbol: "SPY", SecType: "STK", Currency: "USD"},
+		},
+	})
+
+	policy := supervisor.EvaluateNow(now)
+	if policy.AllowEntries {
+		t.Fatal("expected persistence failure to disable entries")
+	}
+	if policy.Reason != "persistence_unavailable" {
+		t.Fatalf("expected persistence_unavailable reason, got %q", policy.Reason)
 	}
 }

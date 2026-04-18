@@ -394,14 +394,16 @@ func main() {
 	var entryControl firm.EntryControl
 	if runtimeMode != runtimeModeDev || marketState.Provider != nil {
 		health := newRuntimeHealthSupervisor(runtimeHealthConfig{
-			Broker:           ibkrClient,
-			BrokerStatus:     ibkrClient,
-			BrokerSync:       bk,
-			MarketFreshness:  mdMgr,
-			RequiredQuotes:   marketBootstrap,
-			Interval:         readRuntimeDuration("RUNTIME_HEALTH_INTERVAL", 15*time.Second),
-			MaxBrokerSyncAge: readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute),
-			MaxQuoteAge:      readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", 2*time.Minute),
+			Broker:                  ibkrClient,
+			BrokerStatus:            ibkrClient,
+			BrokerSync:              bk,
+			MarketFreshness:         mdMgr,
+			PersistenceProbe:        db,
+			RequiredQuotes:          marketBootstrap,
+			Interval:                readRuntimeDuration("RUNTIME_HEALTH_INTERVAL", 15*time.Second),
+			MaxBrokerSyncAge:        readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute),
+			MaxQuoteAge:             readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", 2*time.Minute),
+			PersistenceProbeTimeout: readRuntimeDuration("RUNTIME_HEALTH_PERSISTENCE_TIMEOUT", 2*time.Second),
 			OnPolicyChange: func(policy firm.EntryPolicy, details map[string]any) {
 				audit.Record("runtime_entry_policy", "", "", map[string]any{
 					"mode":          policy.Mode,
@@ -422,6 +424,7 @@ func main() {
 			"interval", readRuntimeDuration("RUNTIME_HEALTH_INTERVAL", 15*time.Second),
 			"max_broker_sync_age", readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute),
 			"max_quote_age", readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", 2*time.Minute),
+			"persistence_timeout", readRuntimeDuration("RUNTIME_HEALTH_PERSISTENCE_TIMEOUT", 2*time.Second),
 		)
 	} else {
 		slog.Warn("runtime health supervisor disabled in dev mode without live market data provider")

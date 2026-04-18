@@ -64,6 +64,13 @@ func (db *DB) Close() {
 	db.Pool.Close()
 }
 
+func (db *DB) Ping(ctx context.Context) error {
+	if db == nil || db.Pool == nil {
+		return fmt.Errorf("postgres pool unavailable")
+	}
+	return db.Pool.Ping(ctx)
+}
+
 func (db *DB) Migrate(ctx context.Context) error {
 	path := migrationPath()
 	migrations, err := loadMigrationFiles(path)

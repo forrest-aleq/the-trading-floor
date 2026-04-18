@@ -30,29 +30,37 @@ type marketFreshnessSource interface {
 	FreshnessReport([]model.Instrument, time.Time, time.Duration) marketdata.QuoteFreshnessReport
 }
 
+type persistenceProbe interface {
+	Ping(context.Context) error
+}
+
 type runtimeHealthConfig struct {
-	Broker           brokerConnectivity
-	BrokerStatus     brokerStatusSource
-	BrokerSync       brokerSyncSource
-	MarketFreshness  marketFreshnessSource
-	RequiredQuotes   []model.Instrument
-	Interval         time.Duration
-	MaxBrokerSyncAge time.Duration
-	MaxQuoteAge      time.Duration
-	OnPolicyChange   func(firm.EntryPolicy, map[string]any)
+	Broker                  brokerConnectivity
+	BrokerStatus            brokerStatusSource
+	BrokerSync              brokerSyncSource
+	MarketFreshness         marketFreshnessSource
+	PersistenceProbe        persistenceProbe
+	RequiredQuotes          []model.Instrument
+	Interval                time.Duration
+	MaxBrokerSyncAge        time.Duration
+	MaxQuoteAge             time.Duration
+	PersistenceProbeTimeout time.Duration
+	OnPolicyChange          func(firm.EntryPolicy, map[string]any)
 }
 
 type runtimeHealthSupervisor struct {
-	log              *slog.Logger
-	broker           brokerConnectivity
-	brokerStatus     brokerStatusSource
-	brokerSync       brokerSyncSource
-	marketFreshness  marketFreshnessSource
-	requiredQuotes   []model.Instrument
-	interval         time.Duration
-	maxBrokerSyncAge time.Duration
-	maxQuoteAge      time.Duration
-	onPolicyChange   func(firm.EntryPolicy, map[string]any)
+	log                     *slog.Logger
+	broker                  brokerConnectivity
+	brokerStatus            brokerStatusSource
+	brokerSync              brokerSyncSource
+	marketFreshness         marketFreshnessSource
+	persistenceProbe        persistenceProbe
+	requiredQuotes          []model.Instrument
+	interval                time.Duration
+	maxBrokerSyncAge        time.Duration
+	maxQuoteAge             time.Duration
+	persistenceProbeTimeout time.Duration
+	onPolicyChange          func(firm.EntryPolicy, map[string]any)
 
 	mu     sync.RWMutex
 	policy firm.EntryPolicy
@@ -69,19 +77,24 @@ func newRuntimeHealthSupervisor(cfg runtimeHealthConfig) *runtimeHealthSuperviso
 	if cfg.MaxQuoteAge <= 0 {
 		cfg.MaxQuoteAge = 2 * time.Minute
 	}
+	if cfg.PersistenceProbeTimeout <= 0 {
+		cfg.PersistenceProbeTimeout = 2 * time.Second
+	}
 
 	supervisor := &runtimeHealthSupervisor{
-		log:              slog.Default().With("component", "runtime_health"),
-		broker:           cfg.Broker,
-		brokerStatus:     cfg.BrokerStatus,
-		brokerSync:       cfg.BrokerSync,
-		marketFreshness:  cfg.MarketFreshness,
-		requiredQuotes:   append([]model.Instrument(nil), cfg.RequiredQuotes...),
-		interval:         interval,
-		maxBrokerSyncAge: cfg.MaxBrokerSyncAge,
-		maxQuoteAge:      cfg.MaxQuoteAge,
-		onPolicyChange:   cfg.OnPolicyChange,
-		policy:           firm.DisabledEntryPolicy("runtime_health_initializing", time.Now().UTC()),
+		log:                     slog.Default().With("component", "runtime_health"),
+		broker:                  cfg.Broker,
+		brokerStatus:            cfg.BrokerStatus,
+		brokerSync:              cfg.BrokerSync,
+		marketFreshness:         cfg.MarketFreshness,
+		persistenceProbe:        cfg.PersistenceProbe,
+		requiredQuotes:          append([]model.Instrument(nil), cfg.RequiredQuotes...),
+		interval:                interval,
+		maxBrokerSyncAge:        cfg.MaxBrokerSyncAge,
+		maxQuoteAge:             cfg.MaxQuoteAge,
+		persistenceProbeTimeout: cfg.PersistenceProbeTimeout,
+		onPolicyChange:          cfg.OnPolicyChange,
+		policy:                  firm.DisabledEntryPolicy("runtime_health_initializing", time.Now().UTC()),
 	}
 	return supervisor
 }
@@ -189,6 +202,19 @@ func (s *runtimeHealthSupervisor) evaluate(now time.Time) (firm.EntryPolicy, map
 	details["broker_sync_age"] = brokerAge.String()
 	if s.maxBrokerSyncAge > 0 && brokerAge > s.maxBrokerSyncAge {
 		return firm.DisabledEntryPolicy(fmt.Sprintf("broker_sync_stale:%s", brokerAge.Round(time.Second)), now), details
+	}
+
+	if s.persistenceProbe != nil {
+		pingCtx, cancel := context.WithTimeout(context.Background(), s.persistenceProbeTimeout)
+		err := s.persistenceProbe.Ping(pingCtx)
+		cancel()
+		details["persistence_probe_timeout"] = s.persistenceProbeTimeout.String()
+		if err != nil {
+			details["persistence_ready"] = false
+			details["persistence_error"] = err.Error()
+			return firm.DisabledEntryPolicy("persistence_unavailable", now), details
+		}
+		details["persistence_ready"] = true
 	}
 
 	if len(s.requiredQuotes) == 0 {

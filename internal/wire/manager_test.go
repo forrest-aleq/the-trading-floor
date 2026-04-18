@@ -89,6 +89,58 @@ func TestManagerReplaysOverflowedSignals(t *testing.T) {
 	}
 }
 
+func TestManagerRecordsDeadLettersWhenOverflowIsExhausted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager := NewManager()
+	manager.bufferSize = 1
+	manager.maxOverflow = 1
+	manager.maxDeadLetters = 8
+	manager.retryInterval = 5 * time.Millisecond
+
+	manager.RegisterFeed(testFeed{
+		name: "burst",
+		signals: []signal.Signal{
+			{ID: "sig-1", Source: "feed-a", Type: signal.TypeNews, Category: "macro-fed", Timestamp: time.Now(), Raw: []byte(`{"title":"fed speaker one"}`)},
+			{ID: "sig-2", Source: "feed-a", Type: signal.TypeNews, Category: "macro-rates", Timestamp: time.Now(), Raw: []byte(`{"title":"cpi surprise two"}`)},
+			{ID: "sig-3", Source: "feed-a", Type: signal.TypeNews, Category: "macro-fx", Timestamp: time.Now(), Raw: []byte(`{"title":"yen intervention three"}`)},
+		},
+	})
+
+	_ = manager.Subscribe()
+	if err := manager.Start(ctx); err != nil {
+		t.Fatalf("start manager: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		stats := manager.Stats()
+		if stats.TotalDropped == 1 && stats.TotalDeadLettered == 1 && stats.PendingDeadLetters == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stats := manager.Stats()
+	if stats.TotalDropped != 1 || stats.TotalDeadLettered != 1 || stats.PendingDeadLetters != 1 {
+		t.Fatalf("unexpected wire stats after overflow exhaustion: %+v dead_letters=%+v", stats, manager.DeadLetters(10))
+	}
+
+	letters := manager.DeadLetters(10)
+	if len(letters) != 1 {
+		t.Fatalf("expected one dead letter, got %d", len(letters))
+	}
+	if letters[0].SignalID != "sig-3" {
+		t.Fatalf("expected sig-3 to dead-letter, got %s", letters[0].SignalID)
+	}
+	if letters[0].Reason != "subscriber_overflow_exhausted" {
+		t.Fatalf("unexpected dead letter reason %q", letters[0].Reason)
+	}
+	if letters[0].DroppedAt.IsZero() {
+		t.Fatal("expected dead letter timestamp to be recorded")
+	}
+}
+
 func receiveSignal(t *testing.T, ch <-chan signal.Signal, timeout time.Duration) signal.Signal {
 	t.Helper()
 

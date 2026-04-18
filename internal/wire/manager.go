@@ -17,6 +17,16 @@ type queuedDelivery struct {
 	sig signal.Signal
 }
 
+type DeadLetter struct {
+	SignalID        string
+	Source          string
+	Type            signal.Type
+	Category        string
+	SubscriberIndex int
+	Reason          string
+	DroppedAt       time.Time
+}
+
 // Manager is the central signal bus. All sources fan in, all desks fan out.
 type Manager struct {
 	log         *slog.Logger
@@ -30,6 +40,8 @@ type Manager struct {
 	overflowMu     sync.Mutex
 	overflow       []queuedDelivery
 	overflowNotify chan struct{}
+	deadLetterMu   sync.Mutex
+	deadLetters    []DeadLetter
 
 	deduper         *Deduper
 	clusterer       *Clusterer
@@ -45,6 +57,7 @@ type Manager struct {
 	totalOverflowed   atomic.Int64
 	totalReplayed     atomic.Int64
 	totalDropped      atomic.Int64
+	totalDeadLettered atomic.Int64
 	receivedBySource  map[string]int64
 	dedupedBySource   map[string]int64
 	lastSignalID      string
@@ -54,6 +67,7 @@ type Manager struct {
 	// Config
 	bufferSize     int
 	maxOverflow    int
+	maxDeadLetters int
 	retryInterval  time.Duration
 	publishTimeout time.Duration
 }
@@ -69,6 +83,7 @@ func NewManager() *Manager {
 		log:              slog.Default().With("component", "wire"),
 		bufferSize:       10000,
 		maxOverflow:      50000,
+		maxDeadLetters:   2048,
 		retryInterval:    50 * time.Millisecond,
 		publishTimeout:   250 * time.Millisecond,
 		ingress:          make(chan signal.Signal, 10000),
@@ -193,7 +208,7 @@ func (m *Manager) Start(ctx context.Context) error {
 				// Fan out to all subscribers
 				m.mu.RLock()
 				subscriberCount := len(m.subscribers)
-				for _, sub := range m.subscribers {
+				for i, sub := range m.subscribers {
 					select {
 					case sub <- sig:
 						m.totalFanout.Add(1)
@@ -206,6 +221,7 @@ func (m *Manager) Start(ctx context.Context) error {
 							continue
 						}
 						m.totalDropped.Add(1)
+						m.recordDeadLetter(sig, i, "subscriber_overflow_exhausted")
 						m.log.Error("subscriber buffer full, overflow queue exhausted",
 							"source", sig.Source,
 							"type", sig.Type,
@@ -236,6 +252,9 @@ func (m *Manager) Stats() WireStats {
 	m.overflowMu.Lock()
 	pendingOverflow := len(m.overflow)
 	m.overflowMu.Unlock()
+	m.deadLetterMu.Lock()
+	pendingDeadLetters := len(m.deadLetters)
+	m.deadLetterMu.Unlock()
 	m.statsMu.RLock()
 	receivedBySource := make(map[string]int64, len(m.receivedBySource))
 	for source, count := range m.receivedBySource {
@@ -251,40 +270,44 @@ func (m *Manager) Stats() WireStats {
 	m.statsMu.RUnlock()
 
 	return WireStats{
-		TotalReceived:     m.totalReceived.Load(),
-		TotalDeduped:      m.totalDeduped.Load(),
-		TotalFanout:       m.totalFanout.Load(),
-		TotalCorroborated: m.totalCorroborated.Load(),
-		TotalOverflowed:   m.totalOverflowed.Load(),
-		TotalReplayed:     m.totalReplayed.Load(),
-		TotalDropped:      m.totalDropped.Load(),
-		PendingOverflow:   pendingOverflow,
-		ActiveFeeds:       len(m.feeds),
-		Subscribers:       len(m.subscribers),
-		ReceivedBySource:  receivedBySource,
-		DedupedBySource:   dedupedBySource,
-		LastSignalID:      lastSignalID,
-		LastSignalSource:  lastSignalSource,
-		LastSignalAt:      lastSignalAt,
+		TotalReceived:      m.totalReceived.Load(),
+		TotalDeduped:       m.totalDeduped.Load(),
+		TotalFanout:        m.totalFanout.Load(),
+		TotalCorroborated:  m.totalCorroborated.Load(),
+		TotalOverflowed:    m.totalOverflowed.Load(),
+		TotalReplayed:      m.totalReplayed.Load(),
+		TotalDropped:       m.totalDropped.Load(),
+		TotalDeadLettered:  m.totalDeadLettered.Load(),
+		PendingOverflow:    pendingOverflow,
+		PendingDeadLetters: pendingDeadLetters,
+		ActiveFeeds:        len(m.feeds),
+		Subscribers:        len(m.subscribers),
+		ReceivedBySource:   receivedBySource,
+		DedupedBySource:    dedupedBySource,
+		LastSignalID:       lastSignalID,
+		LastSignalSource:   lastSignalSource,
+		LastSignalAt:       lastSignalAt,
 	}
 }
 
 type WireStats struct {
-	TotalReceived     int64
-	TotalDeduped      int64
-	TotalFanout       int64
-	TotalCorroborated int64
-	TotalOverflowed   int64
-	TotalReplayed     int64
-	TotalDropped      int64
-	PendingOverflow   int
-	ActiveFeeds       int
-	Subscribers       int
-	ReceivedBySource  map[string]int64
-	DedupedBySource   map[string]int64
-	LastSignalID      string
-	LastSignalSource  string
-	LastSignalAt      time.Time
+	TotalReceived      int64
+	TotalDeduped       int64
+	TotalFanout        int64
+	TotalCorroborated  int64
+	TotalOverflowed    int64
+	TotalReplayed      int64
+	TotalDropped       int64
+	TotalDeadLettered  int64
+	PendingOverflow    int
+	PendingDeadLetters int
+	ActiveFeeds        int
+	Subscribers        int
+	ReceivedBySource   map[string]int64
+	DedupedBySource    map[string]int64
+	LastSignalID       string
+	LastSignalSource   string
+	LastSignalAt       time.Time
 }
 
 func (m *Manager) recordSignalIngress(sig signal.Signal) {
@@ -303,6 +326,45 @@ func (m *Manager) recordSignalDedup(source string) {
 	m.statsMu.Lock()
 	defer m.statsMu.Unlock()
 	m.dedupedBySource[source]++
+}
+
+func (m *Manager) DeadLetters(limit int) []DeadLetter {
+	m.deadLetterMu.Lock()
+	defer m.deadLetterMu.Unlock()
+
+	if len(m.deadLetters) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit > len(m.deadLetters) {
+		limit = len(m.deadLetters)
+	}
+	start := len(m.deadLetters) - limit
+	result := make([]DeadLetter, limit)
+	copy(result, m.deadLetters[start:])
+	return result
+}
+
+func (m *Manager) recordDeadLetter(sig signal.Signal, subscriberIndex int, reason string) {
+	entry := DeadLetter{
+		SignalID:        sig.ID,
+		Source:          sig.Source,
+		Type:            sig.Type,
+		Category:        sig.Category,
+		SubscriberIndex: subscriberIndex,
+		Reason:          reason,
+		DroppedAt:       time.Now().UTC(),
+	}
+
+	m.deadLetterMu.Lock()
+	defer m.deadLetterMu.Unlock()
+
+	if m.maxDeadLetters > 0 && len(m.deadLetters) >= m.maxDeadLetters {
+		copy(m.deadLetters, m.deadLetters[1:])
+		m.deadLetters[len(m.deadLetters)-1] = entry
+	} else {
+		m.deadLetters = append(m.deadLetters, entry)
+	}
+	m.totalDeadLettered.Add(1)
 }
 
 func (m *Manager) enqueueOverflow(sub chan signal.Signal, sig signal.Signal) bool {

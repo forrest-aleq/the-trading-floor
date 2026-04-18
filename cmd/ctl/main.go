@@ -105,8 +105,26 @@ func cmdMarket() {
 
 	snapshot, err := provider.Snapshot(ctx, inst)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ctl market: fetch %s failed: %v\n", symbol, err)
-		os.Exit(1)
+		historyProvider, ok := provider.(marketdata.HistoricalProvider)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "ctl market: fetch %s failed: %v\n", symbol, err)
+			os.Exit(1)
+		}
+		bars, historyErr := historyProvider.HistoricalBars(ctx, inst, time.Now().UTC(), "5 D", "1 day", "", true)
+		if historyErr != nil || len(bars) == 0 {
+			fmt.Fprintf(os.Stderr, "ctl market: fetch %s failed: %v\n", symbol, err)
+			if historyErr != nil {
+				fmt.Fprintf(os.Stderr, "ctl market: historical fallback failed: %v\n", historyErr)
+			}
+			os.Exit(1)
+		}
+		lastBar := bars[len(bars)-1]
+		snapshot = &marketdata.Snapshot{
+			Symbol:     symbol,
+			Last:       lastBar.Close,
+			ObservedAt: lastBar.Time,
+		}
+		providerName += "+historical_fallback"
 	}
 
 	out, _ := json.MarshalIndent(map[string]any{
@@ -143,19 +161,33 @@ func loadCTLMarketProvider() (string, marketdata.SnapshotProvider, error) {
 		provider, err := marketdata.NewFMPProvider("")
 		return raw, provider, err
 	case "polygon":
-		polygonProvider, err := marketdata.NewPolygonProvider("")
-		if err != nil {
-			return "", nil, err
-		}
-		var provider marketdata.SnapshotProvider = polygonProvider
-		providerName := raw
-		if fallback, fallbackErr := marketdata.NewFMPProvider(""); fallbackErr == nil {
-			provider = marketdata.NewFallbackProvider(provider, fallback)
-			providerName = "polygon+fmp_fallback"
-		}
-		return providerName, provider, nil
+		return loadCTLMassiveBackedProvider()
 	default:
 		return "", nil, fmt.Errorf("unsupported MARKET_DATA_PROVIDER %q", raw)
+	}
+}
+
+func loadCTLMassiveBackedProvider() (string, marketdata.SnapshotProvider, error) {
+	polygonProvider, err := marketdata.NewPolygonProvider("")
+	if err != nil {
+		return "", nil, err
+	}
+
+	switch marketdata.ResolveMassivePlan() {
+	case marketdata.MassivePlanBasicFree:
+		fmpProvider, err := marketdata.NewFMPProvider("")
+		if err != nil {
+			return "", nil, fmt.Errorf("MARKET_DATA_PROVIDER=massive with MASSIVE_PLAN=basic_free requires FMP_API_KEY for live snapshots")
+		}
+		return "massive_free+fmp_snapshots", marketdata.NewSplitProvider(fmpProvider, polygonProvider), nil
+	default:
+		var provider marketdata.SnapshotProvider = polygonProvider
+		providerName := "massive"
+		if fallback, fallbackErr := marketdata.NewFMPProvider(""); fallbackErr == nil {
+			provider = marketdata.NewFallbackProvider(provider, fallback)
+			providerName = "massive+fmp_fallback"
+		}
+		return providerName, provider, nil
 	}
 }
 

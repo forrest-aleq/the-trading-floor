@@ -36,6 +36,12 @@ type SnapshotProvider interface {
 	Snapshot(context.Context, model.Instrument) (*Snapshot, error)
 }
 
+// BatchSnapshotProvider optionally supports fetching many live snapshots in one
+// provider request. Manager uses this to reduce external API pressure.
+type BatchSnapshotProvider interface {
+	Snapshots(context.Context, []model.Instrument) (map[string]*Snapshot, error)
+}
+
 // HistoricalProvider returns historical bars for bootstrapping and fallback.
 type HistoricalProvider interface {
 	HistoricalBars(context.Context, model.Instrument, time.Time, string, string, string, bool) ([]HistoricalBar, error)

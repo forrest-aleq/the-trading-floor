@@ -59,23 +59,7 @@ func (p *FMPProvider) Snapshot(ctx context.Context, inst model.Instrument) (*Sna
 	query.Set("apikey", p.apiKey)
 	endpoint.RawQuery = query.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "TradingFloor/1.0")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fmp quote status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := p.doQuoteRequest(ctx, endpoint.String())
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +80,83 @@ func (p *FMPProvider) Snapshot(ctx context.Context, inst model.Instrument) (*Sna
 		Volume:     quote.Volume,
 		ObservedAt: observedAt,
 	}, nil
+}
+
+func (p *FMPProvider) Snapshots(ctx context.Context, instruments []model.Instrument) (map[string]*Snapshot, error) {
+	if p == nil {
+		return nil, fmt.Errorf("nil FMP provider")
+	}
+	if len(instruments) == 0 {
+		return map[string]*Snapshot{}, nil
+	}
+
+	requestSymbols := make([]string, 0, len(instruments))
+	symbolToKeys := make(map[string][]string, len(instruments))
+	for _, inst := range instruments {
+		symbol := fmpSymbol(inst)
+		if symbol == "" {
+			continue
+		}
+		if _, ok := symbolToKeys[symbol]; !ok {
+			requestSymbols = append(requestSymbols, symbol)
+		}
+		symbolToKeys[symbol] = append(symbolToKeys[symbol], inst.Key())
+	}
+	if len(requestSymbols) == 0 {
+		return map[string]*Snapshot{}, nil
+	}
+
+	endpoint, err := url.Parse(strings.TrimRight(p.baseURL, "/") + defaultFMPQuotePath)
+	if err != nil {
+		return nil, err
+	}
+	query := endpoint.Query()
+	query.Set("symbol", strings.Join(requestSymbols, ","))
+	query.Set("apikey", p.apiKey)
+	endpoint.RawQuery = query.Encode()
+
+	body, err := p.doQuoteRequest(ctx, endpoint.String())
+	if err != nil {
+		return nil, err
+	}
+
+	var quotes []fmpQuote
+	if err := json.Unmarshal(body, &quotes); err != nil || len(quotes) == 0 {
+		quote, parseErr := parseFMPQuote(body)
+		if parseErr != nil {
+			if err != nil {
+				return nil, err
+			}
+			return nil, parseErr
+		}
+		quotes = []fmpQuote{quote}
+	}
+
+	now := time.Now().UTC()
+	out := make(map[string]*Snapshot, len(instruments))
+	for _, quote := range quotes {
+		symbol := strings.TrimSpace(quote.Symbol)
+		keys := symbolToKeys[symbol]
+		if len(keys) == 0 {
+			continue
+		}
+		observedAt := now
+		if quote.LastSaleTime > 0 {
+			observedAt = time.UnixMilli(quote.LastSaleTime).UTC()
+		}
+		snapshot := &Snapshot{
+			Symbol:     strings.TrimPrefix(symbol, "^"),
+			Last:       quote.Price,
+			Bid:        quote.Bid,
+			Ask:        quote.Ask,
+			Volume:     quote.Volume,
+			ObservedAt: observedAt,
+		}
+		for _, key := range keys {
+			out[key] = snapshot
+		}
+	}
+	return out, nil
 }
 
 func (p *FMPProvider) HistoricalBars(ctx context.Context, inst model.Instrument, end time.Time, duration, barSize, whatToShow string, useRTH bool) ([]HistoricalBar, error) {
@@ -139,6 +200,25 @@ func (p *FMPProvider) HistoricalBars(ctx context.Context, inst model.Instrument,
 		return nil, err
 	}
 	return parseFMPHistoricalBars(body)
+}
+
+func (p *FMPProvider) doQuoteRequest(ctx context.Context, endpoint string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "TradingFloor/1.0")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fmp quote status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
 
 type fmpQuote struct {

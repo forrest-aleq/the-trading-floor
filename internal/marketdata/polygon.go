@@ -24,6 +24,16 @@ const (
 	polygonIndicesSnapshotPath = "/v3/snapshot/indices"
 )
 
+type MassivePlan string
+
+const (
+	MassivePlanUnknown   MassivePlan = ""
+	MassivePlanBasicFree MassivePlan = "basic_free"
+	MassivePlanStarter   MassivePlan = "starter"
+	MassivePlanDeveloper MassivePlan = "developer"
+	MassivePlanAdvanced  MassivePlan = "advanced"
+)
+
 type PolygonProvider struct {
 	client  *http.Client
 	baseURL string
@@ -337,12 +347,25 @@ func resolvePolygonBaseURL() string {
 
 func ResolveDefaultMarketDataProvider() string {
 	if resolvePolygonAPIKey("") != "" {
-		return "polygon"
+		return "massive"
 	}
 	if resolveFMPAPIKey("") != "" {
 		return "fmp"
 	}
 	return ""
+}
+
+func ResolveMassivePlan() MassivePlan {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("MASSIVE_PLAN")))
+	if raw == "" {
+		raw = strings.ToLower(strings.TrimSpace(os.Getenv("POLYGON_PLAN")))
+	}
+	switch MassivePlan(raw) {
+	case MassivePlanBasicFree, MassivePlanStarter, MassivePlanDeveloper, MassivePlanAdvanced:
+		return MassivePlan(raw)
+	default:
+		return MassivePlanUnknown
+	}
 }
 
 func polygonStockTicker(inst model.Instrument) string {

@@ -194,6 +194,22 @@ func TestReadMarketStateProviderDefaultsToPolygonWhenMassiveKeyExists(t *testing
 	}
 }
 
+func TestReadMarketStateProviderDefaultsToMassiveAlias(t *testing.T) {
+	t.Setenv("MARKET_DATA_PROVIDER", "")
+	t.Setenv("MARKET_STATE_PROVIDER", "")
+	t.Setenv("POLYGON_API_KEY", "test-key")
+	t.Setenv("MASSIVE_API_KEY", "")
+	t.Setenv("FMP_API_KEY", "")
+
+	mode, err := readMarketStateProviderMode()
+	if err != nil {
+		t.Fatalf("readMarketStateProviderMode returned error: %v", err)
+	}
+	if mode != marketStateProviderPolygon {
+		t.Fatalf("market data provider = %s, want %s", mode, marketStateProviderPolygon)
+	}
+}
+
 func TestValidateRuntimeReadinessRequiresPaperBrokerForPaperMode(t *testing.T) {
 	err := validateRuntimeReadiness(runtimeReadiness{
 		Mode:                   runtimeModePaper,

@@ -165,13 +165,13 @@ func main() {
 			mdMgr.Run(ctx)
 		}, "task", "marketdata")
 		slog.Info("market data manager initialized",
-			"provider", marketState.Mode,
+			"provider", firstNonEmpty(marketState.Label, string(marketState.Mode)),
 			"watchlist", len(marketBootstrap),
 			"broker_backed", marketState.BrokerBacked,
 		)
 	} else {
 		slog.Warn("market data manager initialized without live provider; cache-only mode",
-			"provider", marketState.Mode,
+			"provider", firstNonEmpty(marketState.Label, string(marketState.Mode)),
 			"watchlist", len(marketBootstrap),
 		)
 	}
@@ -194,7 +194,7 @@ func main() {
 			"db_ready", db != nil,
 			"broker_connected", ibkrClient.IsConnected(),
 			"broker_paper", ibkrClient.IsPaper(),
-			"market_data_provider", marketState.Mode,
+			"market_data_provider", firstNonEmpty(marketState.Label, string(marketState.Mode)),
 			"market_data_configured", marketState.Provider != nil,
 			"market_data_broker_backed", marketState.BrokerBacked,
 			"startup_watchlist", len(marketBootstrap),
@@ -430,7 +430,7 @@ func main() {
 		slog.Warn("runtime health supervisor disabled in dev mode without live market data provider")
 	}
 
-	feedCount := registerDefaultFeeds(wireMgr, marketState.Provider)
+	feedCount := registerDefaultFeeds(wireMgr, mdMgr)
 
 	// --- Floor + Desks ---
 	floor := firm.NewFloor(wireMgr, sessionID)

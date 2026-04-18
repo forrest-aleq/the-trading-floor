@@ -92,3 +92,47 @@ func TestParseFMPHistoricalBarsRejectsUnknownShape(t *testing.T) {
 		t.Fatalf("unexpected error %v", err)
 	}
 }
+
+func TestFMPProviderSnapshotsBatchesSymbols(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != defaultFMPQuotePath {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("symbol"); got != "SPY,^VIX" {
+			t.Fatalf("batch quote symbol = %q, want SPY,^VIX", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"symbol":"SPY","price":510.2,"bid":510.1,"ask":510.3,"volume":123},
+			{"symbol":"^VIX","price":19.4,"bid":0,"ask":0,"volume":0}
+		]`))
+	}))
+	defer server.Close()
+
+	provider, err := NewFMPProvider("test-key")
+	if err != nil {
+		t.Fatalf("NewFMPProvider failed: %v", err)
+	}
+	provider.baseURL = server.URL
+	provider.client = server.Client()
+
+	inputs := []model.Instrument{
+		{Symbol: "SPY", SecType: "STK", Currency: "USD"},
+		{Symbol: "VIX", SecType: "IND", Currency: "USD"},
+	}
+
+	snapshots, err := provider.Snapshots(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("Snapshots failed: %v", err)
+	}
+	if len(snapshots) != 2 {
+		t.Fatalf("expected 2 snapshots, got %d", len(snapshots))
+	}
+	if got := snapshots[inputs[0].Key()]; got == nil || got.Last != 510.2 {
+		t.Fatalf("unexpected SPY snapshot %+v", got)
+	}
+	if got := snapshots[inputs[1].Key()]; got == nil || got.Symbol != "VIX" || got.Last != 19.4 {
+		t.Fatalf("unexpected VIX snapshot %+v", got)
+	}
+}

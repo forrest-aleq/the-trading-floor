@@ -249,3 +249,28 @@ func TestFreshnessReportCountsFreshStaleAndMissingQuotes(t *testing.T) {
 		t.Fatalf("expected newest age under 1m, got %s", report.NewestAge)
 	}
 }
+
+func TestManagerSnapshotUsesCachedQuote(t *testing.T) {
+	manager := NewManager(nil, nil, time.Minute)
+	inst := model.Instrument{Symbol: "SPY", SecType: "STK", Currency: "USD", Exchange: "SMART"}
+	now := time.Now().UTC()
+
+	manager.UpsertQuote(inst, model.MarketQuote{
+		ObservedAt: now,
+		Last:       501.2,
+		Bid:        501.1,
+		Ask:        501.3,
+		Volume:     123456,
+	})
+
+	snapshot, err := manager.Snapshot(context.Background(), inst)
+	if err != nil {
+		t.Fatalf("Snapshot failed: %v", err)
+	}
+	if snapshot.Last != 501.2 || snapshot.Bid != 501.1 || snapshot.Ask != 501.3 {
+		t.Fatalf("unexpected snapshot %+v", snapshot)
+	}
+	if snapshot.Symbol != "SPY" {
+		t.Fatalf("expected symbol SPY, got %s", snapshot.Symbol)
+	}
+}

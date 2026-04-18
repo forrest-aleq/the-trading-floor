@@ -2,6 +2,7 @@ package marketdata
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"strings"
@@ -84,6 +85,36 @@ func (m *Manager) Subscribe(fn Subscriber) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.subscribers = append(m.subscribers, fn)
+}
+
+// Snapshot exposes the shared cache as a feed-friendly market data client.
+// Callers get cached quotes first and only fall back to best-effort resolution
+// when the cache is missing.
+func (m *Manager) Snapshot(ctx context.Context, inst model.Instrument) (*Snapshot, error) {
+	if m == nil {
+		return nil, fmt.Errorf("nil market data manager")
+	}
+	if quote, ok := m.LatestQuote(inst); ok && quote.ReferencePrice() > 0 {
+		return snapshotFromQuote(inst, quote), nil
+	}
+	if resolved, quote, ok := m.BestEffortQuote(ctx, inst); ok && quote.ReferencePrice() > 0 {
+		if resolved.Symbol == "" {
+			resolved = inst
+		}
+		return snapshotFromQuote(resolved, quote), nil
+	}
+	if resolved, price, ok := m.BestEffortPrice(ctx, inst); ok && price > 0 {
+		if resolved.Symbol == "" {
+			resolved = inst
+		}
+		return &Snapshot{
+			ConID:      resolved.ConID,
+			Symbol:     strings.TrimSpace(resolved.Symbol),
+			Last:       price,
+			ObservedAt: time.Now().UTC(),
+		}, nil
+	}
+	return nil, fmt.Errorf("snapshot unavailable for %s", inst.Label())
 }
 
 // LatestPrices returns the most recent snapshot of prices.
@@ -333,6 +364,11 @@ func (m *Manager) poll(ctx context.Context) {
 		return
 	}
 
+	if batchClient, ok := m.client.(BatchSnapshotProvider); ok {
+		m.pollBatch(ctx, instruments, batchClient)
+		return
+	}
+
 	prices := make(map[string]float64)
 	quotes := make(map[string]model.MarketQuote)
 	timestamp := time.Now().UTC()
@@ -422,6 +458,130 @@ func (m *Manager) poll(ctx context.Context) {
 	}
 }
 
+func (m *Manager) pollBatch(ctx context.Context, instruments []model.Instrument, batchClient BatchSnapshotProvider) {
+	if len(instruments) == 0 {
+		return
+	}
+
+	if m.budget != nil {
+		if err := m.budget.Acquire(ctx); err != nil {
+			return
+		}
+	}
+
+	now := time.Now().UTC()
+	snapshots, err := batchClient.Snapshots(ctx, instruments)
+	if err != nil {
+		backoff := marketDataBackoff(err, m.interval)
+		prices := make(map[string]float64)
+		for _, inst := range instruments {
+			key := inst.Key()
+			if fallback, ok := m.historicalFallbackPrice(ctx, inst); ok {
+				prices[key] = fallback
+				continue
+			}
+			m.suppress(key, now.Add(backoff))
+		}
+		m.log.Warn("batched market data fetch failed", "count", len(instruments), "error", err, "retry_after", backoff)
+		if len(prices) == 0 {
+			return
+		}
+		m.mu.Lock()
+		for _, inst := range instruments {
+			key := inst.Key()
+			price, ok := prices[key]
+			if !ok || price <= 0 {
+				continue
+			}
+			m.prices[key] = price
+			m.appendHistoryLocked(key, price, now)
+			symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+			if symbol != "" {
+				m.prices[symbol] = price
+				m.appendHistoryLocked(symbol, price, now)
+			}
+		}
+		subs := make([]Subscriber, len(m.subscribers))
+		copy(subs, m.subscribers)
+		m.mu.Unlock()
+		for _, fn := range subs {
+			fn(prices)
+		}
+		return
+	}
+
+	prices := make(map[string]float64)
+	quotes := make(map[string]model.MarketQuote)
+	for _, inst := range instruments {
+		key := inst.Key()
+		if m.shouldSuppress(key, now) {
+			continue
+		}
+		snapshot := snapshots[key]
+		if snapshot == nil {
+			if fallback, ok := m.historicalFallbackPrice(ctx, inst); ok {
+				prices[key] = fallback
+			}
+			continue
+		}
+		price := bestPrice(snapshot)
+		if price <= 0 {
+			if fallback, ok := m.historicalFallbackPrice(ctx, inst); ok {
+				prices[key] = fallback
+			}
+			continue
+		}
+		prices[key] = price
+		quoteTime := now
+		if !snapshot.ObservedAt.IsZero() {
+			quoteTime = snapshot.ObservedAt.UTC()
+		}
+		quotes[key] = model.MarketQuote{
+			ObservedAt: quoteTime,
+			Last:       snapshot.Last,
+			Bid:        snapshot.Bid,
+			Ask:        snapshot.Ask,
+			Volume:     snapshot.Volume,
+		}
+		m.clearSuppression(key)
+	}
+
+	if len(prices) == 0 {
+		return
+	}
+
+	m.mu.Lock()
+	for k, v := range prices {
+		m.prices[k] = v
+	}
+	for _, inst := range instruments {
+		key := inst.Key()
+		price, ok := prices[key]
+		if !ok || price <= 0 {
+			continue
+		}
+		m.appendHistoryLocked(key, price, now)
+		if quote, ok := quotes[key]; ok && quote.ReferencePrice() > 0 {
+			m.quotes[key] = quote
+		}
+		symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+		if symbol != "" {
+			m.prices[symbol] = price
+			m.appendHistoryLocked(symbol, price, now)
+			if quote, ok := quotes[key]; ok && quote.ReferencePrice() > 0 {
+				m.quotes[symbol] = quote
+			}
+		}
+	}
+	subs := make([]Subscriber, len(m.subscribers))
+	copy(subs, m.subscribers)
+	m.mu.Unlock()
+
+	for _, fn := range subs {
+		fn(prices)
+	}
+}
+
 func (m *Manager) historicalFallbackPrice(ctx context.Context, inst model.Instrument) (float64, bool) {
 	client, ok := m.client.(HistoricalProvider)
 	if !ok || inst.Symbol == "" {
@@ -459,6 +619,18 @@ func bestPrice(snapshot *Snapshot) float64 {
 	}
 }
 
+func snapshotFromQuote(inst model.Instrument, quote model.MarketQuote) *Snapshot {
+	return &Snapshot{
+		ConID:      inst.ConID,
+		Symbol:     strings.TrimSpace(inst.Symbol),
+		Last:       quote.Last,
+		Bid:        quote.Bid,
+		Ask:        quote.Ask,
+		Volume:     quote.Volume,
+		ObservedAt: quote.ObservedAt,
+	}
+}
+
 func (m *Manager) shouldSuppress(key string, now time.Time) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -488,6 +660,8 @@ func marketDataBackoff(err error, interval time.Duration) time.Duration {
 		strings.Contains(message, "additional subscription"),
 		strings.Contains(message, "delayed market data is available"):
 		return 10 * time.Minute
+	case strings.Contains(message, "status 429"):
+		return 2 * time.Minute
 	default:
 		return interval
 	}

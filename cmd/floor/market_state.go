@@ -23,6 +23,7 @@ const (
 
 type configuredMarketState struct {
 	Mode          marketStateProviderMode
+	Label         string
 	Provider      marketdata.SnapshotProvider
 	RequestBudget marketdata.RequestBudget
 	BrokerBacked  bool
@@ -40,6 +41,7 @@ func loadMarketStateProvider(snapshotClient marketdata.LegacyIBKRSnapshotClient,
 	case marketStateProviderIBKRLegacy:
 		return configuredMarketState{
 			Mode:          mode,
+			Label:         string(mode),
 			Provider:      marketdata.NewLegacyIBKRProvider(snapshotClient, historicalClient),
 			RequestBudget: ibkrRequestBudget{pacing: pacing},
 			BrokerBacked:  true,
@@ -51,25 +53,47 @@ func loadMarketStateProvider(snapshotClient marketdata.LegacyIBKRSnapshotClient,
 		}
 		return configuredMarketState{
 			Mode:     mode,
+			Label:    string(mode),
 			Provider: provider,
 		}, nil
 	case marketStateProviderPolygon:
-		polygonProvider, err := marketdata.NewPolygonProvider("")
+		label, provider, err := loadMassiveBackedProvider()
 		if err != nil {
 			return configuredMarketState{}, err
 		}
-		var provider marketdata.SnapshotProvider = polygonProvider
-		if fallback, err := marketdata.NewFMPProvider(""); err == nil {
-			provider = marketdata.NewFallbackProvider(provider, fallback)
-		}
 		return configuredMarketState{
 			Mode:     mode,
+			Label:    label,
 			Provider: provider,
 		}, nil
 	case marketStateProviderDatabento:
 		return configuredMarketState{}, fmt.Errorf("MARKET_DATA_PROVIDER=databento is not implemented yet")
 	default:
 		return configuredMarketState{}, fmt.Errorf("unsupported market data provider %q", mode)
+	}
+}
+
+func loadMassiveBackedProvider() (string, marketdata.SnapshotProvider, error) {
+	polygonProvider, err := marketdata.NewPolygonProvider("")
+	if err != nil {
+		return "", nil, err
+	}
+
+	switch marketdata.ResolveMassivePlan() {
+	case marketdata.MassivePlanBasicFree:
+		fmpProvider, err := marketdata.NewFMPProvider("")
+		if err != nil {
+			return "", nil, fmt.Errorf("MARKET_DATA_PROVIDER=massive with MASSIVE_PLAN=basic_free requires FMP_API_KEY for live snapshots")
+		}
+		return "massive_free+fmp_snapshots", marketdata.NewSplitProvider(fmpProvider, polygonProvider), nil
+	default:
+		var provider marketdata.SnapshotProvider = polygonProvider
+		label := "massive"
+		if fallback, err := marketdata.NewFMPProvider(""); err == nil {
+			provider = marketdata.NewFallbackProvider(provider, fallback)
+			label = "massive+fmp_fallback"
+		}
+		return label, provider, nil
 	}
 }
 
@@ -106,4 +130,13 @@ func (b ibkrRequestBudget) Acquire(ctx context.Context) error {
 		return nil
 	}
 	return b.pacing.AcquireMessage(ctx)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

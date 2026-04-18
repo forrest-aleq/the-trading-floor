@@ -140,7 +140,11 @@ func main() {
 		slog.Error("invalid market data provider", "error", err)
 		os.Exit(1)
 	}
-	mdMgr := marketdata.NewManager(marketState.Provider, marketState.RequestBudget, 0)
+	marketDataPollInterval := readRuntimeDuration("MARKET_DATA_POLL_INTERVAL", 30*time.Second)
+	if firstNonEmpty(marketState.Label, string(marketState.Mode)) == "massive_free+fmp_snapshots" && marketDataPollInterval < time.Minute {
+		marketDataPollInterval = time.Minute
+	}
+	mdMgr := marketdata.NewManager(marketState.Provider, marketState.RequestBudget, marketDataPollInterval)
 	marketBootstrap := marketrefs.StartupPricingWatchlist()
 	var positionWriter *positionPersistenceWriter
 	if db != nil {
@@ -167,12 +171,14 @@ func main() {
 		slog.Info("market data manager initialized",
 			"provider", firstNonEmpty(marketState.Label, string(marketState.Mode)),
 			"watchlist", len(marketBootstrap),
+			"poll_interval", marketDataPollInterval,
 			"broker_backed", marketState.BrokerBacked,
 		)
 	} else {
 		slog.Warn("market data manager initialized without live provider; cache-only mode",
 			"provider", firstNonEmpty(marketState.Label, string(marketState.Mode)),
 			"watchlist", len(marketBootstrap),
+			"poll_interval", marketDataPollInterval,
 		)
 	}
 

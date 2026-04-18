@@ -112,7 +112,18 @@ func main() {
 	defer ibkrClient.Close()
 
 	// --- Book + Execution ---
-	execMgr := execution.NewManager(ibkrClient)
+	var orderJournal execution.OrderJournal
+	if db != nil {
+		orderJournal = db
+	}
+	execMgr := execution.NewManagerWithJournal(ibkrClient, orderJournal)
+	if db != nil {
+		hydrateCtx, hydrateCancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := execMgr.HydrateWorkingOrders(hydrateCtx); err != nil {
+			slog.Warn("hydrate working orders failed", "error", err)
+		}
+		hydrateCancel()
+	}
 	bk := book.NewBook(ibkrClient, 1_000_000)
 	observe.SafeGo(slog.Default().With("component", "runtime"), "book reconcile loop panic", func() {
 		bk.StartReconcile(ctx)

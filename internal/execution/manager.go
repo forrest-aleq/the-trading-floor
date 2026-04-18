@@ -24,10 +24,22 @@ type Broker interface {
 	GetAccountSummary(context.Context) (*ibkr.AccountSummary, error)
 }
 
+type OrderJournal interface {
+	UpsertWorkingOrder(context.Context, PersistedOrder) error
+	LoadWorkingOrders(context.Context) ([]PersistedOrder, error)
+}
+
+type PersistedOrder struct {
+	Order    model.Order
+	Snapshot OrderSnapshot
+	Fill     *model.Fill
+}
+
 // Manager handles order lifecycle
 type Manager struct {
-	ibkr Broker
-	log  *slog.Logger
+	ibkr    Broker
+	log     *slog.Logger
+	journal OrderJournal
 
 	mu               sync.Mutex
 	submitted        map[string]cachedFill
@@ -41,14 +53,55 @@ type Manager struct {
 var submitResultGrace = readManagerDurationEnv("EXECUTION_SUBMIT_RESULT_GRACE", 1500*time.Millisecond)
 
 func NewManager(ibkrClient Broker) *Manager {
+	return NewManagerWithJournal(ibkrClient, nil)
+}
+
+func NewManagerWithJournal(ibkrClient Broker, journal OrderJournal) *Manager {
 	return &Manager{
 		ibkr:            ibkrClient,
 		log:             slog.Default().With("component", "execution"),
+		journal:         journal,
 		submitted:       make(map[string]cachedFill),
 		tracked:         make(map[string]*trackedOrder),
 		submittedTTL:    24 * time.Hour,
 		cleanupInterval: 15 * time.Minute,
 	}
+}
+
+func (m *Manager) HydrateWorkingOrders(ctx context.Context) error {
+	if m == nil || m.journal == nil {
+		return nil
+	}
+
+	records, err := m.journal.LoadWorkingOrders(ctx)
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, record := range records {
+		orderID := record.Order.ID
+		if orderID == "" {
+			orderID = record.Snapshot.OrderID
+		}
+		if orderID == "" {
+			continue
+		}
+		record.Order.ID = orderID
+		record.Snapshot.OrderID = orderID
+		m.tracked[orderID] = &trackedOrder{
+			order:    record.Order,
+			snapshot: record.Snapshot,
+			fill:     cloneFill(record.Fill),
+		}
+	}
+	m.log.Info("hydrated working orders from journal", "count", len(records))
+	return nil
 }
 
 type cachedFill struct {

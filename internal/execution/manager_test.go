@@ -22,6 +22,42 @@ type testBroker struct {
 	cancelled []int64
 }
 
+type testOrderJournal struct {
+	mu      sync.Mutex
+	records map[string]PersistedOrder
+}
+
+func (j *testOrderJournal) UpsertWorkingOrder(_ context.Context, record PersistedOrder) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.records == nil {
+		j.records = make(map[string]PersistedOrder)
+	}
+	orderID := record.Order.ID
+	if orderID == "" {
+		orderID = record.Snapshot.OrderID
+	}
+	record.Order.ID = orderID
+	record.Snapshot.OrderID = orderID
+	if record.Fill != nil {
+		record.Fill = cloneFill(record.Fill)
+	}
+	j.records[orderID] = record
+	return nil
+}
+
+func (j *testOrderJournal) LoadWorkingOrders(_ context.Context) ([]PersistedOrder, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	records := make([]PersistedOrder, 0, len(j.records))
+	for _, record := range j.records {
+		cp := record
+		cp.Fill = cloneFill(record.Fill)
+		records = append(records, cp)
+	}
+	return records, nil
+}
+
 func (b *testBroker) IsConnected() bool { return b.connected.Load() }
 func (b *testBroker) IsPaper() bool     { return true }
 func (b *testBroker) PlaceOrder(_ context.Context, order model.Order) (*model.Fill, error) {
@@ -204,6 +240,52 @@ func TestSubmitReturnsPendingFillErrorForAcceptedUnfilledPaperOrder(t *testing.T
 	}
 	if pending.Status != "Submitted" {
 		t.Fatalf("expected submitted status, got %q", pending.Status)
+	}
+}
+
+func TestHydrateWorkingOrdersSuppressesDuplicateSubmitAfterRestart(t *testing.T) {
+	journal := &testOrderJournal{}
+	initialBroker := &testBroker{
+		err: &ibkr.PendingOrderError{
+			OrderID: 77,
+			Status:  "Submitted",
+			Reason:  "accepted but still working",
+		},
+	}
+	initialBroker.connected.Store(true)
+	manager := NewManagerWithJournal(initialBroker, journal)
+
+	order := model.Order{
+		ID:         "order-restart",
+		ThesisID:   "thesis-restart",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "QQQ", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   1,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected initial pending fill error")
+	}
+
+	recoveredBroker := &testBroker{}
+	recoveredBroker.connected.Store(true)
+	recovered := NewManagerWithJournal(recoveredBroker, journal)
+	if err := recovered.HydrateWorkingOrders(context.Background()); err != nil {
+		t.Fatalf("hydrate working orders failed: %v", err)
+	}
+
+	if snapshot, ok := recovered.OrderStatus(order.ID); !ok || snapshot.State != OrderStateWorking {
+		t.Fatalf("expected hydrated working order snapshot, got ok=%v snapshot=%+v", ok, snapshot)
+	}
+
+	if _, err := recovered.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected duplicate submit to be suppressed after hydration")
+	}
+	if recoveredBroker.calls.Load() != 0 {
+		t.Fatalf("expected recovered manager to suppress duplicate without broker call, got %d", recoveredBroker.calls.Load())
 	}
 }
 

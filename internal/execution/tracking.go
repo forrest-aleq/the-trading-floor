@@ -143,15 +143,17 @@ func (m *Manager) CancelWorkingOrder(ctx context.Context, orderID string) error 
 
 	now := time.Now().UTC()
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	current, ok := m.tracked[orderID]
 	if !ok {
+		m.mu.Unlock()
 		return nil
 	}
 	current.snapshot.BrokerStatus = "cancel_requested"
 	current.snapshot.UpdatedAt = now
 	current.snapshot.LastError = ""
+	record := persistedOrderFromTracked(current)
+	m.mu.Unlock()
+	m.persistTrackedOrder(record)
 	return nil
 }
 
@@ -162,10 +164,10 @@ func (m *Manager) applyOrderLookup(order model.Order, lookup ibkr.OrderLookup) (
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	tracked, ok := m.tracked[order.ID]
 	if !ok {
+		m.mu.Unlock()
 		return OrderUpdate{}, false
 	}
 
@@ -200,6 +202,7 @@ func (m *Manager) applyOrderLookup(order model.Order, lookup ibkr.OrderLookup) (
 	tracked.snapshot = next
 	changed := orderSnapshotChanged(prev, next, tracked.fill, fill)
 	if !changed {
+		m.mu.Unlock()
 		return OrderUpdate{}, false
 	}
 
@@ -207,6 +210,9 @@ func (m *Manager) applyOrderLookup(order model.Order, lookup ibkr.OrderLookup) (
 		Snapshot: next,
 		Fill:     fill,
 	}
+	record := persistedOrderFromTracked(tracked)
+	m.mu.Unlock()
+	m.persistTrackedOrder(record)
 	return update, true
 }
 
@@ -217,8 +223,6 @@ func (m *Manager) recordPendingOrder(order model.Order, pending *ibkr.PendingOrd
 	now := time.Now().UTC()
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.pruneExpiredLocked(now)
 	m.tracked[order.ID] = &trackedOrder{
 		order: order,
@@ -237,6 +241,9 @@ func (m *Manager) recordPendingOrder(order model.Order, pending *ibkr.PendingOrd
 			Paper:         m.ibkr.IsPaper(),
 		},
 	}
+	record := persistedOrderFromTracked(m.tracked[order.ID])
+	m.mu.Unlock()
+	m.persistTrackedOrder(record)
 }
 
 func (m *Manager) recordFilledOrder(order model.Order, fill *model.Fill) {
@@ -249,8 +256,6 @@ func (m *Manager) recordFilledOrder(order model.Order, fill *model.Fill) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.pruneExpiredLocked(now)
 	m.tracked[order.ID] = &trackedOrder{
 		order: order,
@@ -273,6 +278,9 @@ func (m *Manager) recordFilledOrder(order model.Order, fill *model.Fill) {
 			Paper:             m.ibkr.IsPaper(),
 		},
 	}
+	record := persistedOrderFromTracked(m.tracked[order.ID])
+	m.mu.Unlock()
+	m.persistTrackedOrder(record)
 }
 
 func (m *Manager) recordFailedOrder(order model.Order, err error) {
@@ -282,8 +290,6 @@ func (m *Manager) recordFailedOrder(order model.Order, err error) {
 	now := time.Now().UTC()
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.pruneExpiredLocked(now)
 	tracked, ok := m.tracked[order.ID]
 	if !ok {
@@ -302,6 +308,9 @@ func (m *Manager) recordFailedOrder(order model.Order, err error) {
 		LastError:     err.Error(),
 		Paper:         m.ibkr.IsPaper(),
 	}
+	record := persistedOrderFromTracked(tracked)
+	m.mu.Unlock()
+	m.persistTrackedOrder(record)
 }
 
 func (m *Manager) lookupWorkingOrderSnapshot(orderID string) (OrderSnapshot, bool) {
@@ -387,4 +396,40 @@ func normalizePendingOrderError(snapshot OrderSnapshot) error {
 func isPendingBrokerError(err error) bool {
 	var pending *PendingFillError
 	return errors.As(err, &pending)
+}
+
+func persistedOrderFromTracked(tracked *trackedOrder) PersistedOrder {
+	if tracked == nil {
+		return PersistedOrder{}
+	}
+	return PersistedOrder{
+		Order:    tracked.order,
+		Snapshot: tracked.snapshot,
+		Fill:     cloneFill(tracked.fill),
+	}
+}
+
+func (m *Manager) persistTrackedOrder(record PersistedOrder) {
+	if m == nil || m.journal == nil {
+		return
+	}
+	if record.Snapshot.OrderID == "" && record.Order.ID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.journal.UpsertWorkingOrder(ctx, record); err != nil {
+		m.log.Warn("persist working order failed",
+			"order_id", firstNonEmptyOrderID(record),
+			"state", record.Snapshot.State,
+			"error", err,
+		)
+	}
+}
+
+func firstNonEmptyOrderID(record PersistedOrder) string {
+	if record.Snapshot.OrderID != "" {
+		return record.Snapshot.OrderID
+	}
+	return record.Order.ID
 }

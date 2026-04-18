@@ -18,6 +18,7 @@ const (
 	marketStateProviderFMP        marketStateProviderMode = "fmp"
 	marketStateProviderPolygon    marketStateProviderMode = "polygon"
 	marketStateProviderDatabento  marketStateProviderMode = "databento"
+	marketStateProviderMassive    marketStateProviderMode = "massive"
 )
 
 type configuredMarketState struct {
@@ -53,7 +54,18 @@ func loadMarketStateProvider(snapshotClient marketdata.LegacyIBKRSnapshotClient,
 			Provider: provider,
 		}, nil
 	case marketStateProviderPolygon:
-		return configuredMarketState{}, fmt.Errorf("MARKET_DATA_PROVIDER=polygon is not implemented yet")
+		polygonProvider, err := marketdata.NewPolygonProvider("")
+		if err != nil {
+			return configuredMarketState{}, err
+		}
+		var provider marketdata.SnapshotProvider = polygonProvider
+		if fallback, err := marketdata.NewFMPProvider(""); err == nil {
+			provider = marketdata.NewFallbackProvider(provider, fallback)
+		}
+		return configuredMarketState{
+			Mode:     mode,
+			Provider: provider,
+		}, nil
 	case marketStateProviderDatabento:
 		return configuredMarketState{}, fmt.Errorf("MARKET_DATA_PROVIDER=databento is not implemented yet")
 	default:
@@ -74,11 +86,14 @@ func readMarketStateProviderMode() (marketStateProviderMode, error) {
 	}
 
 	mode := marketStateProviderMode(raw)
+	if mode == marketStateProviderMassive {
+		mode = marketStateProviderPolygon
+	}
 	switch mode {
 	case marketStateProviderNone, marketStateProviderIBKRLegacy, marketStateProviderFMP, marketStateProviderPolygon, marketStateProviderDatabento:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("MARKET_DATA_PROVIDER must be one of none|ibkr_legacy|fmp|polygon|databento")
+		return "", fmt.Errorf("MARKET_DATA_PROVIDER must be one of none|ibkr_legacy|fmp|polygon|massive|databento")
 	}
 }
 

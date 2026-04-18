@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -82,7 +83,7 @@ func cmdMarket() {
 		symbol = os.Args[2]
 	}
 
-	provider, err := marketdata.NewFMPProvider("")
+	providerName, provider, err := loadCTLMarketProvider()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ctl market: %v\n", err)
 		os.Exit(1)
@@ -109,7 +110,7 @@ func cmdMarket() {
 	}
 
 	out, _ := json.MarshalIndent(map[string]any{
-		"provider":    "fmp",
+		"provider":    providerName,
 		"symbol":      symbol,
 		"last":        snapshot.Last,
 		"bid":         snapshot.Bid,
@@ -118,6 +119,44 @@ func cmdMarket() {
 		"observed_at": snapshot.ObservedAt,
 	}, "", "  ")
 	fmt.Println(string(out))
+}
+
+func loadCTLMarketProvider() (string, marketdata.SnapshotProvider, error) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("MARKET_DATA_PROVIDER")))
+	if raw == "" {
+		raw = strings.ToLower(strings.TrimSpace(os.Getenv("MARKET_STATE_PROVIDER")))
+	}
+	if raw == "" {
+		raw = marketdata.ResolveDefaultMarketDataProvider()
+	}
+	if raw == "" || raw == "none" {
+		return "", nil, fmt.Errorf("no market data provider configured; set MARKET_DATA_PROVIDER=fmp|polygon or provide API credentials for auto-detection")
+	}
+
+	switch raw {
+	case "massive":
+		raw = "polygon"
+	}
+
+	switch raw {
+	case "fmp":
+		provider, err := marketdata.NewFMPProvider("")
+		return raw, provider, err
+	case "polygon":
+		polygonProvider, err := marketdata.NewPolygonProvider("")
+		if err != nil {
+			return "", nil, err
+		}
+		var provider marketdata.SnapshotProvider = polygonProvider
+		providerName := raw
+		if fallback, fallbackErr := marketdata.NewFMPProvider(""); fallbackErr == nil {
+			provider = marketdata.NewFallbackProvider(provider, fallback)
+			providerName = "polygon+fmp_fallback"
+		}
+		return providerName, provider, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported MARKET_DATA_PROVIDER %q", raw)
+	}
 }
 
 func cmdPositions(ctx context.Context, db *store.DB) {

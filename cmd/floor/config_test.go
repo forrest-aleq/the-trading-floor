@@ -123,6 +123,8 @@ func TestReadMarketStateProviderUsesNewEnvName(t *testing.T) {
 func TestReadMarketStateProviderDefaultsToFMPWhenKeyExists(t *testing.T) {
 	t.Setenv("MARKET_DATA_PROVIDER", "")
 	t.Setenv("MARKET_STATE_PROVIDER", "")
+	t.Setenv("POLYGON_API_KEY", "")
+	t.Setenv("MASSIVE_API_KEY", "")
 	t.Setenv("FMP_API_KEY", "test-key")
 
 	mode, err := readMarketStateProviderMode()
@@ -131,6 +133,64 @@ func TestReadMarketStateProviderDefaultsToFMPWhenKeyExists(t *testing.T) {
 	}
 	if mode != marketStateProviderFMP {
 		t.Fatalf("market data provider = %s, want %s", mode, marketStateProviderFMP)
+	}
+}
+
+func TestReadMarketStateProviderUsesPolygonFromNewEnvName(t *testing.T) {
+	t.Setenv("MARKET_DATA_PROVIDER", "polygon")
+	t.Setenv("MARKET_STATE_PROVIDER", "")
+
+	mode, err := readMarketStateProviderMode()
+	if err != nil {
+		t.Fatalf("readMarketStateProviderMode returned error: %v", err)
+	}
+	if mode != marketStateProviderPolygon {
+		t.Fatalf("market data provider = %s, want %s", mode, marketStateProviderPolygon)
+	}
+}
+
+func TestReadMarketStateProviderSupportsMassiveAlias(t *testing.T) {
+	t.Setenv("MARKET_DATA_PROVIDER", "massive")
+	t.Setenv("MARKET_STATE_PROVIDER", "")
+
+	mode, err := readMarketStateProviderMode()
+	if err != nil {
+		t.Fatalf("readMarketStateProviderMode returned error: %v", err)
+	}
+	if mode != marketStateProviderPolygon {
+		t.Fatalf("market data provider = %s, want %s", mode, marketStateProviderPolygon)
+	}
+}
+
+func TestReadMarketStateProviderDefaultsToPolygonWhenKeyExists(t *testing.T) {
+	t.Setenv("MARKET_DATA_PROVIDER", "")
+	t.Setenv("MARKET_STATE_PROVIDER", "")
+	t.Setenv("POLYGON_API_KEY", "test-key")
+	t.Setenv("MASSIVE_API_KEY", "")
+	t.Setenv("FMP_API_KEY", "fallback-key")
+
+	mode, err := readMarketStateProviderMode()
+	if err != nil {
+		t.Fatalf("readMarketStateProviderMode returned error: %v", err)
+	}
+	if mode != marketStateProviderPolygon {
+		t.Fatalf("market data provider = %s, want %s", mode, marketStateProviderPolygon)
+	}
+}
+
+func TestReadMarketStateProviderDefaultsToPolygonWhenMassiveKeyExists(t *testing.T) {
+	t.Setenv("MARKET_DATA_PROVIDER", "")
+	t.Setenv("MARKET_STATE_PROVIDER", "")
+	t.Setenv("POLYGON_API_KEY", "")
+	t.Setenv("MASSIVE_API_KEY", "test-key")
+	t.Setenv("FMP_API_KEY", "")
+
+	mode, err := readMarketStateProviderMode()
+	if err != nil {
+		t.Fatalf("readMarketStateProviderMode returned error: %v", err)
+	}
+	if mode != marketStateProviderPolygon {
+		t.Fatalf("market data provider = %s, want %s", mode, marketStateProviderPolygon)
 	}
 }
 

@@ -233,16 +233,6 @@ func resolveFMPAPIKey(explicit string) string {
 	return strings.TrimSpace(os.Getenv("EARNINGS_API_KEY"))
 }
 
-// ResolveDefaultMarketDataProvider returns the preferred provider mode inferred
-// from available local credentials. This keeps dev environments usable without
-// forcing TWS back into the market-data role.
-func ResolveDefaultMarketDataProvider() string {
-	if resolveFMPAPIKey("") != "" {
-		return "fmp"
-	}
-	return ""
-}
-
 func resolveFMPBaseURL() string {
 	if value := strings.TrimSpace(os.Getenv("FMP_API_BASE_URL")); value != "" {
 		return strings.TrimRight(value, "/")

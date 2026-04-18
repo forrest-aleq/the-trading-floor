@@ -174,6 +174,11 @@ func (s *runtimeHealthSupervisor) evaluate(now time.Time) (firm.EntryPolicy, map
 	}
 	syncStatus := s.brokerSync.BrokerSyncStatus()
 	details["broker_last_synced"] = syncStatus.LastSynced
+	details["broker_last_account_synced"] = syncStatus.LastAccountSynced
+	details["broker_last_positions_synced"] = syncStatus.LastPositionsSynced
+	details["broker_last_failure"] = syncStatus.LastFailure
+	details["broker_last_error"] = syncStatus.LastError
+	details["broker_consecutive_failures"] = syncStatus.ConsecutiveFailures
 	if syncStatus.LastSynced.IsZero() {
 		return firm.DisabledEntryPolicy("broker_sync_missing", now), details
 	}

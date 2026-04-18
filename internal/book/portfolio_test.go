@@ -2,6 +2,7 @@ package book
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -26,6 +27,21 @@ func (s stubRuntimeSource) GetPositions(ctx context.Context) ([]ibkr.IBKRPositio
 
 func (s stubRuntimeSource) GetAccountSummary(ctx context.Context) (*ibkr.AccountSummary, error) {
 	return s.summary, nil
+}
+
+type mutableRuntimeSource struct {
+	positions    []ibkr.IBKRPosition
+	summary      *ibkr.AccountSummary
+	positionsErr error
+	summaryErr   error
+}
+
+func (s *mutableRuntimeSource) GetPositions(ctx context.Context) ([]ibkr.IBKRPosition, error) {
+	return s.positions, s.positionsErr
+}
+
+func (s *mutableRuntimeSource) GetAccountSummary(ctx context.Context) (*ibkr.AccountSummary, error) {
+	return s.summary, s.summaryErr
 }
 
 func TestBookMarkKeepsEquityAndUpdatesPnL(t *testing.T) {
@@ -301,5 +317,91 @@ func TestReconcileRecoversBrokerOnlyPositionIntoBook(t *testing.T) {
 	}
 	if positions[0].EntryPrice != 91.25 {
 		t.Fatalf("expected recovered entry price 91.25, got %.2f", positions[0].EntryPrice)
+	}
+}
+
+func TestReconcileMarksBrokerSyncUnhealthyOnAccountSummaryFailure(t *testing.T) {
+	source := &mutableRuntimeSource{
+		summaryErr: errors.New("account feed unavailable"),
+		positions: []ibkr.IBKRPosition{
+			{Symbol: "AAPL", Quantity: 10, AvgCost: 200},
+		},
+	}
+	bk := NewBook(source, 1000)
+
+	bk.reconcile(context.Background())
+	status := bk.BrokerSyncStatus()
+
+	if status.Connected {
+		t.Fatal("expected broker sync to be marked disconnected")
+	}
+	if status.LastSynced != (time.Time{}) {
+		t.Fatalf("expected LastSynced to remain zero, got %s", status.LastSynced)
+	}
+	if status.LastPositionsSynced.IsZero() {
+		t.Fatal("expected positions sync timestamp to be recorded")
+	}
+	if status.LastAccountSynced != (time.Time{}) {
+		t.Fatalf("expected LastAccountSynced to remain zero, got %s", status.LastAccountSynced)
+	}
+	if status.LastFailure.IsZero() {
+		t.Fatal("expected LastFailure to be recorded")
+	}
+	if status.ConsecutiveFailures != 1 {
+		t.Fatalf("expected one consecutive failure, got %d", status.ConsecutiveFailures)
+	}
+	if status.LastError == "" || status.LastError != "account_summary: account feed unavailable" {
+		t.Fatalf("unexpected LastError: %q", status.LastError)
+	}
+}
+
+func TestReconcileRecoversBrokerSyncAfterFailure(t *testing.T) {
+	source := &mutableRuntimeSource{
+		summaryErr:   errors.New("account feed unavailable"),
+		positionsErr: errors.New("positions unavailable"),
+	}
+	bk := NewBook(source, 1000)
+
+	bk.reconcile(context.Background())
+	failed := bk.BrokerSyncStatus()
+	if failed.ConsecutiveFailures == 0 {
+		t.Fatal("expected failure to increment consecutive failures")
+	}
+	if failed.LastFailure.IsZero() {
+		t.Fatal("expected failure timestamp to be recorded")
+	}
+
+	source.summaryErr = nil
+	source.positionsErr = nil
+	source.summary = &ibkr.AccountSummary{
+		NetLiquidation: 1000500,
+		Cash:           900000,
+		UnrealizedPnL:  25,
+		RealizedPnL:    10,
+	}
+	source.positions = []ibkr.IBKRPosition{
+		{Symbol: "AAPL", Quantity: 10, AvgCost: 200},
+	}
+
+	bk.reconcile(context.Background())
+	status := bk.BrokerSyncStatus()
+
+	if !status.Connected {
+		t.Fatal("expected broker sync to recover")
+	}
+	if status.LastSynced.IsZero() {
+		t.Fatal("expected LastSynced to be recorded after recovery")
+	}
+	if status.LastAccountSynced.IsZero() {
+		t.Fatal("expected LastAccountSynced to be recorded after recovery")
+	}
+	if status.LastPositionsSynced.IsZero() {
+		t.Fatal("expected LastPositionsSynced to be recorded after recovery")
+	}
+	if status.ConsecutiveFailures != 0 {
+		t.Fatalf("expected failures to reset after recovery, got %d", status.ConsecutiveFailures)
+	}
+	if status.LastError != "" {
+		t.Fatalf("expected LastError to clear after recovery, got %q", status.LastError)
 	}
 }

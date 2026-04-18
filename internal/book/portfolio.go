@@ -48,29 +48,40 @@ type Book struct {
 }
 
 type brokerAccountState struct {
-	connected     bool
-	nav           float64
-	cash          float64
-	dailyPnL      float64
-	unrealizedPnL float64
-	realizedPnL   float64
-	openPositions int
-	grossExposure float64
-	netExposure   float64
-	lastSynced    time.Time
+	connected           bool
+	nav                 float64
+	cash                float64
+	dailyPnL            float64
+	unrealizedPnL       float64
+	realizedPnL         float64
+	openPositions       int
+	grossExposure       float64
+	netExposure         float64
+	lastSynced          time.Time
+	lastAccountSynced   time.Time
+	lastPositionsSynced time.Time
+	lastFailure         time.Time
+	lastError           string
+	consecutiveFailures int
+	lastErrorLoggedAt   time.Time
 }
 
 type BrokerSyncStatus struct {
-	Connected     bool
-	NAV           float64
-	Cash          float64
-	DailyPnL      float64
-	UnrealizedPnL float64
-	RealizedPnL   float64
-	OpenPositions int
-	GrossExposure float64
-	NetExposure   float64
-	LastSynced    time.Time
+	Connected           bool
+	NAV                 float64
+	Cash                float64
+	DailyPnL            float64
+	UnrealizedPnL       float64
+	RealizedPnL         float64
+	OpenPositions       int
+	GrossExposure       float64
+	NetExposure         float64
+	LastSynced          time.Time
+	LastAccountSynced   time.Time
+	LastPositionsSynced time.Time
+	LastFailure         time.Time
+	LastError           string
+	ConsecutiveFailures int
 }
 
 type Discrepancy struct {
@@ -83,6 +94,7 @@ type Discrepancy struct {
 
 const minShadowEntryPrice = 0.01
 const brokerRecoveryDeskID = "broker-recovery"
+const brokerSyncErrorLogInterval = 30 * time.Second
 
 func NewBook(positionSource PositionSource, initialCapital float64) *Book {
 	var accountSource AccountSource
@@ -408,16 +420,21 @@ func (b *Book) BrokerSyncStatus() BrokerSyncStatus {
 	defer b.mu.RUnlock()
 
 	return BrokerSyncStatus{
-		Connected:     b.brokerSync.connected,
-		NAV:           b.brokerSync.nav,
-		Cash:          b.brokerSync.cash,
-		DailyPnL:      b.brokerSync.dailyPnL,
-		UnrealizedPnL: b.brokerSync.unrealizedPnL,
-		RealizedPnL:   b.brokerSync.realizedPnL,
-		OpenPositions: b.brokerSync.openPositions,
-		GrossExposure: b.brokerSync.grossExposure,
-		NetExposure:   b.brokerSync.netExposure,
-		LastSynced:    b.brokerSync.lastSynced,
+		Connected:           b.brokerSync.connected,
+		NAV:                 b.brokerSync.nav,
+		Cash:                b.brokerSync.cash,
+		DailyPnL:            b.brokerSync.dailyPnL,
+		UnrealizedPnL:       b.brokerSync.unrealizedPnL,
+		RealizedPnL:         b.brokerSync.realizedPnL,
+		OpenPositions:       b.brokerSync.openPositions,
+		GrossExposure:       b.brokerSync.grossExposure,
+		NetExposure:         b.brokerSync.netExposure,
+		LastSynced:          b.brokerSync.lastSynced,
+		LastAccountSynced:   b.brokerSync.lastAccountSynced,
+		LastPositionsSynced: b.brokerSync.lastPositionsSynced,
+		LastFailure:         b.brokerSync.lastFailure,
+		LastError:           b.brokerSync.lastError,
+		ConsecutiveFailures: b.brokerSync.consecutiveFailures,
 	}
 }
 
@@ -595,26 +612,36 @@ func (b *Book) recalculateLocked() {
 }
 
 func (b *Book) reconcile(ctx context.Context) {
+	accountHealthy := true
 	if b.accountSource != nil {
 		summary, err := b.accountSource.GetAccountSummary(ctx)
 		if err != nil {
-			b.log.Error("account summary sync failed", "error", err)
+			accountHealthy = false
+			b.recordBrokerSyncFailure("account_summary", err)
 		} else if summary != nil {
 			b.applyAccountSummary(summary)
 		}
 	}
 
+	positionsHealthy := true
 	if b.positionSource == nil {
+		if accountHealthy {
+			b.markBrokerSyncHealthy()
+		}
 		return
 	}
 
 	ibkrPositions, err := b.positionSource.GetPositions(ctx)
 	if err != nil {
-		b.log.Error("position reconciliation failed", "error", err)
+		positionsHealthy = false
+		b.recordBrokerSyncFailure("positions", err)
 		return
 	}
 
 	b.applyBrokerPositions(ibkrPositions)
+	if accountHealthy && positionsHealthy {
+		b.markBrokerSyncHealthy()
+	}
 	discrepancies := b.Reconcile(ibkrPositions)
 	for _, d := range discrepancies {
 		b.log.Warn("reconciliation discrepancy",
@@ -634,7 +661,6 @@ func (b *Book) applyAccountSummary(summary *ibkr.AccountSummary) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.brokerSync.connected = true
 	if summary.NetLiquidation > 0 {
 		b.brokerSync.nav = summary.NetLiquidation
 	}
@@ -642,7 +668,7 @@ func (b *Book) applyAccountSummary(summary *ibkr.AccountSummary) {
 	b.brokerSync.unrealizedPnL = summary.UnrealizedPnL
 	b.brokerSync.realizedPnL = summary.RealizedPnL
 	b.brokerSync.dailyPnL = summary.UnrealizedPnL + summary.RealizedPnL
-	b.brokerSync.lastSynced = time.Now()
+	b.brokerSync.lastAccountSynced = time.Now()
 }
 
 func (b *Book) applyBrokerPositions(positions []ibkr.IBKRPosition) {
@@ -662,11 +688,49 @@ func (b *Book) applyBrokerPositions(positions []ibkr.IBKRPosition) {
 		netExposure += pos.Quantity * pos.AvgCost
 	}
 
-	b.brokerSync.connected = true
 	b.brokerSync.openPositions = openPositions
 	b.brokerSync.grossExposure = grossExposure
 	b.brokerSync.netExposure = netExposure
+	b.brokerSync.lastPositionsSynced = time.Now()
+}
+
+func (b *Book) markBrokerSyncHealthy() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.brokerSync.connected = true
 	b.brokerSync.lastSynced = time.Now()
+	b.brokerSync.lastError = ""
+	b.brokerSync.consecutiveFailures = 0
+}
+
+func (b *Book) recordBrokerSyncFailure(stage string, err error) {
+	if err == nil {
+		return
+	}
+
+	now := time.Now()
+	message := stage + ": " + err.Error()
+
+	b.mu.Lock()
+	b.brokerSync.connected = false
+	b.brokerSync.lastFailure = now
+	b.brokerSync.lastError = message
+	b.brokerSync.consecutiveFailures++
+	failures := b.brokerSync.consecutiveFailures
+	shouldLog := now.Sub(b.brokerSync.lastErrorLoggedAt) >= brokerSyncErrorLogInterval || b.brokerSync.lastErrorLoggedAt.IsZero()
+	if shouldLog {
+		b.brokerSync.lastErrorLoggedAt = now
+	}
+	b.mu.Unlock()
+
+	if shouldLog {
+		b.log.Error("broker sync failed",
+			"stage", stage,
+			"error", err,
+			"consecutive_failures", failures,
+		)
+	}
 }
 
 func lookupInstrumentPrice(prices map[string]float64, inst model.Instrument) (float64, bool) {

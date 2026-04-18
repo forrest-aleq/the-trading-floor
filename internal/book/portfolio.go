@@ -159,6 +159,35 @@ func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Posit
 	return pos
 }
 
+func (b *Book) ApplyExecutionFill(fill *model.Fill, thesis *model.Thesis) *model.Position {
+	if fill == nil || thesis == nil {
+		return nil
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if existing, ok := b.positions[fill.OrderID]; ok && existing != nil && existing.Status == "open" && !existing.Shadow {
+		b.applyExecutionFillLocked(existing, fill)
+		b.recalculateLocked()
+		return existing
+	}
+
+	pos := b.newPosition(fill, thesis)
+	b.positions[pos.ID] = pos
+	b.deskPositions[pos.DeskID]++
+	b.totalTrades++
+
+	notional := positionCashNotional(pos, fill.AvgPrice)
+	if fill.Direction == model.Long {
+		b.cash -= notional
+	} else {
+		b.cash += notional
+	}
+	b.recalculateLocked()
+	return pos
+}
+
 func (b *Book) OpenShadowPosition(thesis *model.Thesis) *model.Position {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -227,6 +256,51 @@ func (b *Book) newPosition(fill *model.Fill, thesis *model.Thesis) *model.Positi
 		pos.OpenedAt = time.Now()
 	}
 	return pos
+}
+
+func (b *Book) applyExecutionFillLocked(pos *model.Position, fill *model.Fill) {
+	if pos == nil || fill == nil {
+		return
+	}
+
+	previousNotional := positionCashNotional(pos, pos.EntryPrice)
+	if fill.Direction != "" {
+		pos.Direction = fill.Direction
+	}
+	if fill.Quantity > 0 {
+		pos.Quantity = fill.Quantity
+	}
+	if fill.AvgPrice > 0 {
+		pos.EntryPrice = fill.AvgPrice
+		if pos.CurrentPrice <= 0 || pos.CurrentPrice == minShadowEntryPrice {
+			pos.CurrentPrice = fill.AvgPrice
+		}
+	}
+	if fill.IBKROrderID > 0 {
+		pos.IBKROrderID = fill.IBKROrderID
+	}
+	if inst := fill.PrimaryInstrument(); inst.Symbol != "" {
+		pos.Instrument = inst
+	}
+	if len(fill.Legs) > 0 {
+		pos.Legs = append([]model.TradeLeg(nil), fill.Legs...)
+	}
+	if !fill.FilledAt.IsZero() {
+		if pos.OpenedAt.IsZero() || fill.FilledAt.Before(pos.OpenedAt) {
+			pos.OpenedAt = fill.FilledAt
+		}
+	}
+
+	updatedNotional := positionCashNotional(pos, pos.EntryPrice)
+	delta := updatedNotional - previousNotional
+	if delta == 0 {
+		return
+	}
+	if pos.Direction == model.Long {
+		b.cash -= delta
+	} else {
+		b.cash += delta
+	}
 }
 
 func shadowEntryPrice(thesis *model.Thesis) float64 {

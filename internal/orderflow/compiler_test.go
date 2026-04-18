@@ -2,12 +2,14 @@ package orderflow
 
 import (
 	"testing"
+	"time"
 
 	"github.com/hnic/trading-floor/pkg/model"
 )
 
 func TestCompileEntryLimitOrder(t *testing.T) {
 	compiler := NewCompiler()
+	now := time.Now().UTC()
 	thesis := &model.Thesis{
 		ID:           "thesis-1",
 		Structure:    "single",
@@ -16,6 +18,15 @@ func TestCompileEntryLimitOrder(t *testing.T) {
 		EntryPrice:   123.45,
 		StopLoss:     118,
 		PositionSize: 10,
+		MarketContext: &model.MarketContext{
+			SnapshotAt:      now,
+			CurrentPrice:    123.2,
+			BidPrice:        123.1,
+			AskPrice:        123.3,
+			MidPrice:        123.2,
+			SpreadBps:       16.2,
+			QuoteAgeSeconds: 3,
+		},
 	}
 
 	order, err := compiler.CompileEntry(EntryInput{DeskID: "desk-a", Thesis: thesis})
@@ -30,6 +41,18 @@ func TestCompileEntryLimitOrder(t *testing.T) {
 	}
 	if order.Notional <= 0 {
 		t.Fatalf("expected positive notional, got %.2f", order.Notional)
+	}
+	if order.ExecutionIntent == nil {
+		t.Fatal("expected execution intent to be attached")
+	}
+	if order.ExecutionIntent.DecisionPrice != 123.45 {
+		t.Fatalf("expected decision price 123.45, got %.2f", order.ExecutionIntent.DecisionPrice)
+	}
+	if order.ExecutionIntent.ReferencePrice != 123.45 {
+		t.Fatalf("expected reference price 123.45, got %.2f", order.ExecutionIntent.ReferencePrice)
+	}
+	if !order.ExecutionIntent.DecidedAt.Equal(now) {
+		t.Fatalf("expected decided at %s, got %s", now, order.ExecutionIntent.DecidedAt)
 	}
 }
 
@@ -54,6 +77,12 @@ func TestCompileEntryFallsBackToMarketOrder(t *testing.T) {
 	}
 	if order.Notional <= 0 {
 		t.Fatalf("expected positive notional from market context, got %.2f", order.Notional)
+	}
+	if order.ExecutionIntent == nil {
+		t.Fatal("expected execution intent for market order")
+	}
+	if order.ExecutionIntent.DecisionPrice != 90 {
+		t.Fatalf("expected decision price 90, got %.2f", order.ExecutionIntent.DecisionPrice)
 	}
 }
 

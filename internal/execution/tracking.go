@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -15,11 +16,23 @@ import (
 type OrderState string
 
 const (
-	OrderStateWorking   OrderState = "working"
-	OrderStateFilled    OrderState = "filled"
-	OrderStateCancelled OrderState = "cancelled"
-	OrderStateFailed    OrderState = "failed"
+	OrderStateWorking         OrderState = "working"
+	OrderStatePartiallyFilled OrderState = "partially_filled"
+	OrderStateFilled          OrderState = "filled"
+	OrderStateCancelled       OrderState = "cancelled"
+	OrderStateFailed          OrderState = "failed"
 )
+
+type ExecutionQuality struct {
+	DecisionPrice              float64 `json:"decision_price,omitempty"`
+	ReferencePrice             float64 `json:"reference_price,omitempty"`
+	WorkingAgeSeconds          float64 `json:"working_age_seconds,omitempty"`
+	FillRatio                  float64 `json:"fill_ratio,omitempty"`
+	ImplementationShortfall    float64 `json:"implementation_shortfall,omitempty"`
+	ImplementationShortfallBps float64 `json:"implementation_shortfall_bps,omitempty"`
+	ReferenceShortfall         float64 `json:"reference_shortfall,omitempty"`
+	ReferenceShortfallBps      float64 `json:"reference_shortfall_bps,omitempty"`
+}
 
 type OrderSnapshot struct {
 	OrderID           string
@@ -38,6 +51,7 @@ type OrderSnapshot struct {
 	UpdatedAt         time.Time
 	LastError         string
 	Paper             bool
+	ExecutionQuality  ExecutionQuality
 }
 
 type OrderUpdate struct {
@@ -52,7 +66,7 @@ type trackedOrder struct {
 }
 
 func (s OrderSnapshot) IsWorking() bool {
-	return s.State == OrderStateWorking
+	return s.State == OrderStateWorking || s.State == OrderStatePartiallyFilled
 }
 
 func (m *Manager) WorkingOrders() []OrderSnapshot {
@@ -191,6 +205,10 @@ func (m *Manager) applyOrderLookup(order model.Order, lookup ibkr.OrderLookup) (
 		next.RemainingQuantity = 0
 		tracked.fill = fill
 		m.submitted[order.ID] = cachedFill{fill: cloneFill(fill), at: now}
+	case lookup.FilledQuantity > 0 && lookup.RemainingQuantity > 0:
+		next.State = OrderStatePartiallyFilled
+		fill = synthesizeProgressFill(order, lookup)
+		tracked.fill = cloneFill(fill)
 	case lookup.Active:
 		next.State = OrderStateWorking
 	case lookup.Done:
@@ -198,6 +216,7 @@ func (m *Manager) applyOrderLookup(order model.Order, lookup ibkr.OrderLookup) (
 	default:
 		next.State = prev.State
 	}
+	next.ExecutionQuality = buildExecutionQuality(order, next, now)
 
 	tracked.snapshot = next
 	changed := orderSnapshotChanged(prev, next, tracked.fill, fill)
@@ -239,6 +258,13 @@ func (m *Manager) recordPendingOrder(order model.Order, pending *ibkr.PendingOrd
 			UpdatedAt:     now,
 			LastError:     pending.Error(),
 			Paper:         m.ibkr.IsPaper(),
+			ExecutionQuality: buildExecutionQuality(order, OrderSnapshot{
+				Quantity:          order.Quantity,
+				FilledQuantity:    0,
+				RemainingQuantity: order.Quantity,
+				SubmittedAt:       now,
+				UpdatedAt:         now,
+			}, now),
 		},
 	}
 	record := persistedOrderFromTracked(m.tracked[order.ID])
@@ -278,6 +304,7 @@ func (m *Manager) recordFilledOrder(order model.Order, fill *model.Fill) {
 			Paper:             m.ibkr.IsPaper(),
 		},
 	}
+	m.tracked[order.ID].snapshot.ExecutionQuality = buildExecutionQuality(order, m.tracked[order.ID].snapshot, now)
 	record := persistedOrderFromTracked(m.tracked[order.ID])
 	m.mu.Unlock()
 	m.persistTrackedOrder(record)
@@ -308,6 +335,7 @@ func (m *Manager) recordFailedOrder(order model.Order, err error) {
 		LastError:     err.Error(),
 		Paper:         m.ibkr.IsPaper(),
 	}
+	tracked.snapshot.ExecutionQuality = buildExecutionQuality(order, tracked.snapshot, now)
 	record := persistedOrderFromTracked(tracked)
 	m.mu.Unlock()
 	m.persistTrackedOrder(record)
@@ -329,6 +357,8 @@ func terminalStateFromBrokerStatus(status string) OrderState {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "filled":
 		return OrderStateFilled
+	case "partiallyfilled":
+		return OrderStatePartiallyFilled
 	case "cancelled", "apicancelled", "inactive":
 		return OrderStateCancelled
 	default:
@@ -336,8 +366,81 @@ func terminalStateFromBrokerStatus(status string) OrderState {
 	}
 }
 
+func buildExecutionQuality(order model.Order, snapshot OrderSnapshot, asOf time.Time) ExecutionQuality {
+	quality := ExecutionQuality{}
+	if order.ExecutionIntent != nil {
+		quality.DecisionPrice = order.ExecutionIntent.DecisionPrice
+		quality.ReferencePrice = order.ExecutionIntent.ReferencePrice
+	}
+	if asOf.IsZero() {
+		asOf = snapshot.UpdatedAt
+	}
+	if !snapshot.SubmittedAt.IsZero() && !asOf.IsZero() {
+		age := asOf.Sub(snapshot.SubmittedAt.UTC())
+		if age < 0 {
+			age = 0
+		}
+		quality.WorkingAgeSeconds = age.Seconds()
+	}
+	if snapshot.Quantity > 0 {
+		quality.FillRatio = clamp01(snapshot.FilledQuantity / snapshot.Quantity)
+	}
+	if snapshot.AvgFillPrice > 0 {
+		quality.ImplementationShortfall, quality.ImplementationShortfallBps = executionShortfall(
+			order.Direction,
+			quality.DecisionPrice,
+			snapshot.AvgFillPrice,
+		)
+		quality.ReferenceShortfall, quality.ReferenceShortfallBps = executionShortfall(
+			order.Direction,
+			quality.ReferencePrice,
+			snapshot.AvgFillPrice,
+		)
+	}
+	return quality
+}
+
+func executionShortfall(direction model.TradeDirection, baselinePrice, realizedPrice float64) (float64, float64) {
+	if baselinePrice <= 0 || realizedPrice <= 0 {
+		return 0, 0
+	}
+	shortfall := realizedPrice - baselinePrice
+	if direction == model.Short {
+		shortfall = baselinePrice - realizedPrice
+	}
+	return shortfall, (shortfall / baselinePrice) * 10000
+}
+
+func clamp01(v float64) float64 {
+	switch {
+	case math.IsNaN(v), math.IsInf(v, 0):
+		return 0
+	case v < 0:
+		return 0
+	case v > 1:
+		return 1
+	default:
+		return v
+	}
+}
+
 func orderSnapshotChanged(before, after OrderSnapshot, beforeFill, afterFill *model.Fill) bool {
-	if before != after {
+	if before.OrderID != after.OrderID ||
+		before.ThesisID != after.ThesisID ||
+		before.DeskID != after.DeskID ||
+		before.DisplaySymbol != after.DisplaySymbol ||
+		before.BrokerOrderID != after.BrokerOrderID ||
+		before.State != after.State ||
+		before.BrokerStatus != after.BrokerStatus ||
+		before.Quantity != after.Quantity ||
+		before.FilledQuantity != after.FilledQuantity ||
+		before.RemainingQuantity != after.RemainingQuantity ||
+		before.AvgFillPrice != after.AvgFillPrice ||
+		before.LastFillPrice != after.LastFillPrice ||
+		!before.SubmittedAt.Equal(after.SubmittedAt) ||
+		before.LastError != after.LastError ||
+		before.Paper != after.Paper ||
+		before.ExecutionQuality != after.ExecutionQuality {
 		return true
 	}
 	return !fillsEqual(beforeFill, afterFill)
@@ -406,6 +509,22 @@ func persistedOrderFromTracked(tracked *trackedOrder) PersistedOrder {
 		Order:    tracked.order,
 		Snapshot: tracked.snapshot,
 		Fill:     cloneFill(tracked.fill),
+	}
+}
+
+func synthesizeProgressFill(order model.Order, lookup ibkr.OrderLookup) *model.Fill {
+	if lookup.FilledQuantity <= 0 || lookup.AvgFillPrice <= 0 {
+		return nil
+	}
+	return &model.Fill{
+		OrderID:     order.ID,
+		IBKROrderID: lookup.OrderID,
+		Structure:   order.Structure,
+		Instrument:  order.PrimaryInstrument(),
+		Legs:        append([]model.TradeLeg(nil), order.Legs...),
+		Direction:   order.Direction,
+		Quantity:    lookup.FilledQuantity,
+		AvgPrice:    lookup.AvgFillPrice,
 	}
 }
 

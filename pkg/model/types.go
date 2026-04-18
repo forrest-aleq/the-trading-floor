@@ -412,19 +412,20 @@ type ThesisOutcome struct {
 
 // Order is what gets sent to the risk gate then to IBKR
 type Order struct {
-	ID          string         `json:"id"`
-	ThesisID    string         `json:"thesis_id"`
-	DeskID      string         `json:"desk_id"`
-	Structure   string         `json:"structure,omitempty"`
-	Instrument  Instrument     `json:"instrument"`
-	Legs        []TradeLeg     `json:"legs,omitempty"`
-	Direction   TradeDirection `json:"direction"`
-	Quantity    float64        `json:"quantity"`
-	OrderType   OrderType      `json:"order_type"`
-	LimitPrice  float64        `json:"limit_price,omitempty"`
-	StopPrice   float64        `json:"stop_price,omitempty"`
-	TimeInForce string         `json:"time_in_force"` // DAY, GTC, IOC
-	Notional    float64        `json:"notional"`
+	ID              string           `json:"id"`
+	ThesisID        string           `json:"thesis_id"`
+	DeskID          string           `json:"desk_id"`
+	Structure       string           `json:"structure,omitempty"`
+	Instrument      Instrument       `json:"instrument"`
+	Legs            []TradeLeg       `json:"legs,omitempty"`
+	Direction       TradeDirection   `json:"direction"`
+	Quantity        float64          `json:"quantity"`
+	OrderType       OrderType        `json:"order_type"`
+	LimitPrice      float64          `json:"limit_price,omitempty"`
+	StopPrice       float64          `json:"stop_price,omitempty"`
+	TimeInForce     string           `json:"time_in_force"` // DAY, GTC, IOC
+	Notional        float64          `json:"notional"`
+	ExecutionIntent *ExecutionIntent `json:"execution_intent,omitempty"`
 }
 
 type OrderType string
@@ -451,6 +452,17 @@ type Fill struct {
 	AvgPrice    float64        `json:"avg_price"`
 	Commission  float64        `json:"commission"`
 	FilledAt    time.Time      `json:"filled_at"`
+}
+
+type ExecutionIntent struct {
+	DecidedAt       time.Time `json:"decided_at,omitempty"`
+	DecisionPrice   float64   `json:"decision_price,omitempty"`
+	ReferencePrice  float64   `json:"reference_price,omitempty"`
+	BidPrice        float64   `json:"bid_price,omitempty"`
+	AskPrice        float64   `json:"ask_price,omitempty"`
+	MidPrice        float64   `json:"mid_price,omitempty"`
+	SpreadBps       float64   `json:"spread_bps,omitempty"`
+	QuoteAgeSeconds float64   `json:"quote_age_seconds,omitempty"`
 }
 
 // Position is a live position in the book

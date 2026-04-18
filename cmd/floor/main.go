@@ -518,6 +518,32 @@ func main() {
 					continue
 				}
 				switch update.Snapshot.State {
+				case execution.OrderStatePartiallyFilled:
+					if update.Fill == nil {
+						slog.Warn("partial fill update missing cumulative fill payload",
+							"desk_id", update.Snapshot.DeskID,
+							"order_id", update.Snapshot.OrderID,
+							"broker_order_id", update.Snapshot.BrokerOrderID,
+						)
+						continue
+					}
+					if _, err := desk.RecordExecutionFill(ctx, update.Fill); err != nil {
+						slog.Warn("reconcile broker partial fill failed",
+							"desk_id", update.Snapshot.DeskID,
+							"order_id", update.Snapshot.OrderID,
+							"error", err,
+						)
+						continue
+					}
+					slog.Info("broker partial fill applied to book",
+						"desk_id", update.Snapshot.DeskID,
+						"order_id", update.Snapshot.OrderID,
+						"broker_order_id", update.Snapshot.BrokerOrderID,
+						"filled_quantity", update.Snapshot.FilledQuantity,
+						"remaining_quantity", update.Snapshot.RemainingQuantity,
+						"fill_ratio", update.Snapshot.ExecutionQuality.FillRatio,
+						"implementation_shortfall_bps", update.Snapshot.ExecutionQuality.ImplementationShortfallBps,
+					)
 				case execution.OrderStateFilled:
 					if _, err := desk.RecordExecutionFill(ctx, update.Fill); err != nil {
 						slog.Warn("reconcile broker fill failed",
@@ -537,6 +563,9 @@ func main() {
 			now := time.Now().UTC()
 			for _, working := range execMgr.WorkingOrders() {
 				if strings.EqualFold(working.BrokerStatus, "cancel_requested") {
+					continue
+				}
+				if working.FilledQuantity > 0 {
 					continue
 				}
 				if working.SubmittedAt.IsZero() || now.Sub(working.SubmittedAt) < stalePaperOrderAge {

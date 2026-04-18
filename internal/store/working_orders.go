@@ -77,9 +77,10 @@ func (db *DB) LoadWorkingOrders(ctx context.Context) ([]execution.PersistedOrder
 	rows, err := db.Pool.Query(ctx,
 		`SELECT order_payload, snapshot_payload, fill_payload
 		   FROM working_orders
-		  WHERE state = $1
+		  WHERE state = $1 OR state = $2
 		  ORDER BY submitted_at ASC NULLS LAST, updated_at ASC`,
 		string(execution.OrderStateWorking),
+		string(execution.OrderStatePartiallyFilled),
 	)
 	if err != nil {
 		return nil, err

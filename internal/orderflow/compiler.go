@@ -3,6 +3,7 @@ package orderflow
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hnic/trading-floor/pkg/model"
 )
@@ -54,19 +55,20 @@ func (c *Compiler) CompileEntry(input EntryInput) (*model.Order, error) {
 	notional := thesisNotional(thesis, quantity)
 
 	order := &model.Order{
-		ID:          thesis.ID,
-		ThesisID:    thesis.ID,
-		DeskID:      input.DeskID,
-		Structure:   firstNonEmpty(thesis.Structure, "single"),
-		Instrument:  instrument,
-		Legs:        cloneLegs(thesis.Legs),
-		Direction:   thesis.Direction,
-		Quantity:    quantity,
-		OrderType:   orderType,
-		LimitPrice:  thesis.EntryPrice,
-		StopPrice:   thesis.StopLoss,
-		TimeInForce: firstNonEmpty(input.ExitTIF, defaultTimeInForce),
-		Notional:    notional,
+		ID:              thesis.ID,
+		ThesisID:        thesis.ID,
+		DeskID:          input.DeskID,
+		Structure:       firstNonEmpty(thesis.Structure, "single"),
+		Instrument:      instrument,
+		Legs:            cloneLegs(thesis.Legs),
+		Direction:       thesis.Direction,
+		Quantity:        quantity,
+		OrderType:       orderType,
+		LimitPrice:      thesis.EntryPrice,
+		StopPrice:       thesis.StopLoss,
+		TimeInForce:     firstNonEmpty(input.ExitTIF, defaultTimeInForce),
+		Notional:        notional,
+		ExecutionIntent: buildExecutionIntent(thesis, orderType),
 	}
 	return order, nil
 }
@@ -151,4 +153,52 @@ func thesisReferencePrice(thesis *model.Thesis) float64 {
 		}
 	}
 	return 0
+}
+
+func buildExecutionIntent(thesis *model.Thesis, orderType model.OrderType) *model.ExecutionIntent {
+	if thesis == nil {
+		return nil
+	}
+
+	intent := &model.ExecutionIntent{
+		DecidedAt:      time.Now().UTC(),
+		ReferencePrice: thesisReferencePrice(thesis),
+	}
+	if thesis.MarketContext != nil {
+		intent.BidPrice = thesis.MarketContext.BidPrice
+		intent.AskPrice = thesis.MarketContext.AskPrice
+		intent.MidPrice = thesis.MarketContext.MidPrice
+		intent.SpreadBps = thesis.MarketContext.SpreadBps
+		intent.QuoteAgeSeconds = thesis.MarketContext.QuoteAgeSeconds
+		if !thesis.MarketContext.SnapshotAt.IsZero() {
+			intent.DecidedAt = thesis.MarketContext.SnapshotAt.UTC()
+		}
+		if intent.ReferencePrice <= 0 {
+			intent.ReferencePrice = thesis.MarketContext.CurrentPrice
+		}
+		if intent.ReferencePrice <= 0 {
+			intent.ReferencePrice = thesis.MarketContext.MidPrice
+		}
+	}
+
+	switch {
+	case orderType == model.OrderLimit && thesis.EntryPrice > 0:
+		intent.DecisionPrice = thesis.EntryPrice
+	case intent.ReferencePrice > 0:
+		intent.DecisionPrice = intent.ReferencePrice
+	default:
+		intent.DecisionPrice = thesis.EntryPrice
+	}
+
+	if intent.DecisionPrice <= 0 && intent.MidPrice > 0 {
+		intent.DecisionPrice = intent.MidPrice
+	}
+	if intent.ReferencePrice <= 0 {
+		intent.ReferencePrice = intent.DecisionPrice
+	}
+
+	if intent.DecisionPrice <= 0 && intent.ReferencePrice <= 0 && intent.BidPrice <= 0 && intent.AskPrice <= 0 {
+		return nil
+	}
+	return intent
 }

@@ -320,6 +320,63 @@ func TestReconcileRecoversBrokerOnlyPositionIntoBook(t *testing.T) {
 	}
 }
 
+func TestApplyExecutionFillUpdatesExistingPositionCumulatively(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 1000)
+	inst := model.Instrument{
+		Symbol:   "SPY",
+		SecType:  "STK",
+		Currency: "USD",
+		Exchange: "SMART",
+	}
+	thesis := &model.Thesis{
+		ID:         "thesis-partial",
+		DeskID:     "desk-1",
+		Instrument: inst,
+		Direction:  model.Long,
+	}
+
+	initial := bk.ApplyExecutionFill(&model.Fill{
+		OrderID:     "thesis-partial",
+		IBKROrderID: 1001,
+		Instrument:  inst,
+		Direction:   model.Long,
+		Quantity:    1,
+		AvgPrice:    100.5,
+		FilledAt:    time.Now().UTC(),
+	}, thesis)
+	if initial == nil {
+		t.Fatal("expected initial partial fill to create position")
+	}
+	if initial.Quantity != 1 {
+		t.Fatalf("expected quantity 1 after initial partial fill, got %.2f", initial.Quantity)
+	}
+	if snapshot := bk.Snapshot(); snapshot.Cash != 899.5 {
+		t.Fatalf("expected cash 899.5 after first partial fill, got %.2f", snapshot.Cash)
+	}
+
+	updated := bk.ApplyExecutionFill(&model.Fill{
+		OrderID:     "thesis-partial",
+		IBKROrderID: 1001,
+		Instrument:  inst,
+		Direction:   model.Long,
+		Quantity:    2,
+		AvgPrice:    100.25,
+		FilledAt:    time.Now().UTC(),
+	}, thesis)
+	if updated == nil {
+		t.Fatal("expected cumulative fill update to return position")
+	}
+	if updated.Quantity != 2 {
+		t.Fatalf("expected cumulative quantity 2, got %.2f", updated.Quantity)
+	}
+	if updated.EntryPrice != 100.25 {
+		t.Fatalf("expected updated average price 100.25, got %.2f", updated.EntryPrice)
+	}
+	if snapshot := bk.Snapshot(); snapshot.Cash != 799.5 {
+		t.Fatalf("expected cash 799.5 after cumulative fill update, got %.2f", snapshot.Cash)
+	}
+}
+
 func TestReconcileMarksBrokerSyncUnhealthyOnAccountSummaryFailure(t *testing.T) {
 	source := &mutableRuntimeSource{
 		summaryErr: errors.New("account feed unavailable"),

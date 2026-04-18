@@ -469,7 +469,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		} else {
 			span = span.WithStage("book")
 			ctx = trace.IntoContext(ctx, span)
-			pos = d.book.OpenPosition(fill, thesis)
+			pos = d.book.ApplyExecutionFill(fill, thesis)
 			thesis.Status = model.ThesisActive
 		}
 	}
@@ -543,10 +543,6 @@ func (d *Desk) RecordExecutionFill(ctx context.Context, fill *model.Fill) (*mode
 	if d == nil || fill == nil {
 		return nil, errors.New("nil desk or fill")
 	}
-	if existing, ok := d.book.GetPosition(fill.OrderID); ok && existing.Status == "open" && !existing.Shadow {
-		return existing, nil
-	}
-
 	thesis, ok := d.GetThesis(fill.OrderID)
 	if !ok && d.store != nil {
 		loaded, err := d.store.GetThesis(ctx, fill.OrderID)
@@ -559,7 +555,7 @@ func (d *Desk) RecordExecutionFill(ctx context.Context, fill *model.Fill) (*mode
 		return nil, fmt.Errorf("thesis %s not found for execution fill", fill.OrderID)
 	}
 
-	pos := d.book.OpenPosition(fill, thesis)
+	pos := d.book.ApplyExecutionFill(fill, thesis)
 	thesis.Status = model.ThesisActive
 	d.rememberThesis(thesis)
 	d.persistThesis(ctx, thesis)

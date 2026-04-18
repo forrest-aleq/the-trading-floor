@@ -406,6 +406,11 @@ func TestRefreshWorkingOrdersPromotesFill(t *testing.T) {
 		Quantity:   2,
 		OrderType:  model.OrderLimit,
 		LimitPrice: 101,
+		ExecutionIntent: &model.ExecutionIntent{
+			DecisionPrice:  101,
+			ReferencePrice: 100.9,
+			DecidedAt:      time.Now().UTC(),
+		},
 	}
 
 	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
@@ -424,6 +429,9 @@ func TestRefreshWorkingOrdersPromotesFill(t *testing.T) {
 	}
 	if snapshot, ok := manager.OrderStatus(order.ID); !ok || snapshot.State != OrderStateFilled {
 		t.Fatalf("expected tracked order to move to filled, got ok=%v snapshot=%+v", ok, snapshot)
+	}
+	if snapshot, ok := manager.OrderStatus(order.ID); !ok || snapshot.ExecutionQuality.ImplementationShortfallBps <= 0 {
+		t.Fatalf("expected positive shortfall metrics, got ok=%v snapshot=%+v", ok, snapshot)
 	}
 }
 
@@ -464,5 +472,69 @@ func TestCancelWorkingOrderMarksCancelRequested(t *testing.T) {
 	}
 	if snapshot.BrokerStatus != "cancel_requested" {
 		t.Fatalf("expected cancel_requested broker status, got %q", snapshot.BrokerStatus)
+	}
+}
+
+func TestRefreshWorkingOrdersTracksPartialFillProgress(t *testing.T) {
+	broker := &testBroker{
+		err: &ibkr.PendingOrderError{
+			OrderID: 93,
+			Status:  "Submitted",
+			Reason:  "accepted but still working",
+		},
+		lookups: map[int64]*ibkr.OrderLookup{
+			93: {
+				OrderID:           93,
+				Status:            "Submitted",
+				FilledQuantity:    1,
+				RemainingQuantity: 1,
+				AvgFillPrice:      101.5,
+				LastFillPrice:     101.5,
+				UpdatedAt:         time.Now().UTC(),
+				Active:            true,
+			},
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+
+	order := model.Order{
+		ID:         "order-partial",
+		ThesisID:   "thesis-partial",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "SPY", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   2,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 101,
+		ExecutionIntent: &model.ExecutionIntent{
+			DecisionPrice:  101,
+			ReferencePrice: 100.8,
+			DecidedAt:      time.Now().UTC(),
+		},
+	}
+
+	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected initial pending fill error")
+	}
+
+	updates := manager.RefreshWorkingOrders(context.Background())
+	if len(updates) != 1 {
+		t.Fatalf("expected one working order update, got %d", len(updates))
+	}
+	if updates[0].Snapshot.State != OrderStatePartiallyFilled {
+		t.Fatalf("expected partially_filled state, got %s", updates[0].Snapshot.State)
+	}
+	if updates[0].Snapshot.ExecutionQuality.FillRatio != 0.5 {
+		t.Fatalf("expected fill ratio 0.5, got %.2f", updates[0].Snapshot.ExecutionQuality.FillRatio)
+	}
+	if updates[0].Snapshot.ExecutionQuality.ImplementationShortfallBps <= 0 {
+		t.Fatalf("expected positive shortfall bps, got %.2f", updates[0].Snapshot.ExecutionQuality.ImplementationShortfallBps)
+	}
+	if updates[0].Fill == nil || updates[0].Fill.Quantity != 1 {
+		t.Fatalf("expected cumulative partial fill payload, got %+v", updates[0].Fill)
+	}
+	if snapshot, ok := manager.OrderStatus(order.ID); !ok || !snapshot.IsWorking() {
+		t.Fatalf("expected partially filled order to remain working, got ok=%v snapshot=%+v", ok, snapshot)
 	}
 }

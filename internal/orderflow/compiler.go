@@ -10,6 +10,13 @@ import (
 
 const defaultTimeInForce = "DAY"
 
+const (
+	maxSmartQuoteAgeSeconds      = 120.0
+	adaptiveMaxSpreadBps         = 5.0
+	midPriceMaxSpreadBps         = 40.0
+	explicitMidpriceToleranceBps = 15.0
+)
+
 // Compiler deterministically translates theses and positions into executable orders.
 // Agentic reasoning stops at the thesis; order construction happens here.
 type Compiler struct{}
@@ -47,10 +54,7 @@ func (c *Compiler) CompileEntry(input EntryInput) (*model.Order, error) {
 		return nil, fmt.Errorf("position size must be positive")
 	}
 
-	orderType := model.OrderMarket
-	if thesis.EntryPrice > 0 {
-		orderType = model.OrderLimit
-	}
+	orderType, limitPrice := chooseEntryOrder(thesis)
 
 	notional := thesisNotional(thesis, quantity)
 
@@ -64,7 +68,7 @@ func (c *Compiler) CompileEntry(input EntryInput) (*model.Order, error) {
 		Direction:       thesis.Direction,
 		Quantity:        quantity,
 		OrderType:       orderType,
-		LimitPrice:      thesis.EntryPrice,
+		LimitPrice:      limitPrice,
 		StopPrice:       thesis.StopLoss,
 		TimeInForce:     firstNonEmpty(input.ExitTIF, defaultTimeInForce),
 		Notional:        notional,
@@ -201,4 +205,128 @@ func buildExecutionIntent(thesis *model.Thesis, orderType model.OrderType) *mode
 		return nil
 	}
 	return intent
+}
+
+func chooseEntryOrder(thesis *model.Thesis) (model.OrderType, float64) {
+	if thesis == nil {
+		return model.OrderMarket, 0
+	}
+	if thesis.EntryPrice > 0 {
+		if shouldUseMidPrice(thesis, thesis.EntryPrice) {
+			if capPrice := aggressiveTouch(thesis.Direction, thesis.MarketContext); capPrice > 0 {
+				return model.OrderMidPrice, capPrice
+			}
+		}
+		return model.OrderLimit, thesis.EntryPrice
+	}
+	if thesis.IsMultiLeg() {
+		return model.OrderMarket, 0
+	}
+	if !hasFreshQuote(thesis.MarketContext) {
+		return model.OrderMarket, 0
+	}
+
+	switch {
+	case thesis.MarketContext.SpreadBps > 0 && thesis.MarketContext.SpreadBps <= adaptiveMaxSpreadBps:
+		if price := aggressiveTouch(thesis.Direction, thesis.MarketContext); price > 0 {
+			return model.OrderAdaptive, price
+		}
+	case thesis.MarketContext.SpreadBps > 0 && thesis.MarketContext.SpreadBps <= midPriceMaxSpreadBps:
+		if price := aggressiveTouch(thesis.Direction, thesis.MarketContext); price > 0 {
+			return model.OrderMidPrice, price
+		}
+	default:
+		if price := passiveTouch(thesis.Direction, thesis.MarketContext); price > 0 {
+			return model.OrderLimit, price
+		}
+	}
+
+	if price := thesisReferencePrice(thesis); price > 0 {
+		return model.OrderLimit, price
+	}
+	return model.OrderMarket, 0
+}
+
+func shouldUseMidPrice(thesis *model.Thesis, entryPrice float64) bool {
+	if thesis == nil || thesis.MarketContext == nil || entryPrice <= 0 {
+		return false
+	}
+	if !hasFreshQuote(thesis.MarketContext) {
+		return false
+	}
+	if thesis.IsMultiLeg() {
+		return false
+	}
+	spread := thesis.MarketContext.SpreadBps
+	if spread <= adaptiveMaxSpreadBps || spread > midPriceMaxSpreadBps {
+		return false
+	}
+	reference := thesis.MarketContext.MidPrice
+	if reference <= 0 {
+		reference = thesis.MarketContext.CurrentPrice
+	}
+	if reference <= 0 {
+		return false
+	}
+	diffBps := absBps(entryPrice, reference)
+	return diffBps <= explicitMidpriceToleranceBps
+}
+
+func hasFreshQuote(ctx *model.MarketContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if ctx.QuoteAgeSeconds > maxSmartQuoteAgeSeconds {
+		return false
+	}
+	return ctx.BidPrice > 0 || ctx.AskPrice > 0 || ctx.MidPrice > 0
+}
+
+func aggressiveTouch(direction model.TradeDirection, ctx *model.MarketContext) float64 {
+	if ctx == nil {
+		return 0
+	}
+	if direction == model.Short {
+		if ctx.BidPrice > 0 {
+			return ctx.BidPrice
+		}
+	} else {
+		if ctx.AskPrice > 0 {
+			return ctx.AskPrice
+		}
+	}
+	if ctx.MidPrice > 0 {
+		return ctx.MidPrice
+	}
+	return ctx.CurrentPrice
+}
+
+func passiveTouch(direction model.TradeDirection, ctx *model.MarketContext) float64 {
+	if ctx == nil {
+		return 0
+	}
+	if direction == model.Short {
+		if ctx.AskPrice > 0 {
+			return ctx.AskPrice
+		}
+	} else {
+		if ctx.BidPrice > 0 {
+			return ctx.BidPrice
+		}
+	}
+	if ctx.MidPrice > 0 {
+		return ctx.MidPrice
+	}
+	return ctx.CurrentPrice
+}
+
+func absBps(a, b float64) float64 {
+	if a <= 0 || b <= 0 {
+		return 0
+	}
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return (diff / b) * 10000
 }

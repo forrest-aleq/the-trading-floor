@@ -26,9 +26,13 @@ import (
 // stubLLM returns a canned JSON response regardless of prompt.
 type stubLLM struct {
 	response string
+	delay    time.Duration
 }
 
 func (s *stubLLM) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
 	return &llm.Response{Content: s.response, Model: "stub"}, nil
 }
 
@@ -221,4 +225,142 @@ func TestSmokeEndToEnd(t *testing.T) {
 
 	t.Logf("smoke test passed: %d trade(s), position %s %s @ %.2f",
 		trades, pos.Direction, pos.Instrument.Symbol, pos.EntryPrice)
+}
+
+func TestFloorOverflowQueueRecoversSaturatedFanout(t *testing.T) {
+	t.Setenv("FLOOR_WORKERS", "1")
+	t.Setenv("FLOOR_TASK_QUEUE_SIZE", "1")
+	t.Setenv("FLOOR_TASK_OVERFLOW_SIZE", "8")
+	t.Setenv("FLOOR_TASK_ENQUEUE_TIMEOUT", "1ms")
+
+	scanResp, _ := json.Marshal(map[string]any{
+		"tradeable":   true,
+		"score":       85,
+		"instruments": []map[string]any{{"symbol": "SPY", "sec_type": "STK", "currency": "USD"}},
+		"direction":   "long",
+		"urgency":     0.8,
+		"category":    "market",
+		"reasoning":   "Market structure breakout",
+	})
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "SPY", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        500.0,
+		"target_price":       510.0,
+		"stop_loss":          495.0,
+		"conviction":         0.85,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.02,
+		"strategy":           "momentum",
+		"evidence":           []string{"breakout", "volume confirmation"},
+		"counter_args":       []string{"false breakout"},
+		"kill_rules":         []map[string]any{{"condition": "price below 495", "threshold": 495.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"crowded trade"},
+		"missing_data":          []string{"institutional flow"},
+		"historical_analogues":  []string{"prior beat"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		&stubLLM{response: string(scanResp), delay: 20 * time.Millisecond},
+		&stubLLM{response: string(researchResp), delay: 20 * time.Millisecond},
+		&stubLLM{response: string(prosecuteResp), delay: 20 * time.Millisecond},
+	)
+
+	broker := &stubBroker{}
+	broker.connected.Store(true)
+	execMgr := execution.NewManager(broker)
+	wireMgr := wire.NewManager()
+	wireMgr.RegisterFeed(&stubFeed{sig: signal.Signal{
+		ID:        "test-overflow-signal",
+		Source:    "test",
+		Type:      signal.TypePrice,
+		Category:  "market",
+		Timestamp: time.Now(),
+		Urgency:   0.8,
+		Raw:       []byte(`SPY breaks above resistance on rising volume`),
+	}})
+
+	floor := firm.NewFloor(wireMgr, "overflow-session")
+	domains := []string{"systematic", "volatility", "sector"}
+	for i, domain := range domains {
+		bk := book.NewBook(broker, 1_000_000)
+		riskGate := risk.NewGate(risk.DefaultLimits())
+		beliefGraph := belief.NewGraph()
+		regimeKey := model.Regime{
+			Volatility: "medium",
+			Trend:      "neutral",
+			Risk:       "neutral",
+			Liquidity:  "normal",
+		}.Key()
+		deskID := "overflow-desk-" + string(rune('a'+i))
+		beliefGraph.Load([]*model.CompetenceState{
+			{
+				Key:          belief.CompetenceKey(deskID, "scan", domain, regimeKey),
+				DeskID:       deskID,
+				Capability:   "scan",
+				Context:      domain,
+				Regime:       regimeKey,
+				Trust:        0.86,
+				Confidence:   0.74,
+				SuccessCount: 120,
+				FailureCount: 20,
+				Autonomy:     model.Autonomous,
+			},
+			{
+				Key:          belief.CompetenceKey(deskID, "momentum", "STK", regimeKey),
+				DeskID:       deskID,
+				Capability:   "momentum",
+				Context:      "STK",
+				Regime:       regimeKey,
+				Trust:        0.86,
+				Confidence:   0.74,
+				SuccessCount: 120,
+				FailureCount: 20,
+				Autonomy:     model.Autonomous,
+			},
+		})
+		learnWorker := memory.NewLearnWorker(beliefGraph, nil)
+		scan := scanner.NewEngine(router, 70)
+		researchDesk := research.NewDesk(router, 0.65)
+		prosecutor := research.NewProsecutor(router)
+		desk := firm.NewDesk(firm.DeskConfig{
+			ID:          deskID,
+			Domain:      domain,
+			ABGroup:     "A",
+			Capital:     25_000,
+			Scanner:     scan,
+			Research:    researchDesk,
+			Prosecutor:  prosecutor,
+			RiskGate:    riskGate,
+			Execution:   execMgr,
+			Book:        bk,
+			Beliefs:     beliefGraph,
+			LearnWorker: learnWorker,
+			OnTrade:     floor.RecordTrade,
+		})
+		floor.AddDesk(desk)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = floor.Run(ctx)
+
+	stats := floor.Stats()
+	if stats.TasksOverflowed == 0 {
+		t.Fatal("expected overflow queue to be used under saturation")
+	}
+	if stats.TasksDropped != 0 {
+		t.Fatalf("expected no dropped tasks with overflow spool, got %d", stats.TasksDropped)
+	}
+	if stats.TasksCompleted != int64(len(domains)) {
+		t.Fatalf("expected all %d desk tasks to complete, got %d", len(domains), stats.TasksCompleted)
+	}
+	if stats.TasksRecovered == 0 {
+		t.Fatal("expected overflowed tasks to be recovered into the main queue")
+	}
 }

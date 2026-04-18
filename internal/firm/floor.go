@@ -23,6 +23,14 @@ type deskTask struct {
 	sig  signal.Signal
 }
 
+type enqueueOutcome int
+
+const (
+	enqueueOutcomeDropped enqueueOutcome = iota
+	enqueueOutcomeQueued
+	enqueueOutcomeOverflowed
+)
+
 // Floor is the main orchestrator — runs 24/7, fans signals to desks
 type Floor struct {
 	log       *slog.Logger
@@ -34,18 +42,22 @@ type Floor struct {
 	mu        sync.RWMutex
 	once      sync.Once
 
-	taskQueue chan deskTask
+	taskQueue     chan deskTask
+	overflowQueue chan deskTask
 
 	workerCount      int
 	taskTimeout      time.Duration
 	enqueueTimeout   time.Duration
 	slowTaskWarnAt   time.Duration
+	overflowCapacity int
 	signalsProcessed atomic.Int64
 	tradesExecuted   atomic.Int64
 	tasksEnqueued    atomic.Int64
 	tasksStarted     atomic.Int64
 	tasksCompleted   atomic.Int64
 	tasksDropped     atomic.Int64
+	tasksOverflowed  atomic.Int64
+	tasksRecovered   atomic.Int64
 	tasksSkipped     atomic.Int64
 	activeTasks      atomic.Int64
 }
@@ -53,19 +65,22 @@ type Floor struct {
 func NewFloor(wireMgr *wire.Manager, sessionID string) *Floor {
 	workerCount := readEnvInt("FLOOR_WORKERS", 4)
 	queueSize := readEnvInt("FLOOR_TASK_QUEUE_SIZE", 2048)
+	overflowSize := readEnvInt("FLOOR_TASK_OVERFLOW_SIZE", queueSize*2)
 	taskTimeout := readEnvDuration("FLOOR_TASK_TIMEOUT", 90*time.Second)
 	enqueueTimeout := readEnvDuration("FLOOR_TASK_ENQUEUE_TIMEOUT", 250*time.Millisecond)
 	slowTaskWarnAt := readEnvDuration("FLOOR_SLOW_TASK_WARN_AT", 45*time.Second)
 
 	return &Floor{
-		log:            slog.Default().With("component", "floor", "session_id", sessionID),
-		wire:           wireMgr,
-		sessionID:      sessionID,
-		taskQueue:      make(chan deskTask, queueSize),
-		workerCount:    workerCount,
-		taskTimeout:    taskTimeout,
-		enqueueTimeout: enqueueTimeout,
-		slowTaskWarnAt: slowTaskWarnAt,
+		log:              slog.Default().With("component", "floor", "session_id", sessionID),
+		wire:             wireMgr,
+		sessionID:        sessionID,
+		taskQueue:        make(chan deskTask, queueSize),
+		overflowQueue:    make(chan deskTask, overflowSize),
+		workerCount:      workerCount,
+		taskTimeout:      taskTimeout,
+		enqueueTimeout:   enqueueTimeout,
+		slowTaskWarnAt:   slowTaskWarnAt,
+		overflowCapacity: overflowSize,
 	}
 }
 
@@ -150,10 +165,16 @@ func (f *Floor) startWorkers(ctx context.Context) {
 				f.workerLoop(ctx, workerID)
 			}, "worker_id", workerID)
 		}
+		if cap(f.overflowQueue) > 0 {
+			observe.SafeGo(f.log, "overflow queue worker panic", func() {
+				f.overflowLoop(ctx)
+			}, "worker", "overflow")
+		}
 		f.log.Info("desk workers started",
 			"workers", f.workerCount,
 			"task_timeout", f.taskTimeout,
 			"queue_capacity", cap(f.taskQueue),
+			"overflow_capacity", cap(f.overflowQueue),
 			"enqueue_timeout", f.enqueueTimeout,
 			"slow_task_warn_at", f.slowTaskWarnAt,
 		)
@@ -214,6 +235,23 @@ func (f *Floor) workerLoop(ctx context.Context, workerID int) {
 	}
 }
 
+func (f *Floor) overflowLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task := <-f.overflowQueue:
+			select {
+			case <-ctx.Done():
+				return
+			case f.taskQueue <- task:
+				f.tasksEnqueued.Add(1)
+				f.tasksRecovered.Add(1)
+			}
+		}
+	}
+}
+
 // fanOut routes a signal only to relevant desks and queues the work.
 func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 	f.mu.RLock()
@@ -224,6 +262,7 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 	targets := selectDeskTargetsForSignal(desks, sig)
 	routed := 0
 	skipped := 0
+	overflowed := 0
 	dropped := 0
 
 	if len(targets) == 0 {
@@ -231,11 +270,15 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 	}
 
 	for _, desk := range targets {
-		if !f.enqueueTask(ctx, deskTask{desk: desk, sig: sig}) {
+		switch f.enqueueTask(ctx, deskTask{desk: desk, sig: sig}) {
+		case enqueueOutcomeQueued:
+			routed++
+		case enqueueOutcomeOverflowed:
+			routed++
+			overflowed++
+		default:
 			dropped++
-			continue
 		}
-		routed++
 	}
 
 	if len(targets) > 0 {
@@ -256,14 +299,31 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 	}
 
 	if dropped > 0 {
-		f.log.Warn("signal desk fanout dropped tasks",
+		f.log.Warn("signal desk fanout overflowed or dropped tasks",
 			"signal_id", sig.ID,
 			"source", sig.Source,
 			"category", sig.Category,
 			"routed", routed,
+			"overflowed", overflowed,
 			"skipped", skipped,
 			"dropped", dropped,
 			"queue_depth", len(f.taskQueue),
+			"overflow_depth", len(f.overflowQueue),
+			"candidate_domains", relevantDomains,
+		)
+		return
+	}
+
+	if overflowed > 0 {
+		f.log.Warn("signal desk fanout overflowed tasks",
+			"signal_id", sig.ID,
+			"source", sig.Source,
+			"category", sig.Category,
+			"routed", routed,
+			"overflowed", overflowed,
+			"skipped", skipped,
+			"queue_depth", len(f.taskQueue),
+			"overflow_depth", len(f.overflowQueue),
 			"candidate_domains", relevantDomains,
 		)
 		return
@@ -276,23 +336,36 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 		"routed", routed,
 		"skipped", skipped,
 		"queue_depth", len(f.taskQueue),
+		"overflow_depth", len(f.overflowQueue),
 		"candidate_domains", relevantDomains,
 	)
 }
 
-func (f *Floor) enqueueTask(ctx context.Context, task deskTask) bool {
+func (f *Floor) enqueueTask(ctx context.Context, task deskTask) enqueueOutcome {
 	timer := time.NewTimer(f.enqueueTimeout)
 	defer timer.Stop()
 
 	select {
 	case <-ctx.Done():
-		return false
+		f.tasksDropped.Add(1)
+		return enqueueOutcomeDropped
 	case f.taskQueue <- task:
 		f.tasksEnqueued.Add(1)
-		return true
+		return enqueueOutcomeQueued
 	case <-timer.C:
+		if cap(f.overflowQueue) > 0 {
+			select {
+			case <-ctx.Done():
+				f.tasksDropped.Add(1)
+				return enqueueOutcomeDropped
+			case f.overflowQueue <- task:
+				f.tasksOverflowed.Add(1)
+				return enqueueOutcomeOverflowed
+			default:
+			}
+		}
 		f.tasksDropped.Add(1)
-		return false
+		return enqueueOutcomeDropped
 	}
 }
 
@@ -343,10 +416,14 @@ func (f *Floor) Stats() FloorStats {
 		TasksStarted:     f.tasksStarted.Load(),
 		TasksCompleted:   f.tasksCompleted.Load(),
 		TasksDropped:     f.tasksDropped.Load(),
+		TasksOverflowed:  f.tasksOverflowed.Load(),
+		TasksRecovered:   f.tasksRecovered.Load(),
 		TasksSkipped:     f.tasksSkipped.Load(),
 		ActiveTasks:      f.activeTasks.Load(),
 		TaskQueueDepth:   len(f.taskQueue),
 		TaskQueueCap:     cap(f.taskQueue),
+		OverflowDepth:    len(f.overflowQueue),
+		OverflowCap:      cap(f.overflowQueue),
 		WireStats:        wireStats,
 	}
 }
@@ -364,10 +441,14 @@ type FloorStats struct {
 	TasksStarted     int64
 	TasksCompleted   int64
 	TasksDropped     int64
+	TasksOverflowed  int64
+	TasksRecovered   int64
 	TasksSkipped     int64
 	ActiveTasks      int64
 	TaskQueueDepth   int
 	TaskQueueCap     int
+	OverflowDepth    int
+	OverflowCap      int
 	WireStats        wire.WireStats
 }
 

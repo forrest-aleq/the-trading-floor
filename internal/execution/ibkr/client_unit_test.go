@@ -33,6 +33,8 @@ func (f *fakeConnection) IsConnected() bool { return false }
 
 func (f *fakeConnection) IsPaper() bool { return true }
 
+func (f *fakeConnection) Status() ConnectionStatus { return ConnectionStatus{} }
+
 func (f *fakeConnection) RunReconnectLoop(ctx context.Context) {
 	f.mu.Lock()
 	f.loopCalls++

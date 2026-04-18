@@ -101,10 +101,14 @@ func main() {
 	ibkrCfg := ibkr.DefaultConfig()
 	ibkrClient := ibkr.NewClient(ibkrCfg)
 	if err := ibkrClient.Connect(ctx); err != nil {
+		brokerStatus := ibkrClient.ConnectionStatus()
 		slog.Warn("IBKR unavailable at startup — continuing in degraded mode while reconnect loop retries",
 			"error", err,
 			"host", ibkrCfg.Host,
 			"port", ibkrCfg.Port,
+			"client_id", brokerStatus.ClientID,
+			"last_connect_error", brokerStatus.LastConnectErr,
+			"last_attempt_at", brokerStatus.LastAttemptAt,
 		)
 	} else {
 		slog.Info("IBKR connected", "paper", ibkrClient.IsPaper())
@@ -391,6 +395,7 @@ func main() {
 	if runtimeMode != runtimeModeDev || marketState.Provider != nil {
 		health := newRuntimeHealthSupervisor(runtimeHealthConfig{
 			Broker:           ibkrClient,
+			BrokerStatus:     ibkrClient,
 			BrokerSync:       bk,
 			MarketFreshness:  mdMgr,
 			RequiredQuotes:   marketBootstrap,

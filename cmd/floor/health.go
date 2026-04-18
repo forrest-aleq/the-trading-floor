@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hnic/trading-floor/internal/book"
+	"github.com/hnic/trading-floor/internal/execution/ibkr"
 	"github.com/hnic/trading-floor/internal/firm"
 	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/pkg/model"
@@ -21,12 +22,17 @@ type brokerSyncSource interface {
 	BrokerSyncStatus() book.BrokerSyncStatus
 }
 
+type brokerStatusSource interface {
+	ConnectionStatus() ibkr.ConnectionStatus
+}
+
 type marketFreshnessSource interface {
 	FreshnessReport([]model.Instrument, time.Time, time.Duration) marketdata.QuoteFreshnessReport
 }
 
 type runtimeHealthConfig struct {
 	Broker           brokerConnectivity
+	BrokerStatus     brokerStatusSource
 	BrokerSync       brokerSyncSource
 	MarketFreshness  marketFreshnessSource
 	RequiredQuotes   []model.Instrument
@@ -39,6 +45,7 @@ type runtimeHealthConfig struct {
 type runtimeHealthSupervisor struct {
 	log              *slog.Logger
 	broker           brokerConnectivity
+	brokerStatus     brokerStatusSource
 	brokerSync       brokerSyncSource
 	marketFreshness  marketFreshnessSource
 	requiredQuotes   []model.Instrument
@@ -66,6 +73,7 @@ func newRuntimeHealthSupervisor(cfg runtimeHealthConfig) *runtimeHealthSuperviso
 	supervisor := &runtimeHealthSupervisor{
 		log:              slog.Default().With("component", "runtime_health"),
 		broker:           cfg.Broker,
+		brokerStatus:     cfg.BrokerStatus,
 		brokerSync:       cfg.BrokerSync,
 		marketFreshness:  cfg.MarketFreshness,
 		requiredQuotes:   append([]model.Instrument(nil), cfg.RequiredQuotes...),
@@ -147,6 +155,13 @@ func (s *runtimeHealthSupervisor) evaluate(now time.Time) (firm.EntryPolicy, map
 
 	if s.broker == nil {
 		return firm.DisabledEntryPolicy("broker_status_unavailable", now), details
+	}
+	if s.brokerStatus != nil {
+		status := s.brokerStatus.ConnectionStatus()
+		details["broker_client_id"] = status.ClientID
+		details["broker_last_connect_error"] = status.LastConnectErr
+		details["broker_last_attempt_at"] = status.LastAttemptAt
+		details["broker_last_connected_at"] = status.LastConnectedAt
 	}
 	if !s.broker.IsConnected() {
 		details["broker_connected"] = false

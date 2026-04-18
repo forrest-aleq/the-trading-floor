@@ -31,6 +31,7 @@ type connectionAPI interface {
 	IsConnected() bool
 	IsPaper() bool
 	RunReconnectLoop(context.Context)
+	Status() ConnectionStatus
 }
 
 type MarketData struct {
@@ -128,6 +129,10 @@ func (c *Client) IsConnected() bool {
 
 func (c *Client) IsPaper() bool {
 	return c.conn.IsPaper()
+}
+
+func (c *Client) ConnectionStatus() ConnectionStatus {
+	return c.conn.Status()
 }
 
 func (c *Client) Close() {

@@ -15,10 +15,12 @@ import (
 
 // Config for IBKR Gateway connection.
 type Config struct {
-	Host          string
-	Port          int
-	ClientID      int
-	ClientIDTries int
+	Host               string
+	Port               int
+	ClientID           int
+	ClientIDTries      int
+	ReconnectBaseDelay time.Duration
+	ReconnectMaxDelay  time.Duration
 }
 
 func DefaultConfig() Config {
@@ -48,7 +50,32 @@ func DefaultConfig() Config {
 		}
 	}
 
-	return Config{Host: host, Port: port, ClientID: clientID, ClientIDTries: clientIDTries}
+	reconnectBaseDelay := 5 * time.Second
+	if raw := os.Getenv("IBKR_RECONNECT_BASE_DELAY"); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			reconnectBaseDelay = parsed
+		}
+	}
+
+	reconnectMaxDelay := time.Minute
+	if raw := os.Getenv("IBKR_RECONNECT_MAX_DELAY"); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			if parsed < reconnectBaseDelay {
+				reconnectMaxDelay = reconnectBaseDelay
+			} else {
+				reconnectMaxDelay = parsed
+			}
+		}
+	}
+
+	return Config{
+		Host:               host,
+		Port:               port,
+		ClientID:           clientID,
+		ClientIDTries:      clientIDTries,
+		ReconnectBaseDelay: reconnectBaseDelay,
+		ReconnectMaxDelay:  reconnectMaxDelay,
+	}
 }
 
 type Connection struct {
@@ -57,9 +84,26 @@ type Connection struct {
 
 	mu sync.RWMutex
 	ib *ibsync.IB
+
+	lastConnectErr  string
+	lastAttemptAt   time.Time
+	lastConnectedAt time.Time
+}
+
+type ConnectionStatus struct {
+	Connected       bool
+	Host            string
+	Port            int
+	ClientID        int
+	LastConnectErr  string
+	LastAttemptAt   time.Time
+	LastConnectedAt time.Time
 }
 
 const accountSummaryProbeTimeout = 3 * time.Second
+
+var connectIBFn = connectIB
+var validateGatewayFn = func(c *Connection) error { return c.validateGateway() }
 
 func NewConnection(cfg Config) *Connection {
 	return &Connection{
@@ -96,12 +140,14 @@ func (c *Connection) Connect(ctx context.Context) error {
 	)
 	for offset := 0; offset < tries; offset++ {
 		candidateID := startID + offset
-		ib, lastErr = connectIB(ctx, c.cfg.Host, c.cfg.Port, candidateID)
+		c.lastAttemptAt = time.Now().UTC()
+		ib, lastErr = connectIBFn(ctx, c.cfg.Host, c.cfg.Port, candidateID)
 		if lastErr == nil {
 			chosenID = candidateID
 			break
 		}
 		if !isClientIDConflict(lastErr) {
+			c.lastConnectErr = lastErr.Error()
 			return fmt.Errorf("connect gateway: %w", lastErr)
 		}
 		c.log.Warn("IBKR client id unavailable, trying next id",
@@ -110,6 +156,10 @@ func (c *Connection) Connect(ctx context.Context) error {
 		)
 	}
 	if lastErr != nil && ib == nil {
+		if isClientIDConflict(lastErr) {
+			c.cfg.ClientID = startID + tries
+		}
+		c.lastConnectErr = lastErr.Error()
 		return fmt.Errorf("connect gateway: %w", lastErr)
 	}
 
@@ -122,11 +172,14 @@ func (c *Connection) Connect(ctx context.Context) error {
 
 	c.ib = ib
 	c.cfg.ClientID = chosenID
+	c.lastConnectErr = ""
+	c.lastConnectedAt = time.Now().UTC()
 	c.log.Info("connected to IBKR Gateway")
 
-	if err := c.validateGateway(); err != nil {
+	if err := validateGatewayFn(c); err != nil {
 		_ = ib.Disconnect()
 		c.ib = nil
+		c.lastConnectErr = err.Error()
 		return fmt.Errorf("gateway validation: %w", err)
 	}
 
@@ -195,6 +248,26 @@ func (c *Connection) Disconnect() {
 	c.ib = nil
 }
 
+func (c *Connection) Status() ConnectionStatus {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	connected := false
+	if c.ib != nil {
+		connected = c.ib.IsConnected()
+	}
+
+	return ConnectionStatus{
+		Connected:       connected,
+		Host:            c.cfg.Host,
+		Port:            c.cfg.Port,
+		ClientID:        c.cfg.ClientID,
+		LastConnectErr:  c.lastConnectErr,
+		LastAttemptAt:   c.lastAttemptAt,
+		LastConnectedAt: c.lastConnectedAt,
+	}
+}
+
 func (c *Connection) IB() *ibsync.IB {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -212,20 +285,43 @@ func (c *Connection) IsPaper() bool {
 }
 
 func (c *Connection) RunReconnectLoop(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	delay := c.cfg.ReconnectBaseDelay
+	if delay <= 0 {
+		delay = 5 * time.Second
+	}
+	maxDelay := c.cfg.ReconnectMaxDelay
+	if maxDelay < delay {
+		maxDelay = delay
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			if c.IsConnected() {
+				delay = c.cfg.ReconnectBaseDelay
+				if delay <= 0 {
+					delay = 5 * time.Second
+				}
+				timer.Reset(delay)
 				continue
 			}
 			if err := c.Connect(ctx); err != nil {
-				c.log.Warn("reconnect failed", "error", err)
+				c.log.Warn("reconnect failed", "error", err, "retry_in", delay)
+				delay *= 2
+				if delay > maxDelay {
+					delay = maxDelay
+				}
+			} else {
+				delay = c.cfg.ReconnectBaseDelay
+				if delay <= 0 {
+					delay = 5 * time.Second
+				}
 			}
+			timer.Reset(delay)
 		}
 	}
 }

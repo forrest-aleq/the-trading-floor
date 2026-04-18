@@ -82,6 +82,7 @@ type Discrepancy struct {
 }
 
 const minShadowEntryPrice = 0.01
+const brokerRecoveryDeskID = "broker-recovery"
 
 func NewBook(positionSource PositionSource, initialCapital float64) *Book {
 	var accountSource AccountSource
@@ -453,8 +454,8 @@ func (b *Book) StartReconcile(ctx context.Context) {
 }
 
 func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
 	bookByKey := make(map[string]*model.Position)
 	for _, pos := range b.positions {
@@ -473,6 +474,11 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 
 		pos, exists := bookByKey[key]
 		if !exists {
+			recovered := recoveredBrokerPosition(ip)
+			b.positions[recovered.ID] = recovered
+			if !recovered.Shadow {
+				b.deskPositions[recovered.DeskID]++
+			}
 			discrepancies = append(discrepancies, Discrepancy{
 				Symbol:      ip.Symbol,
 				BookQty:     0,
@@ -483,10 +489,12 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 			continue
 		}
 
-		if pos.Quantity != ip.Quantity || pos.EntryPrice != ip.AvgCost {
+		bookQty := signedPositionQuantity(pos)
+		if bookQty != ip.Quantity || pos.EntryPrice != ip.AvgCost {
+			applyBrokerRepair(pos, ip)
 			discrepancies = append(discrepancies, Discrepancy{
 				Symbol:      ip.Symbol,
-				BookQty:     pos.Quantity,
+				BookQty:     bookQty,
 				IBKRQty:     ip.Quantity,
 				BookAvgCost: pos.EntryPrice,
 				IBKRAvgCost: ip.AvgCost,
@@ -507,6 +515,7 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 		})
 	}
 
+	b.recalculateLocked()
 	return discrepancies
 }
 
@@ -710,4 +719,60 @@ func reconcileKey(conID int64, symbol string) string {
 		return fmt.Sprintf("conid:%d", conID)
 	}
 	return "symbol:" + symbol
+}
+
+func signedPositionQuantity(pos *model.Position) float64 {
+	if pos == nil {
+		return 0
+	}
+	if pos.Direction == model.Short {
+		return -pos.Quantity
+	}
+	return pos.Quantity
+}
+
+func applyBrokerRepair(pos *model.Position, brokerPos ibkr.IBKRPosition) {
+	if pos == nil {
+		return
+	}
+	pos.Quantity = math.Abs(brokerPos.Quantity)
+	if brokerPos.Quantity < 0 {
+		pos.Direction = model.Short
+	} else {
+		pos.Direction = model.Long
+	}
+	if brokerPos.AvgCost > 0 {
+		pos.EntryPrice = brokerPos.AvgCost
+		if pos.CurrentPrice <= 0 {
+			pos.CurrentPrice = brokerPos.AvgCost
+		}
+	}
+	if brokerPos.ConID > 0 {
+		pos.IBKRContractID = brokerPos.ConID
+	}
+}
+
+func recoveredBrokerPosition(ip ibkr.IBKRPosition) *model.Position {
+	direction := model.Long
+	if ip.Quantity < 0 {
+		direction = model.Short
+	}
+	qty := math.Abs(ip.Quantity)
+	price := ip.AvgCost
+	if price <= 0 {
+		price = minShadowEntryPrice
+	}
+	return &model.Position{
+		ID:             "broker-recovered:" + reconcileKey(ip.ConID, ip.Symbol),
+		ThesisID:       "",
+		DeskID:         brokerRecoveryDeskID,
+		Instrument:     model.Instrument{Symbol: ip.Symbol, SecType: ip.SecType, Exchange: ip.Exchange, Currency: ip.Currency, ConID: ip.ConID},
+		Direction:      direction,
+		Quantity:       qty,
+		EntryPrice:     price,
+		CurrentPrice:   price,
+		IBKRContractID: ip.ConID,
+		Status:         "open",
+		OpenedAt:       time.Now().UTC(),
+	}
 }

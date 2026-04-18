@@ -219,3 +219,87 @@ func TestSnapshotUsesBrokerPositionsForCountsAndExposure(t *testing.T) {
 		t.Fatalf("expected net exposure 1500, got %.2f", snapshot.NetExposure)
 	}
 }
+
+func TestReconcileRepairsBookQuantityAndAvgCostFromBroker(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 1000)
+	inst := model.Instrument{
+		Symbol:   "AAPL",
+		SecType:  "STK",
+		Currency: "USD",
+		Exchange: "SMART",
+		ConID:    101,
+	}
+
+	pos := bk.OpenPosition(&model.Fill{
+		OrderID:    "order-1",
+		Instrument: inst,
+		Direction:  model.Long,
+		Quantity:   10,
+		AvgPrice:   100,
+		FilledAt:   time.Now(),
+	}, &model.Thesis{
+		ID:         "thesis-1",
+		DeskID:     "desk-1",
+		Instrument: inst,
+		Direction:  model.Long,
+	})
+
+	discrepancies := bk.Reconcile([]ibkr.IBKRPosition{{
+		ConID:    101,
+		Symbol:   "AAPL",
+		SecType:  "STK",
+		Exchange: "SMART",
+		Currency: "USD",
+		Quantity: -12,
+		AvgCost:  105.5,
+	}})
+
+	if len(discrepancies) != 1 {
+		t.Fatalf("expected one discrepancy, got %d", len(discrepancies))
+	}
+	repaired, ok := bk.GetPosition(pos.ID)
+	if !ok {
+		t.Fatal("expected repaired position to remain in book")
+	}
+	if repaired.Direction != model.Short {
+		t.Fatalf("expected repaired short direction, got %s", repaired.Direction)
+	}
+	if repaired.Quantity != 12 {
+		t.Fatalf("expected repaired quantity 12, got %.2f", repaired.Quantity)
+	}
+	if repaired.EntryPrice != 105.5 {
+		t.Fatalf("expected repaired entry price 105.5, got %.2f", repaired.EntryPrice)
+	}
+}
+
+func TestReconcileRecoversBrokerOnlyPositionIntoBook(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 1000)
+
+	discrepancies := bk.Reconcile([]ibkr.IBKRPosition{{
+		ConID:    202,
+		Symbol:   "TLT",
+		SecType:  "STK",
+		Exchange: "SMART",
+		Currency: "USD",
+		Quantity: 5,
+		AvgCost:  91.25,
+	}})
+
+	if len(discrepancies) != 1 {
+		t.Fatalf("expected one discrepancy, got %d", len(discrepancies))
+	}
+
+	positions := bk.GetOpenPositions()
+	if len(positions) != 1 {
+		t.Fatalf("expected one recovered position, got %d", len(positions))
+	}
+	if positions[0].DeskID != brokerRecoveryDeskID {
+		t.Fatalf("expected recovered desk id %q, got %q", brokerRecoveryDeskID, positions[0].DeskID)
+	}
+	if positions[0].Instrument.Symbol != "TLT" {
+		t.Fatalf("expected recovered symbol TLT, got %s", positions[0].Instrument.Symbol)
+	}
+	if positions[0].EntryPrice != 91.25 {
+		t.Fatalf("expected recovered entry price 91.25, got %.2f", positions[0].EntryPrice)
+	}
+}

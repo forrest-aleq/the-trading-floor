@@ -231,11 +231,12 @@ type fmpQuote struct {
 }
 
 type fmpHistoricalBar struct {
-	Date  string  `json:"date"`
-	Open  float64 `json:"open"`
-	High  float64 `json:"high"`
-	Low   float64 `json:"low"`
-	Close float64 `json:"close"`
+	Date   string  `json:"date"`
+	Open   float64 `json:"open"`
+	High   float64 `json:"high"`
+	Low    float64 `json:"low"`
+	Close  float64 `json:"close"`
+	Volume int64   `json:"volume"`
 }
 
 func parseFMPQuote(body []byte) (fmpQuote, error) {
@@ -290,11 +291,12 @@ func mapFMPHistoricalBars(rows []fmpHistoricalBar) ([]HistoricalBar, error) {
 			return nil, fmt.Errorf("parse FMP historical date %q: %w", row.Date, err)
 		}
 		out = append(out, HistoricalBar{
-			Time:  parsed.UTC(),
-			Open:  row.Open,
-			High:  row.High,
-			Low:   row.Low,
-			Close: row.Close,
+			Time:   parsed.UTC(),
+			Open:   row.Open,
+			High:   row.High,
+			Low:    row.Low,
+			Close:  row.Close,
+			Volume: row.Volume,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

@@ -140,12 +140,16 @@ func main() {
 		slog.Error("invalid market data provider", "error", err)
 		os.Exit(1)
 	}
+	marketStateLabel := firstNonEmpty(marketState.Label, string(marketState.Mode))
 	marketDataPollInterval := readRuntimeDuration("MARKET_DATA_POLL_INTERVAL", 30*time.Second)
-	if firstNonEmpty(marketState.Label, string(marketState.Mode)) == "massive_free+fmp_snapshots" && marketDataPollInterval < time.Minute {
+	if strings.HasPrefix(marketStateLabel, "massive_free+") && marketDataPollInterval < time.Minute {
 		marketDataPollInterval = time.Minute
 	}
 	mdMgr := marketdata.NewManager(marketState.Provider, marketState.RequestBudget, marketDataPollInterval)
 	marketBootstrap := marketrefs.StartupPricingWatchlist()
+	if strings.HasPrefix(marketStateLabel, "massive_free+") {
+		marketBootstrap = limitInstruments(marketBootstrap, readRuntimeInt("MARKET_DATA_REQUIRED_QUOTE_LIMIT", 4))
+	}
 	var positionWriter *positionPersistenceWriter
 	if db != nil {
 		positionWriter = newPositionPersistenceWriter(
@@ -404,6 +408,14 @@ func main() {
 
 	var entryControl firm.EntryControl
 	if runtimeMode != runtimeModeDev || marketState.Provider != nil {
+		defaultMaxQuoteAge := 2 * time.Minute
+		if strings.HasPrefix(marketStateLabel, "massive_free+") {
+			defaultMaxQuoteAge = 10 * time.Minute
+		}
+		healthInterval := readRuntimeDuration("RUNTIME_HEALTH_INTERVAL", 15*time.Second)
+		maxBrokerSyncAge := readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute)
+		maxQuoteAge := readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", defaultMaxQuoteAge)
+		persistenceProbeTimeout := readRuntimeDuration("RUNTIME_HEALTH_PERSISTENCE_TIMEOUT", 2*time.Second)
 		health := newRuntimeHealthSupervisor(runtimeHealthConfig{
 			Broker:                  ibkrClient,
 			BrokerStatus:            ibkrClient,
@@ -411,10 +423,10 @@ func main() {
 			MarketFreshness:         mdMgr,
 			PersistenceProbe:        db,
 			RequiredQuotes:          marketBootstrap,
-			Interval:                readRuntimeDuration("RUNTIME_HEALTH_INTERVAL", 15*time.Second),
-			MaxBrokerSyncAge:        readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute),
-			MaxQuoteAge:             readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", 2*time.Minute),
-			PersistenceProbeTimeout: readRuntimeDuration("RUNTIME_HEALTH_PERSISTENCE_TIMEOUT", 2*time.Second),
+			Interval:                healthInterval,
+			MaxBrokerSyncAge:        maxBrokerSyncAge,
+			MaxQuoteAge:             maxQuoteAge,
+			PersistenceProbeTimeout: persistenceProbeTimeout,
 			OnPolicyChange: func(policy firm.EntryPolicy, details map[string]any) {
 				audit.Record("runtime_entry_policy", "", "", map[string]any{
 					"mode":          policy.Mode,
@@ -432,10 +444,10 @@ func main() {
 		}, "task", "runtime_health")
 		slog.Info("runtime health supervisor initialized",
 			"required_quotes", len(marketBootstrap),
-			"interval", readRuntimeDuration("RUNTIME_HEALTH_INTERVAL", 15*time.Second),
-			"max_broker_sync_age", readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute),
-			"max_quote_age", readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", 2*time.Minute),
-			"persistence_timeout", readRuntimeDuration("RUNTIME_HEALTH_PERSISTENCE_TIMEOUT", 2*time.Second),
+			"interval", healthInterval,
+			"max_broker_sync_age", maxBrokerSyncAge,
+			"max_quote_age", maxQuoteAge,
+			"persistence_timeout", persistenceProbeTimeout,
 		)
 	} else {
 		slog.Warn("runtime health supervisor disabled in dev mode without live market data provider")
@@ -923,6 +935,25 @@ func readRuntimeFloat(name string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+func readRuntimeInt(name string, fallback int) int {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func limitInstruments(instruments []model.Instrument, limit int) []model.Instrument {
+	if limit <= 0 || limit >= len(instruments) {
+		return instruments
+	}
+	return append([]model.Instrument(nil), instruments[:limit]...)
 }
 
 func firstNonEmptyRuntime(values ...string) string {

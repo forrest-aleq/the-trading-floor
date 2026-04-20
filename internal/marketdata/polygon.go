@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,13 +79,14 @@ func (p *PolygonProvider) HistoricalBars(ctx context.Context, inst model.Instrum
 		end = time.Now().UTC()
 	}
 
-	from := end.AddDate(0, 0, -14).Format("2006-01-02")
+	multiplier, timespan := polygonAggsGranularity(barSize)
+	from := polygonAggsStart(end, duration).Format("2006-01-02")
 	to := end.Format("2006-01-02")
 	endpoint, err := url.Parse(strings.TrimRight(p.baseURL, "/"))
 	if err != nil {
 		return nil, err
 	}
-	endpoint.Path = path.Join(endpoint.Path, "/v2/aggs/ticker", symbol, "range", "1", "day", from, to)
+	endpoint.Path = path.Join(endpoint.Path, "/v2/aggs/ticker", symbol, "range", multiplier, timespan, from, to)
 	query := endpoint.Query()
 	query.Set("adjusted", "true")
 	query.Set("sort", "asc")
@@ -309,11 +311,12 @@ func parsePolygonHistoricalBars(body []byte) ([]HistoricalBar, error) {
 			continue
 		}
 		out = append(out, HistoricalBar{
-			Time:  barTime,
-			Open:  row.Open,
-			High:  row.High,
-			Low:   row.Low,
-			Close: row.Close,
+			Time:   barTime,
+			Open:   row.Open,
+			High:   row.High,
+			Low:    row.Low,
+			Close:  row.Close,
+			Volume: int64(row.Volume),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -388,6 +391,60 @@ func polygonAggsTicker(inst model.Instrument) string {
 		return polygonIndexTicker(inst)
 	}
 	return polygonStockTicker(inst)
+}
+
+func polygonAggsGranularity(barSize string) (string, string) {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(barSize)))
+	if len(fields) < 2 {
+		return "1", "day"
+	}
+	n, err := strconv.Atoi(fields[0])
+	if err != nil || n <= 0 {
+		n = 1
+	}
+	unit := strings.TrimSuffix(fields[1], "s")
+	switch unit {
+	case "sec", "second":
+		return strconv.Itoa(n), "second"
+	case "min", "minute":
+		return strconv.Itoa(n), "minute"
+	case "hour":
+		return strconv.Itoa(n), "hour"
+	case "day":
+		return strconv.Itoa(n), "day"
+	case "week":
+		return strconv.Itoa(n), "week"
+	case "month":
+		return strconv.Itoa(n), "month"
+	default:
+		return "1", "day"
+	}
+}
+
+func polygonAggsStart(end time.Time, duration string) time.Time {
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	fields := strings.Fields(strings.ToUpper(strings.TrimSpace(duration)))
+	if len(fields) < 2 {
+		return end.AddDate(0, 0, -14)
+	}
+	n, err := strconv.Atoi(fields[0])
+	if err != nil || n <= 0 {
+		n = 14
+	}
+	switch strings.TrimSuffix(fields[1], "S") {
+	case "D":
+		return end.AddDate(0, 0, -n)
+	case "W":
+		return end.AddDate(0, 0, -7*n)
+	case "M":
+		return end.AddDate(0, -n, 0)
+	case "Y":
+		return end.AddDate(-n, 0, 0)
+	default:
+		return end.AddDate(0, 0, -14)
+	}
 }
 
 func unixMillisUTC(value int64) time.Time {

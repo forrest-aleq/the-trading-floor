@@ -81,11 +81,8 @@ func loadMassiveBackedProvider() (string, marketdata.SnapshotProvider, error) {
 
 	switch marketdata.ResolveMassivePlan() {
 	case marketdata.MassivePlanBasicFree:
-		fmpProvider, err := marketdata.NewFMPProvider("")
-		if err != nil {
-			return "", nil, fmt.Errorf("MARKET_DATA_PROVIDER=massive with MASSIVE_PLAN=basic_free requires FMP_API_KEY for live snapshots")
-		}
-		return "massive_free+fmp_snapshots", marketdata.NewSplitProvider(fmpProvider, polygonProvider), nil
+		snapshotProvider := marketdata.NewHistoricalSnapshotProvider(polygonProvider)
+		return "massive_free+polygon_agg_snapshots", marketdata.NewSplitProvider(snapshotProvider, polygonProvider), nil
 	default:
 		var provider marketdata.SnapshotProvider = polygonProvider
 		label := "massive"

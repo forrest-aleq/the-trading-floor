@@ -22,11 +22,12 @@ type Snapshot struct {
 // HistoricalBar is the provider-neutral historical bar shape used for cached
 // price fallback and realized-volatility bootstrap.
 type HistoricalBar struct {
-	Time  time.Time
-	Open  float64
-	High  float64
-	Low   float64
-	Close float64
+	Time   time.Time
+	Open   float64
+	High   float64
+	Low    float64
+	Close  float64
+	Volume int64
 }
 
 // SnapshotProvider returns current market-state snapshots. Providers should be

@@ -388,13 +388,18 @@ func main() {
 		os.Exit(1)
 	}
 	defer audit.Close()
+	desks, err := activeDeskConfig()
+	if err != nil {
+		slog.Error("invalid desk runtime configuration", "error", err)
+		os.Exit(1)
+	}
 	audit.Record("system_start", "", "", map[string]any{
 		"session_id":     sessionID,
 		"paper":          ibkrClient.IsPaper(),
 		"capital":        1_000_000,
 		"db_persistence": db != nil,
 		"graph_brain":    graph != nil,
-		"desks":          40,
+		"desks":          len(desks),
 	})
 
 	var entryControl firm.EntryControl
@@ -443,10 +448,6 @@ func main() {
 	floor.SetStore(db)
 	floor.SetGraph(graph)
 	desksByID := map[string]*firm.Desk{}
-
-	// 40 desks: 20 Group A (full MARS beliefs) + 20 Group B (control, no belief updates)
-	// 8 domains × ~5 desks each, split A/B
-	desks := fullDeskConfig()
 
 	for _, d := range desks {
 		desk := firm.NewDesk(firm.DeskConfig{
@@ -938,6 +939,61 @@ type deskDef struct {
 	domain  string
 	group   string
 	capital float64
+}
+
+func activeDeskConfig() ([]deskDef, error) {
+	desks := fullDeskConfig()
+	if allowlist := strings.TrimSpace(os.Getenv("FLOOR_ENABLED_DESKS")); allowlist != "" {
+		selected, err := filterDeskConfig(desks, allowlist)
+		if err != nil {
+			return nil, err
+		}
+		desks = selected
+	}
+
+	if rawLimit := strings.TrimSpace(os.Getenv("FLOOR_DESK_LIMIT")); rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil || limit <= 0 {
+			return nil, fmt.Errorf("FLOOR_DESK_LIMIT must be a positive integer")
+		}
+		if limit < len(desks) {
+			desks = desks[:limit]
+		}
+	}
+
+	if len(desks) == 0 {
+		return nil, fmt.Errorf("desk runtime configuration selected zero desks")
+	}
+	return desks, nil
+}
+
+func filterDeskConfig(desks []deskDef, rawAllowlist string) ([]deskDef, error) {
+	byID := make(map[string]deskDef, len(desks))
+	for _, desk := range desks {
+		byID[desk.id] = desk
+	}
+
+	seen := map[string]struct{}{}
+	selected := make([]deskDef, 0, len(desks))
+	for _, part := range strings.Split(rawAllowlist, ",") {
+		id := strings.TrimSpace(part)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		desk, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("FLOOR_ENABLED_DESKS references unknown desk %q", id)
+		}
+		selected = append(selected, desk)
+		seen[id] = struct{}{}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("FLOOR_ENABLED_DESKS did not select any desks")
+	}
+	return selected, nil
 }
 
 func registerDefaultFeeds(wireMgr *wire.Manager, marketClient feeds.MarketDataClient) int {

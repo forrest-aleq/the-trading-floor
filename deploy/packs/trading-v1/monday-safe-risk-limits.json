@@ -1,0 +1,19 @@
+{
+  "max_daily_loss_pct": 1.0,
+  "max_single_position_pct": 20.0,
+  "max_correlated_positions": 2,
+  "max_open_positions": 1,
+  "capital_per_desk": 25000,
+  "max_position_size_pct": 5.0,
+  "min_conviction_score": 0.7,
+  "max_quote_age_seconds": 120.0,
+  "max_equity_spread_bps": 25.0,
+  "max_option_spread_bps": 250.0,
+  "total_capital": 1000000,
+  "max_factor_exposure_pct": 15.0,
+  "max_drawdown_pct": 3.0,
+  "kill_switch_drawdown_pct": 5.0,
+  "max_gross_exposure_pct": 10.0,
+  "max_net_exposure_pct": 10.0,
+  "max_cash_deploy_pct": 5.0
+}

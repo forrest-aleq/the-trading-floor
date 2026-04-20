@@ -53,6 +53,44 @@ func TestFullDeskConfigBalancedAB(t *testing.T) {
 	}
 }
 
+func TestActiveDeskConfigUsesAllowlist(t *testing.T) {
+	t.Setenv("FLOOR_ENABLED_DESKS", "corp-earnings-a,macro-rates-a,sector-tech-a")
+	t.Setenv("FLOOR_DESK_LIMIT", "")
+
+	desks, err := activeDeskConfig()
+	if err != nil {
+		t.Fatalf("activeDeskConfig returned error: %v", err)
+	}
+	if len(desks) != 3 {
+		t.Fatalf("expected 3 desks, got %d", len(desks))
+	}
+	if desks[0].id != "corp-earnings-a" || desks[1].id != "macro-rates-a" || desks[2].id != "sector-tech-a" {
+		t.Fatalf("unexpected desk selection: %#v", desks)
+	}
+}
+
+func TestActiveDeskConfigRejectsUnknownAllowlistDesk(t *testing.T) {
+	t.Setenv("FLOOR_ENABLED_DESKS", "corp-earnings-a,no-such-desk")
+	t.Setenv("FLOOR_DESK_LIMIT", "")
+
+	if _, err := activeDeskConfig(); err == nil {
+		t.Fatal("expected unknown desk allowlist entry to fail")
+	}
+}
+
+func TestActiveDeskConfigAppliesDeskLimit(t *testing.T) {
+	t.Setenv("FLOOR_ENABLED_DESKS", "")
+	t.Setenv("FLOOR_DESK_LIMIT", "5")
+
+	desks, err := activeDeskConfig()
+	if err != nil {
+		t.Fatalf("activeDeskConfig returned error: %v", err)
+	}
+	if len(desks) != 5 {
+		t.Fatalf("expected 5 desks, got %d", len(desks))
+	}
+}
+
 func TestRegisterDefaultFeedsRegistersExtendedWireSurface(t *testing.T) {
 	t.Setenv("FRED_API_KEY", "")
 	t.Setenv("FMP_API_KEY", "")

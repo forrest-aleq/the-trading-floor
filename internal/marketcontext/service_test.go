@@ -169,6 +169,26 @@ func TestBuildOpportunityContextUsesKalshiSignalSnapshot(t *testing.T) {
 	}
 }
 
+func TestBuildOpportunityContextIgnoresSubCentKalshiSignalSnapshot(t *testing.T) {
+	service := NewService(nil)
+	opp := &model.Opportunity{
+		Instruments: []model.Instrument{model.NormalizeKalshiInstrument(model.Instrument{Symbol: "KXFEDCUT-26"})},
+		Direction:   model.Long,
+	}
+	sig := signal.Signal{
+		Timestamp: time.Now(),
+		Raw:       []byte(`{"ticker":"KXFEDCUT-26","yes_bid_dollars":"0.0000","yes_ask_dollars":"0.0060","last_price_dollars":"0.0040"}`),
+	}
+
+	ctx := service.BuildOpportunityContext(opp, sig)
+	if ctx == nil {
+		t.Fatal("expected market context")
+	}
+	if ctx.BidPrice != 0 || ctx.AskPrice != 0 || ctx.CurrentPrice != 0 {
+		t.Fatalf("expected sub-cent Kalshi quote to be ignored, got bid=%.4f ask=%.4f current=%.4f", ctx.BidPrice, ctx.AskPrice, ctx.CurrentPrice)
+	}
+}
+
 func TestBuildThesisContextRehydratesPriceFromResolvedInstrument(t *testing.T) {
 	service := NewService(stubPriceView{
 		price: 18.4,

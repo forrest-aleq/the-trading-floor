@@ -659,7 +659,7 @@ func kalshiDiscoveryScore(sig signal.Signal, spread float64) float64 {
 
 func parseScannerProbability(raw string) (float64, bool) {
 	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-	if err != nil || value <= 0 || value >= 1 {
+	if err != nil || value < 0.01 || value > 0.99 {
 		return 0, false
 	}
 	return value, true

@@ -954,6 +954,34 @@ func TestEvaluateDetailedChecksChosenKalshiSideSpread(t *testing.T) {
 	}
 }
 
+func TestEvaluateDetailedRejectsSubCentKalshiMarketDiscoveryPrice(t *testing.T) {
+	restoreScannerRuntimeConfig(t)
+	t.Setenv("KALSHI_MARKET_DISCOVERY_ENABLED", "true")
+	ReloadRuntimeConfig()
+
+	client := &scannerErrorClient{err: fmt.Errorf("LLM should not be called")}
+	engine := NewEngine(llm.NewRouter(client, client, client), 50)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:        "sig-kalshi-sub-cent",
+		Source:    "kalshi-market",
+		Type:      signal.TypeAlternative,
+		Category:  "prediction_market",
+		Timestamp: time.Now(),
+		Urgency:   0.65,
+		Raw:       []byte(`{"ticker":"KXFEDCUT-26","status":"active","yes_bid_dollars":"0.0000","yes_ask_dollars":"0.0060","no_bid_dollars":"1.0000","no_ask_dollars":"1.0000"}`),
+	}, "prediction_market")
+	if result.Accepted {
+		t.Fatalf("expected sub-cent market reject, got %+v", result)
+	}
+	if result.Reason != "kalshi_market_missing_price" {
+		t.Fatalf("reason = %q", result.Reason)
+	}
+	if client.requests != 0 {
+		t.Fatalf("expected no LLM call for sub-cent Kalshi market, got %d", client.requests)
+	}
+}
+
 func TestEvaluateDetailedDoesNotConvertEquityStyleKXPrefix(t *testing.T) {
 	t.Setenv("SCANNER_RESPONSE_MODE", "json")
 

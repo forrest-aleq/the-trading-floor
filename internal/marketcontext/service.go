@@ -281,10 +281,14 @@ func normalizeKalshiSignalPrice(raw any) (float64, bool) {
 		return 0, false
 	}
 	switch {
-	case value > 0 && value < 1:
+	case value >= 0.01 && value <= 0.99:
 		return value, true
 	case value > 1 && value < 100:
-		return value / 100.0, true
+		normalized := value / 100.0
+		if normalized >= 0.01 && normalized <= 0.99 {
+			return normalized, true
+		}
+		return 0, false
 	default:
 		return 0, false
 	}

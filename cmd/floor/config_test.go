@@ -423,8 +423,15 @@ func TestDeskExecutionRequirementHelpers(t *testing.T) {
 	if !desksRequireBrokerExecution(desks) {
 		t.Fatal("expected broker execution requirement")
 	}
-	if entryControlForDesk(desks[0], nil) != nil {
-		t.Fatal("expected Kalshi desk to skip broker entry control")
+	global := firm.NewManualEntryControl(firm.DisabledEntryPolicy("global_halt", time.Now().UTC()))
+	broker := firm.NewManualEntryControl(firm.DisabledEntryPolicy("broker_halt", time.Now().UTC()))
+	kalshiPolicy := entryControlForDesk(desks[0], global, broker).CurrentEntryPolicy()
+	if kalshiPolicy.Reason != "global_halt" {
+		t.Fatalf("expected Kalshi desk to inherit global control only, got %+v", kalshiPolicy)
+	}
+	brokerPolicy := entryControlForDesk(desks[1], firm.NewManualEntryControl(firm.NormalEntryPolicy(time.Now().UTC())), broker).CurrentEntryPolicy()
+	if brokerPolicy.Reason != "broker_halt" {
+		t.Fatalf("expected broker desk to combine global and broker controls, got %+v", brokerPolicy)
 	}
 }
 

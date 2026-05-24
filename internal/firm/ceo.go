@@ -25,6 +25,8 @@ type CEO struct {
 	floor      *Floor
 	interval   time.Duration
 	killSwitch float64 // portfolio drawdown pct that triggers halt
+	entryGate  *ManualEntryControl
+	halted     bool
 
 	// Meta-beliefs: per-desk performance tracking
 	deskSharpe map[string][]float64 // rolling daily returns for Sharpe calc
@@ -44,6 +46,10 @@ func NewCEO(bk *book.Book, beliefs *belief.Graph, floor *Floor) *CEO {
 
 func (c *CEO) SetDesks(desks []*Desk) {
 	c.desks = desks
+}
+
+func (c *CEO) SetEntryControl(control *ManualEntryControl) {
+	c.entryGate = control
 }
 
 // Run starts the CEO's monitoring loop.
@@ -70,6 +76,7 @@ func (c *CEO) evaluate(ctx context.Context) {
 
 	// Kill switch: halt all trading if drawdown exceeds threshold
 	if snapshot.MaxDrawdown >= c.killSwitch {
+		c.haltEntries("ceo_kill_switch", time.Now().UTC())
 		c.log.Error("KILL SWITCH TRIGGERED — halting all trading",
 			"drawdown", snapshot.MaxDrawdown,
 			"threshold", c.killSwitch,
@@ -186,6 +193,19 @@ func (c *CEO) evaluateDesks(snap book.PortfolioSnapshot) {
 				"sharpe_30d", ds.sharpe,
 				"open_positions", ds.trades,
 			)
+		}
+	}
+}
+
+func (c *CEO) haltEntries(reason string, at time.Time) {
+	if c == nil {
+		return
+	}
+	c.halted = true
+	if c.entryGate != nil {
+		policy := c.entryGate.CurrentEntryPolicy()
+		if policy.AllowEntries || policy.Reason != reason {
+			c.entryGate.Disable(reason, at)
 		}
 	}
 }

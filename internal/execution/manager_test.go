@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,6 +26,16 @@ type testBroker struct {
 type testOrderJournal struct {
 	mu      sync.Mutex
 	records map[string]PersistedOrder
+}
+
+type testTokenValidator struct {
+	err   error
+	calls atomic.Int64
+}
+
+func (v *testTokenValidator) ValidateCapabilityToken(*model.CapToken, model.Order) error {
+	v.calls.Add(1)
+	return v.err
 }
 
 func (j *testOrderJournal) UpsertWorkingOrder(_ context.Context, record PersistedOrder) error {
@@ -129,6 +140,39 @@ func TestSubmitSuppressesDuplicateOrderIDs(t *testing.T) {
 	}
 	if first == nil || second == nil || first.OrderID != second.OrderID {
 		t.Fatalf("expected duplicate submit to return cached fill, got first=%+v second=%+v", first, second)
+	}
+}
+
+func TestSubmitRejectsInvalidCapabilityTokenBeforeBrokerCall(t *testing.T) {
+	broker := &testBroker{}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+	validator := &testTokenValidator{err: errors.New("signature mismatch")}
+	manager.SetTokenValidator(validator)
+
+	order := model.Order{
+		ID:         "order-invalid-token",
+		ThesisID:   "thesis-invalid-token",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   10,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	_, err := manager.Submit(context.Background(), &model.CapToken{}, order)
+	if err == nil {
+		t.Fatal("expected invalid capability token error")
+	}
+	if !strings.Contains(err.Error(), "invalid capability token") {
+		t.Fatalf("expected invalid token error, got %v", err)
+	}
+	if validator.calls.Load() != 1 {
+		t.Fatalf("expected validator to be called once, got %d", validator.calls.Load())
+	}
+	if broker.calls.Load() != 0 {
+		t.Fatalf("expected broker not to be called, got %d", broker.calls.Load())
 	}
 }
 

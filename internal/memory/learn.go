@@ -153,7 +153,7 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 		l.engrams.Record(
 			intentKey,
 			globalContextPattern,
-			thesis.Strategy,
+			capability,
 			"",
 			[]string{regime.Volatility, regime.Trend, regime.Risk},
 			engramsProfitable,
@@ -164,7 +164,7 @@ func (l *LearnWorker) ProcessOutcome(thesis *model.Thesis, outcome *model.Thesis
 		l.engrams.Record(
 			intentKey,
 			deskContextPattern,
-			thesis.Strategy,
+			capability,
 			thesis.DeskID,
 			[]string{regime.Volatility, regime.Trend, regime.Risk},
 			engramsProfitable,

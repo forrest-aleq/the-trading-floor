@@ -186,6 +186,36 @@ func TestOpenShadowPositionUsesPositiveFallbackPrice(t *testing.T) {
 	}
 }
 
+func TestShadowPositionMarksButDoesNotAffectLiveSnapshot(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 1000)
+	inst := model.Instrument{Symbol: "TLT", SecType: "STK", Currency: "USD", Exchange: "SMART"}
+	pos := bk.OpenShadowPosition(&model.Thesis{
+		ID:           "shadow-nav",
+		DeskID:       "desk-1",
+		Instrument:   inst,
+		Direction:    model.Long,
+		PositionSize: 10,
+		EntryPrice:   100,
+	})
+
+	bk.Mark(map[string]float64{"TLT": 80})
+
+	marked, ok := bk.GetPosition(pos.ID)
+	if !ok {
+		t.Fatal("expected shadow position to remain in book")
+	}
+	if marked.CurrentPrice != 80 {
+		t.Fatalf("expected shadow mark to update current price, got %.2f", marked.CurrentPrice)
+	}
+	if marked.UnrealizedPnL != -200 {
+		t.Fatalf("expected shadow unrealized pnl -200, got %.2f", marked.UnrealizedPnL)
+	}
+	snapshot := bk.Snapshot()
+	if snapshot.NAV != 1000 || snapshot.GrossExposure != 0 || snapshot.NetExposure != 0 || snapshot.OpenPositions != 0 {
+		t.Fatalf("expected shadow position to be excluded from live snapshot, got %+v", snapshot)
+	}
+}
+
 func TestSnapshotPrefersBrokerAccountSummary(t *testing.T) {
 	bk := NewBook(stubRuntimeSource{
 		summary: &ibkr.AccountSummary{

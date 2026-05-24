@@ -401,7 +401,7 @@ func (b *Book) Mark(prices map[string]float64) {
 	defer b.mu.Unlock()
 
 	for _, pos := range b.positions {
-		if pos.Status != "open" || pos.Shadow {
+		if pos.Status != "open" {
 			continue
 		}
 
@@ -652,17 +652,21 @@ func (b *Book) recalculateLocked() {
 			continue
 		}
 
+		if pos.Shadow {
+			pos.UnrealizedPnL = positionUnrealizedPnL(pos)
+			continue
+		}
+
 		marketValue := positionNetMarketValue(pos)
 		grossValue := positionGrossExposure(pos)
 		if pos.Direction == model.Long {
 			totalEquityAdjustment += marketValue
 			b.netExposure += marketValue
-			pos.UnrealizedPnL = (pos.CurrentPrice - pos.EntryPrice) * pos.Quantity * pos.PrimaryInstrument().MultiplierValue()
 		} else {
 			totalEquityAdjustment -= marketValue
 			b.netExposure -= marketValue
-			pos.UnrealizedPnL = (pos.EntryPrice - pos.CurrentPrice) * pos.Quantity * pos.PrimaryInstrument().MultiplierValue()
 		}
+		pos.UnrealizedPnL = positionUnrealizedPnL(pos)
 		b.grossExposure += grossValue
 		totalUnrealized += pos.UnrealizedPnL
 	}
@@ -683,6 +687,17 @@ func (b *Book) recalculateLocked() {
 	}
 
 	_ = totalUnrealized
+}
+
+func positionUnrealizedPnL(pos *model.Position) float64 {
+	if pos == nil {
+		return 0
+	}
+	multiplier := pos.PrimaryInstrument().MultiplierValue()
+	if pos.Direction == model.Long {
+		return (pos.CurrentPrice - pos.EntryPrice) * pos.Quantity * multiplier
+	}
+	return (pos.EntryPrice - pos.CurrentPrice) * pos.Quantity * multiplier
 }
 
 func (b *Book) reconcile(ctx context.Context) {

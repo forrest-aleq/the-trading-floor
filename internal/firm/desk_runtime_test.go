@@ -218,11 +218,12 @@ func TestControlDeskSkipsEngramBoost(t *testing.T) {
 	)
 
 	engrams := memory.NewEngramStore()
+	regimeKey := model.Regime{Volatility: "medium", Trend: "neutral", Risk: "neutral", Liquidity: "normal"}.Key()
 	for i := 0; i < 8; i++ {
-		engrams.Record("macro_STK", "macro_medium_neutral_risk_on_normal", "macro", "", []string{"medium", "neutral", "risk_on"}, true, 2)
+		engrams.Record("macro_STK", "macro_"+regimeKey, "STK", "", []string{"medium", "neutral", "normal"}, true, 2)
 	}
 	for i := 0; i < 2; i++ {
-		engrams.Record("macro_STK", "macro_medium_neutral_risk_on_normal", "macro", "", []string{"medium", "neutral", "risk_on"}, false, -1)
+		engrams.Record("macro_STK", "macro_"+regimeKey, "STK", "", []string{"medium", "neutral", "normal"}, false, -1)
 	}
 
 	deskA, bookA, _ := newRuntimeDesk(t, "A", router, engrams, nil)

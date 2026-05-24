@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -52,6 +53,26 @@ func TestLoadMigrationFilesEmptyDirectory(t *testing.T) {
 	_, err := loadMigrationFiles(t.TempDir())
 	if err == nil {
 		t.Fatal("expected error for empty migration directory")
+	}
+}
+
+func TestPendingExecutionStatusUsesForwardMigration(t *testing.T) {
+	hardenPath := filepath.Join("..", "..", "store", "migrations", "002_harden.sql")
+	hardenRaw, err := os.ReadFile(hardenPath)
+	if err != nil {
+		t.Fatalf("read migration %s: %v", hardenPath, err)
+	}
+	if strings.Contains(string(hardenRaw), "pending_execution") {
+		t.Fatalf("expected historical migration %s to remain unchanged", hardenPath)
+	}
+
+	pendingPath := filepath.Join("..", "..", "store", "migrations", "009_pending_thesis_status.sql")
+	pendingRaw, err := os.ReadFile(pendingPath)
+	if err != nil {
+		t.Fatalf("read migration %s: %v", pendingPath, err)
+	}
+	if !strings.Contains(string(pendingRaw), "pending_execution") {
+		t.Fatalf("expected forward migration %s to allow pending_execution", pendingPath)
 	}
 }
 

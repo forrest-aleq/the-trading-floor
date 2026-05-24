@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"time"
 
 	"github.com/hnic/trading-floor/pkg/model"
 	"github.com/jackc/pgx/v5"
@@ -168,11 +170,15 @@ func (db *DB) UpsertThesis(ctx context.Context, thesis *model.Thesis) error {
 
 func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	row := db.Pool.QueryRow(ctx,
-		`SELECT instrument, direction, strategy, conviction, health, evidence, counter_args,
+		`SELECT opportunity_id, desk_id,
+		        instrument, direction, strategy, conviction, health, evidence, counter_args,
 		        structure, legs,
-		        entry_price, target_price, stop_loss, position_size, prosecution, council_verdict, status,
+		        entry_price, target_price, stop_loss, position_size,
+		        COALESCE(EXTRACT(EPOCH FROM time_horizon), 0)::double precision,
+		        kill_rules, prosecution, council_verdict, status,
 		        autonomy_mode, scan_territory, execution_territory, competence_key,
-		        competence_trust, competence_confidence, market_context, surprise_assessment, quant_metrics, domain
+		        competence_trust, competence_confidence, market_context, surprise_assessment, quant_metrics,
+		        outcome, created_at, resolved_at, domain
 		   FROM theses
 		  WHERE id = $1`,
 		id,
@@ -183,16 +189,23 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	var legs []byte
 	var evidence []byte
 	var counterArgs []byte
+	var killRules []byte
 	var prosecution []byte
 	var councilVerdict []byte
 	var marketContext []byte
 	var surpriseAssessment []byte
 	var quantMetrics []byte
+	var outcome []byte
 	var direction string
 	var status string
 	var autonomyMode string
+	var horizonSeconds float64
+	var createdAt sql.NullTime
+	var resolvedAt sql.NullTime
 
 	err := row.Scan(
+		&thesis.OpportunityID,
+		&thesis.DeskID,
 		&instrument,
 		&direction,
 		&thesis.Strategy,
@@ -206,6 +219,8 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 		&thesis.TargetPrice,
 		&thesis.StopLoss,
 		&thesis.PositionSize,
+		&horizonSeconds,
+		&killRules,
 		&prosecution,
 		&councilVerdict,
 		&status,
@@ -218,6 +233,9 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 		&marketContext,
 		&surpriseAssessment,
 		&quantMetrics,
+		&outcome,
+		&createdAt,
+		&resolvedAt,
 		&thesis.Domain,
 	)
 	if err != nil {
@@ -231,6 +249,15 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	thesis.Direction = model.TradeDirection(direction)
 	thesis.Status = model.ThesisStatus(status)
 	thesis.AutonomyMode = model.AutonomyMode(autonomyMode)
+	if horizonSeconds > 0 {
+		thesis.TimeHorizon = time.Duration(horizonSeconds * float64(time.Second))
+	}
+	if createdAt.Valid {
+		thesis.CreatedAt = createdAt.Time
+	}
+	if resolvedAt.Valid {
+		thesis.ResolvedAt = &resolvedAt.Time
+	}
 
 	if len(instrument) > 0 {
 		if err := json.Unmarshal(instrument, &thesis.Instrument); err != nil {
@@ -249,6 +276,11 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	}
 	if len(counterArgs) > 0 {
 		if err := json.Unmarshal(counterArgs, &thesis.CounterArgs); err != nil {
+			return nil, err
+		}
+	}
+	if len(killRules) > 0 {
+		if err := json.Unmarshal(killRules, &thesis.KillRules); err != nil {
 			return nil, err
 		}
 	}
@@ -274,6 +306,11 @@ func (db *DB) GetThesis(ctx context.Context, id string) (*model.Thesis, error) {
 	}
 	if len(quantMetrics) > 0 {
 		if err := json.Unmarshal(quantMetrics, &thesis.QuantMetrics); err != nil {
+			return nil, err
+		}
+	}
+	if len(outcome) > 0 {
+		if err := json.Unmarshal(outcome, &thesis.Outcome); err != nil {
 			return nil, err
 		}
 	}

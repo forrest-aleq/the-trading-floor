@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -143,6 +145,13 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 		riskExposure = thesis.QuantMetrics.MarginEstimate
 	}
 	positionPct := (riskExposure / deskCapital) * 100
+	if g.limits.MaxPositionSizePct > 0 && positionPct > g.limits.MaxPositionSizePct {
+		violations = append(violations, model.Violation{
+			Rule:    "max_position_size_pct",
+			Limit:   fmt.Sprintf("%.1f%%", g.limits.MaxPositionSizePct),
+			Current: fmt.Sprintf("%.1f%%", positionPct),
+		})
+	}
 	if positionPct > g.limits.MaxSinglePositionPct {
 		violations = append(violations, model.Violation{
 			Rule:    "max_single_position_pct",
@@ -413,8 +422,8 @@ func validateVerticalLegPair(lower, higher model.TradeLeg, right string) error {
 func (g *Gate) mintToken(order model.Order) *model.CapToken {
 	orderNotional := order.GrossNotional()
 	nonce := uuid.New().String()
-	data := fmt.Sprintf("%s:%s:%s:%.2f:%s",
-		order.DeskID, order.DisplaySymbol(), order.Direction, order.Quantity, nonce)
+	expiry := time.Now().UTC().Add(60 * time.Minute)
+	data := tokenSigningData(order, nonce, expiry)
 
 	mac := hmac.New(sha256.New, g.secret)
 	mac.Write([]byte(data))
@@ -429,9 +438,215 @@ func (g *Gate) mintToken(order model.Order) *model.CapToken {
 			"structure":    order.Structure,
 		},
 		DeskID:    order.DeskID,
-		Expiry:    time.Now().Add(60 * time.Minute),
+		Expiry:    expiry,
 		Nonce:     nonce,
 		Signature: sig,
+	}
+}
+
+// ValidateCapabilityToken verifies that a risk-issued token authorizes exactly
+// the order being submitted.
+func (g *Gate) ValidateCapabilityToken(token *model.CapToken, order model.Order) error {
+	return g.validateCapabilityTokenAt(token, order, time.Now().UTC())
+}
+
+func (g *Gate) validateCapabilityTokenAt(token *model.CapToken, order model.Order, now time.Time) error {
+	if g == nil {
+		return fmt.Errorf("risk gate unavailable")
+	}
+	if token == nil {
+		return fmt.Errorf("missing capability token")
+	}
+	if strings.TrimSpace(token.Nonce) == "" {
+		return fmt.Errorf("missing token nonce")
+	}
+	if strings.TrimSpace(token.Signature) == "" {
+		return fmt.Errorf("missing token signature")
+	}
+	if token.Expiry.IsZero() {
+		return fmt.Errorf("missing token expiry")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if !now.Before(token.Expiry.UTC()) {
+		return fmt.Errorf("capability token expired")
+	}
+	if token.DeskID != order.DeskID {
+		return fmt.Errorf("token desk %q does not match order desk %q", token.DeskID, order.DeskID)
+	}
+	if token.Capability != order.ExecutionCapability() {
+		return fmt.Errorf("token capability %q does not match order capability %q", token.Capability, order.ExecutionCapability())
+	}
+
+	expectedSignature, err := g.tokenSignature(order, token.Nonce, token.Expiry.UTC())
+	if err != nil {
+		return err
+	}
+	providedSignature, err := hex.DecodeString(token.Signature)
+	if err != nil {
+		return fmt.Errorf("decode token signature: %w", err)
+	}
+	if !hmac.Equal(providedSignature, expectedSignature) {
+		return fmt.Errorf("capability token signature mismatch")
+	}
+
+	if err := validateTokenConstraints(token, order); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *Gate) tokenSignature(order model.Order, nonce string, expiry time.Time) ([]byte, error) {
+	if g == nil || len(g.secret) == 0 {
+		return nil, fmt.Errorf("risk token secret unavailable")
+	}
+	mac := hmac.New(sha256.New, g.secret)
+	mac.Write([]byte(tokenSigningData(order, nonce, expiry.UTC())))
+	return mac.Sum(nil), nil
+}
+
+func tokenSigningData(order model.Order, nonce string, expiry time.Time) string {
+	payload := signedCapabilityOrder{
+		ID:                  order.ID,
+		ThesisID:            order.ThesisID,
+		DeskID:              order.DeskID,
+		DisplaySymbol:       order.DisplaySymbol(),
+		ExecutionCapability: order.ExecutionCapability(),
+		Structure:           order.Structure,
+		InstrumentKey:       order.Instrument.Key(),
+		Legs:                signedCapabilityLegs(order.Legs),
+		Direction:           order.Direction,
+		Quantity:            order.Quantity,
+		OrderType:           order.OrderType,
+		LimitPrice:          order.LimitPrice,
+		StopPrice:           order.StopPrice,
+		TimeInForce:         order.TimeInForce,
+		Notional:            order.Notional,
+		GrossNotional:       order.GrossNotional(),
+		ExpiryUnixNano:      expiry.UTC().UnixNano(),
+		Nonce:               nonce,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Sprintf("%s:%d:%s", order.ID, expiry.UTC().UnixNano(), nonce)
+	}
+	return string(data)
+}
+
+func validateTokenConstraints(token *model.CapToken, order model.Order) error {
+	if token == nil {
+		return fmt.Errorf("missing capability token")
+	}
+	if symbol, ok := constraintString(token.Constraints, "symbol"); ok && symbol != order.DisplaySymbol() {
+		return fmt.Errorf("token symbol %q does not match order symbol %q", symbol, order.DisplaySymbol())
+	}
+	if structure, ok := constraintString(token.Constraints, "structure"); ok && structure != order.Structure {
+		return fmt.Errorf("token structure %q does not match order structure %q", structure, order.Structure)
+	}
+	if maxQty, ok := constraintFloat(token.Constraints, "max_qty"); ok && order.Quantity > maxQty+1e-9 {
+		return fmt.Errorf("order quantity %.8f exceeds token max %.8f", order.Quantity, maxQty)
+	}
+	if maxNotional, ok := constraintFloat(token.Constraints, "max_notional"); ok && order.GrossNotional() > maxNotional+1e-6 {
+		return fmt.Errorf("order notional %.8f exceeds token max %.8f", order.GrossNotional(), maxNotional)
+	}
+	return nil
+}
+
+type signedCapabilityOrder struct {
+	ID                  string                `json:"id"`
+	ThesisID            string                `json:"thesis_id"`
+	DeskID              string                `json:"desk_id"`
+	DisplaySymbol       string                `json:"display_symbol"`
+	ExecutionCapability string                `json:"execution_capability"`
+	Structure           string                `json:"structure"`
+	InstrumentKey       string                `json:"instrument_key"`
+	Legs                []signedCapabilityLeg `json:"legs,omitempty"`
+	Direction           model.TradeDirection  `json:"direction"`
+	Quantity            float64               `json:"quantity"`
+	OrderType           model.OrderType       `json:"order_type"`
+	LimitPrice          float64               `json:"limit_price"`
+	StopPrice           float64               `json:"stop_price"`
+	TimeInForce         string                `json:"time_in_force"`
+	Notional            float64               `json:"notional"`
+	GrossNotional       float64               `json:"gross_notional"`
+	ExpiryUnixNano      int64                 `json:"expiry_unix_nano"`
+	Nonce               string                `json:"nonce"`
+}
+
+type signedCapabilityLeg struct {
+	InstrumentKey string               `json:"instrument_key"`
+	Direction     model.TradeDirection `json:"direction"`
+	Ratio         float64              `json:"ratio"`
+	Quantity      float64              `json:"quantity"`
+	EntryPrice    float64              `json:"entry_price"`
+	CurrentPrice  float64              `json:"current_price"`
+	TargetPrice   float64              `json:"target_price"`
+	StopLoss      float64              `json:"stop_loss"`
+}
+
+func signedCapabilityLegs(legs []model.TradeLeg) []signedCapabilityLeg {
+	if len(legs) == 0 {
+		return nil
+	}
+	signed := make([]signedCapabilityLeg, 0, len(legs))
+	for _, leg := range legs {
+		signed = append(signed, signedCapabilityLeg{
+			InstrumentKey: leg.Instrument.Key(),
+			Direction:     leg.Direction,
+			Ratio:         leg.Ratio,
+			Quantity:      leg.Quantity,
+			EntryPrice:    leg.EntryPrice,
+			CurrentPrice:  leg.CurrentPrice,
+			TargetPrice:   leg.TargetPrice,
+			StopLoss:      leg.StopLoss,
+		})
+	}
+	return signed
+}
+
+func constraintString(values map[string]interface{}, key string) (string, bool) {
+	if len(values) == 0 {
+		return "", false
+	}
+	raw, ok := values[key]
+	if !ok || raw == nil {
+		return "", false
+	}
+	switch value := raw.(type) {
+	case string:
+		return value, true
+	default:
+		return fmt.Sprint(value), true
+	}
+}
+
+func constraintFloat(values map[string]interface{}, key string) (float64, bool) {
+	if len(values) == 0 {
+		return 0, false
+	}
+	raw, ok := values[key]
+	if !ok || raw == nil {
+		return 0, false
+	}
+	switch value := raw.(type) {
+	case float64:
+		return value, true
+	case float32:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case json.Number:
+		parsed, err := value.Float64()
+		return parsed, err == nil
+	default:
+		var parsed float64
+		if _, err := fmt.Sscan(fmt.Sprint(value), &parsed); err == nil && !math.IsNaN(parsed) {
+			return parsed, true
+		}
+		return 0, false
 	}
 }
 

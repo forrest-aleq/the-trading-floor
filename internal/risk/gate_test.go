@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hnic/trading-floor/pkg/evidence"
 	"github.com/hnic/trading-floor/pkg/model"
@@ -27,6 +28,55 @@ func TestLoadTokenSecretGeneratesEphemeralSecretWhenUnset(t *testing.T) {
 	secret := loadTokenSecret(slog.Default())
 	if len(secret) < 32 {
 		t.Fatalf("expected generated secret to be at least 32 bytes, got %d", len(secret))
+	}
+}
+
+func TestCapabilityTokenValidatesExactOrder(t *testing.T) {
+	t.Setenv("RISK_TOKEN_SECRET", strings.Repeat("x", 32))
+
+	gate := NewGate(DefaultLimits())
+	order := model.Order{
+		ID:         "order-token",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Direction:  model.Long,
+		Quantity:   5,
+		LimitPrice: 100,
+		Notional:   500,
+	}
+	thesis := &model.Thesis{Conviction: 0.9}
+	portfolio := PortfolioState{
+		NAV:           100000,
+		Cash:          100000,
+		DeskPositions: map[string]int{},
+		DeskDailyPnL:  map[string]float64{},
+		DeskCapital:   map[string]float64{"desk-a": 25000},
+	}
+
+	decision := gate.Check(order, thesis, portfolio)
+	if !decision.Allowed || decision.Token == nil || decision.AdjustedOrder == nil {
+		t.Fatalf("expected allowed decision with token, got %+v", decision)
+	}
+	if err := gate.ValidateCapabilityToken(decision.Token, *decision.AdjustedOrder); err != nil {
+		t.Fatalf("expected token to validate: %v", err)
+	}
+
+	tampered := *decision.AdjustedOrder
+	tampered.Quantity++
+	if err := gate.ValidateCapabilityToken(decision.Token, tampered); err == nil {
+		t.Fatal("expected modified order to fail token validation")
+	}
+
+	priceTampered := *decision.AdjustedOrder
+	priceTampered.LimitPrice++
+	if err := gate.ValidateCapabilityToken(decision.Token, priceTampered); err == nil {
+		t.Fatal("expected modified limit price to fail token validation")
+	}
+
+	expired := *decision.Token
+	expired.Expiry = time.Now().UTC().Add(-time.Second)
+	if err := gate.ValidateCapabilityToken(&expired, *decision.AdjustedOrder); err == nil {
+		t.Fatal("expected expired token to fail validation")
 	}
 }
 
@@ -118,6 +168,46 @@ func TestGateRejectsStaleQuoteAge(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected stale_quote violation, got %+v", decision.Violations)
+	}
+}
+
+func TestGateRejectsMaxPositionSizePct(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxPositionSizePct = 5
+	limits.MaxSinglePositionPct = 20
+	gate := NewGate(limits)
+
+	order := model.Order{
+		ID:         "order-position-size",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Direction:  model.Long,
+		Quantity:   20,
+		LimitPrice: 100,
+		Notional:   2000,
+	}
+	thesis := &model.Thesis{Conviction: 0.9}
+	portfolio := PortfolioState{
+		NAV:           100000,
+		Cash:          100000,
+		DeskPositions: map[string]int{},
+		DeskDailyPnL:  map[string]float64{},
+		DeskCapital:   map[string]float64{"desk-a": 25000},
+	}
+
+	decision := gate.Check(order, thesis, portfolio)
+	if decision.Allowed {
+		t.Fatal("expected oversized per-trade position to be rejected")
+	}
+	found := false
+	for _, violation := range decision.Violations {
+		if violation.Rule == "max_position_size_pct" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected max_position_size_pct violation, got %+v", decision.Violations)
 	}
 }
 

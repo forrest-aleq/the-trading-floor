@@ -60,6 +60,47 @@ func TestAssessTerritory(t *testing.T) {
 	}
 }
 
+func TestDropAutonomyOnlyDemotesRequestedRegime(t *testing.T) {
+	graph := NewGraph()
+	targetRegime := "medium:neutral:risk_on:normal"
+	otherRegime := "high:neutral:risk_off:stressed"
+	graph.Load([]*model.CompetenceState{
+		{
+			Key:          CompetenceKey("desk-a", "macro", "STK", targetRegime),
+			DeskID:       "desk-a",
+			Capability:   "macro",
+			Context:      "STK",
+			Regime:       targetRegime,
+			Trust:        0.88,
+			Confidence:   0.78,
+			SuccessCount: 40,
+			Autonomy:     model.Autonomous,
+		},
+		{
+			Key:          CompetenceKey("desk-a", "macro", "STK", otherRegime),
+			DeskID:       "desk-a",
+			Capability:   "macro",
+			Context:      "STK",
+			Regime:       otherRegime,
+			Trust:        0.88,
+			Confidence:   0.78,
+			SuccessCount: 40,
+			Autonomy:     model.Autonomous,
+		},
+	})
+
+	graph.DropAutonomy(targetRegime)
+
+	target, _ := graph.Lookup("desk-a", "macro", "STK", targetRegime)
+	if target.Autonomy != model.Supervised {
+		t.Fatalf("expected target regime to be demoted, got %+v", target)
+	}
+	other, _ := graph.Lookup("desk-a", "macro", "STK", otherRegime)
+	if other.Autonomy != model.Autonomous {
+		t.Fatalf("expected other regime to remain autonomous, got %+v", other)
+	}
+}
+
 func TestPeerBeliefUpdates(t *testing.T) {
 	graph := NewGraph()
 	regime := model.Regime{

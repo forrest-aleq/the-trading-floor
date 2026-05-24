@@ -719,11 +719,19 @@ func (g *Graph) DropAutonomy(regime string) {
 	g.mu.Lock()
 	changed := make([]*model.CompetenceState, 0)
 	for key, state := range g.states {
+		stateRegime := state.Regime
+		if stateRegime == "" {
+			_, _, _, stateRegime = ParseCompetenceKey(key)
+		}
+		if strings.TrimSpace(regime) != "" && stateRegime != regime {
+			continue
+		}
 		if state.Autonomy == model.Autonomous {
 			state.Autonomy = model.Supervised
 			g.log.Warn("autonomy dropped due to regime shift",
 				"key", key,
 				"regime", regime,
+				"state_regime", stateRegime,
 			)
 			changed = append(changed, cloneState(state))
 		}

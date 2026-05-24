@@ -2,6 +2,8 @@ package memory
 
 import (
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,11 +87,9 @@ func (s *EngramStore) Record(intentKey, contextPattern, capability, deskID strin
 		layer = 2
 	}
 
-	// Find existing engram matching this pattern
-	lookupKey := intentKey + "::" + deskID
 	var engram *Engram
 	for _, e := range s.byKey[intentKey] {
-		if e.DeskID == deskID && e.Capability == capability {
+		if sameEngramPattern(e, contextPattern, capability, deskID) {
 			engram = e
 			break
 		}
@@ -108,7 +108,6 @@ func (s *EngramStore) Record(intentKey, contextPattern, capability, deskID strin
 		}
 		s.engrams[engram.ID] = engram
 		s.byKey[intentKey] = append(s.byKey[intentKey], engram)
-		_ = lookupKey // suppress unused
 	}
 
 	if profitable {
@@ -143,6 +142,15 @@ func (s *EngramStore) Record(intentKey, contextPattern, capability, deskID strin
 	}
 }
 
+func sameEngramPattern(engram *Engram, contextPattern, capability, deskID string) bool {
+	if engram == nil {
+		return false
+	}
+	return engram.DeskID == deskID &&
+		engram.Capability == capability &&
+		strings.EqualFold(strings.TrimSpace(engram.ContextPattern), strings.TrimSpace(contextPattern))
+}
+
 // Lookup returns engrams matching an intent key, prioritizing desk-specific (Layer 2)
 // while still falling back to global (Layer 1) playbooks when available.
 func (s *EngramStore) Lookup(intentKey, deskID string) []*Engram {
@@ -172,6 +180,58 @@ func (s *EngramStore) Lookup(intentKey, deskID string) []*Engram {
 	combined = append(combined, deskEngrams...)
 	combined = append(combined, globalEngrams...)
 	return combined
+}
+
+func (s *EngramStore) LookupContext(intentKey, deskID string, contextPatterns ...string) []*Engram {
+	if len(contextPatterns) == 0 {
+		return s.Lookup(intentKey, deskID)
+	}
+	wanted := make(map[string]struct{}, len(contextPatterns))
+	for _, pattern := range contextPatterns {
+		pattern = normalizeEngramPattern(pattern)
+		if pattern != "" {
+			wanted[pattern] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return s.Lookup(intentKey, deskID)
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var deskEngrams, globalEngrams []*Engram
+	for _, e := range s.byKey[intentKey] {
+		if e == nil {
+			continue
+		}
+		if _, ok := wanted[normalizeEngramPattern(e.ContextPattern)]; !ok {
+			continue
+		}
+		switch {
+		case e.DeskID == deskID:
+			deskEngrams = append(deskEngrams, e)
+		case e.Layer == 1:
+			globalEngrams = append(globalEngrams, e)
+		}
+	}
+	sort.SliceStable(deskEngrams, func(i, j int) bool {
+		return deskEngrams[i].UpdatedAt.After(deskEngrams[j].UpdatedAt)
+	})
+	sort.SliceStable(globalEngrams, func(i, j int) bool {
+		return globalEngrams[i].UpdatedAt.After(globalEngrams[j].UpdatedAt)
+	})
+	if len(deskEngrams) == 0 {
+		return globalEngrams
+	}
+	combined := make([]*Engram, 0, len(deskEngrams)+len(globalEngrams))
+	combined = append(combined, deskEngrams...)
+	combined = append(combined, globalEngrams...)
+	return combined
+}
+
+func normalizeEngramPattern(pattern string) string {
+	return strings.ToLower(strings.TrimSpace(pattern))
 }
 
 // All returns all engrams.

@@ -267,7 +267,13 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	// Engram lookup: boost conviction if we have a cached winning play for this pattern
 	if d.ABGroup == "A" && d.engrams != nil {
 		intentKey := thesis.Strategy + "_" + thesis.ExecutionCapability()
-		engrams := d.engrams.Lookup(intentKey, d.ID)
+		regimeKey := d.regime.Key()
+		engrams := d.engrams.LookupContext(
+			intentKey,
+			d.ID,
+			thesis.DisplaySymbol()+"_"+regimeKey,
+			thesis.Strategy+"_"+regimeKey,
+		)
 		for _, eg := range engrams {
 			if eg.TotalObservations() >= 5 && eg.WinRate() > 0.6 {
 				boost := (eg.WinRate() - 0.5) * 0.1 // max +0.05 boost

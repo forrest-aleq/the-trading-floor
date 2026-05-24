@@ -68,6 +68,29 @@ func TestLearnWorkerRecordsGlobalAndDeskEngrams(t *testing.T) {
 	}
 }
 
+func TestEngramStoreSeparatesContextPatterns(t *testing.T) {
+	store := NewEngramStore()
+	store.Record("macro_STK", "TLT_medium:neutral:risk_on:normal", "macro", "desk-a", []string{"medium"}, true, 1.2)
+	store.Record("macro_STK", "SPY_medium:neutral:risk_on:normal", "macro", "desk-a", []string{"medium"}, false, -0.8)
+	store.Record("macro_STK", "macro_medium:neutral:risk_on:normal", "macro", "", []string{"medium"}, true, 0.5)
+
+	stats := store.Stats()
+	if stats.Total != 3 {
+		t.Fatalf("expected separate engrams for separate context patterns, got %+v", stats)
+	}
+
+	matched := store.LookupContext("macro_STK", "desk-a", "TLT_medium:neutral:risk_on:normal", "macro_medium:neutral:risk_on:normal")
+	if len(matched) != 2 {
+		t.Fatalf("expected TLT desk engram plus matching global engram, got %d", len(matched))
+	}
+	if matched[0].ContextPattern != "TLT_medium:neutral:risk_on:normal" {
+		t.Fatalf("expected desk-specific TLT engram first, got %+v", matched[0])
+	}
+	if matched[1].Layer != 1 {
+		t.Fatalf("expected matching global engram second, got %+v", matched[1])
+	}
+}
+
 func TestLearnWorkerUsesAttributionDimensions(t *testing.T) {
 	graph := belief.NewGraph()
 	worker := NewLearnWorker(graph, nil)

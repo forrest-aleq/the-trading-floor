@@ -1,6 +1,7 @@
 package firm
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -82,6 +83,48 @@ func TestCEOCrowdedFactorPenaltiesReduceCrowdedDeskWeights(t *testing.T) {
 	}
 	if macroCapital != tailCapital {
 		t.Fatalf("expected crowded desks to receive equal capital, got macro %.2f tail %.2f", macroCapital, tailCapital)
+	}
+}
+
+func TestCEOKillSwitchDisablesGlobalEntryControl(t *testing.T) {
+	bk := book.NewBook(nil, 1_000_000)
+	control := NewManualEntryControl(NormalEntryPolicy(time.Now().UTC()))
+	ceo := NewCEO(bk, nil, nil)
+	ceo.SetEntryControl(control)
+
+	openTestPosition(t, bk, "desk-macro-a", "drawdown-spy", "SPY", model.Long, 2000, 100)
+	bk.Mark(map[string]float64{"SPY": 10})
+
+	ceo.evaluate(context.Background())
+
+	policy := control.CurrentEntryPolicy()
+	if policy.AllowEntries {
+		t.Fatalf("expected kill switch to disable entries, got %+v", policy)
+	}
+	if policy.Reason != "ceo_kill_switch" {
+		t.Fatalf("expected ceo_kill_switch reason, got %+v", policy)
+	}
+}
+
+func TestCEOKillSwitchReappliesAfterManualEnable(t *testing.T) {
+	bk := book.NewBook(nil, 1_000_000)
+	control := NewManualEntryControl(NormalEntryPolicy(time.Now().UTC()))
+	ceo := NewCEO(bk, nil, nil)
+	ceo.SetEntryControl(control)
+
+	openTestPosition(t, bk, "desk-macro-a", "drawdown-tlt", "TLT", model.Long, 2000, 100)
+	bk.Mark(map[string]float64{"TLT": 10})
+
+	ceo.evaluate(context.Background())
+	control.Enable(time.Now().UTC())
+	ceo.evaluate(context.Background())
+
+	policy := control.CurrentEntryPolicy()
+	if policy.AllowEntries {
+		t.Fatalf("expected kill switch to re-disable entries, got %+v", policy)
+	}
+	if policy.Reason != "ceo_kill_switch" {
+		t.Fatalf("expected ceo_kill_switch reason, got %+v", policy)
 	}
 }
 

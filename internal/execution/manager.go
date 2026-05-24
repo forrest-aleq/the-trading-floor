@@ -29,6 +29,10 @@ type OrderJournal interface {
 	LoadWorkingOrders(context.Context) ([]PersistedOrder, error)
 }
 
+type CapabilityTokenValidator interface {
+	ValidateCapabilityToken(*model.CapToken, model.Order) error
+}
+
 type PersistedOrder struct {
 	Order    model.Order
 	Snapshot OrderSnapshot
@@ -40,6 +44,7 @@ type Manager struct {
 	ibkr    Broker
 	log     *slog.Logger
 	journal OrderJournal
+	token   CapabilityTokenValidator
 
 	mu               sync.Mutex
 	submitted        map[string]cachedFill
@@ -66,6 +71,13 @@ func NewManagerWithJournal(ibkrClient Broker, journal OrderJournal) *Manager {
 		submittedTTL:    24 * time.Hour,
 		cleanupInterval: 15 * time.Minute,
 	}
+}
+
+func (m *Manager) SetTokenValidator(validator CapabilityTokenValidator) {
+	if m == nil {
+		return
+	}
+	m.token = validator
 }
 
 func (m *Manager) HydrateWorkingOrders(ctx context.Context) error {
@@ -138,9 +150,8 @@ func (e *PendingFillError) Unwrap() error {
 // Submit places an order through IBKR
 func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model.Order) (*model.Fill, error) {
 	return m.submitOnce(ctx, order.ID, func() (*model.Fill, error) {
-		// Validate capability token
-		if token == nil {
-			return nil, fmt.Errorf("missing capability token")
+		if err := m.validateCapabilityToken(token, order); err != nil {
+			return nil, err
 		}
 
 		// Validate connection
@@ -188,6 +199,19 @@ func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model
 
 		return fill, nil
 	})
+}
+
+func (m *Manager) validateCapabilityToken(token *model.CapToken, order model.Order) error {
+	if token == nil {
+		return fmt.Errorf("missing capability token")
+	}
+	if m == nil || m.token == nil {
+		return nil
+	}
+	if err := m.token.ValidateCapabilityToken(token, order); err != nil {
+		return fmt.Errorf("invalid capability token: %w", err)
+	}
+	return nil
 }
 
 // SubmitExit closes an existing position. Exits intentionally bypass capability tokens:

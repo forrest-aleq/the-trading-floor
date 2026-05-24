@@ -61,6 +61,10 @@ func validateLimits(limits Limits) error {
 		return fmt.Errorf("max_open_positions must be positive")
 	case limits.CapitalPerDesk <= 0:
 		return fmt.Errorf("capital_per_desk must be positive")
+	case limits.MaxPositionSizePct <= 0:
+		return fmt.Errorf("max_position_size_pct must be positive")
+	case limits.MaxPositionSizePct > limits.MaxSinglePositionPct:
+		return fmt.Errorf("max_position_size_pct must not exceed max_single_position_pct")
 	case limits.MinConvictionScore <= 0 || limits.MinConvictionScore > 1:
 		return fmt.Errorf("min_conviction_score must be within (0,1]")
 	case limits.MaxQuoteAgeSeconds < 0:

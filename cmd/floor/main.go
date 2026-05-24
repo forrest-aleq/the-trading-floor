@@ -269,6 +269,7 @@ func main() {
 
 	// --- Shared Services ---
 	riskGate := risk.NewGate(risk.DefaultLimits())
+	execMgr.SetTokenValidator(riskGate)
 	beliefGraph := belief.NewGraph()
 	engramStore := memory.NewEngramStore()
 	slog.Info("shared memory services initialized")
@@ -452,7 +453,8 @@ func main() {
 		"desks":          len(desks),
 	})
 
-	var entryControl firm.EntryControl
+	globalEntryControl := firm.NewManualEntryControl(firm.NormalEntryPolicy(time.Now().UTC()))
+	var brokerEntryControl firm.EntryControl
 	if brokerExecutionRequired && (runtimeMode != runtimeModeDev || marketState.Provider != nil) {
 		defaultMaxQuoteAge := 2 * time.Minute
 		if strings.HasPrefix(marketStateLabel, "massive_free+") {
@@ -483,7 +485,7 @@ func main() {
 				})
 			},
 		})
-		entryControl = health
+		brokerEntryControl = health
 		health.EvaluateNow(time.Now().UTC())
 		observe.SafeGo(slog.Default().With("component", "runtime"), "runtime health loop panic", func() {
 			health.Run(ctx)
@@ -533,7 +535,7 @@ func main() {
 			OnTrade:       floor.RecordTrade,
 			Watchlist:     mdMgr.AddInstruments,
 			PublishSignal: wireMgr.Publish,
-			EntryControl:  entryControlForDesk(d, entryControl),
+			EntryControl:  entryControlForDesk(d, globalEntryControl, brokerEntryControl),
 		})
 		desksByID[d.id] = desk
 		floor.AddDesk(desk)
@@ -743,6 +745,7 @@ func main() {
 	}
 	ceo := firm.NewCEO(bk, beliefGraph, floor)
 	ceo.SetDesks(allDesks)
+	ceo.SetEntryControl(globalEntryControl)
 	observe.SafeGo(slog.Default().With("component", "runtime"), "ceo loop panic", func() {
 		ceo.Run(ctx)
 	}, "task", "ceo")
@@ -1084,11 +1087,11 @@ func desksRequireBrokerExecution(desks []deskDef) bool {
 	return false
 }
 
-func entryControlForDesk(d deskDef, brokerControl firm.EntryControl) firm.EntryControl {
+func entryControlForDesk(d deskDef, globalControl firm.EntryControl, brokerControl firm.EntryControl) firm.EntryControl {
 	if deskUsesKalshiExecution(d) {
-		return nil
+		return globalControl
 	}
-	return brokerControl
+	return firm.NewCombinedEntryControl(globalControl, brokerControl)
 }
 
 func filterDeskConfig(desks []deskDef, rawAllowlist string) ([]deskDef, error) {

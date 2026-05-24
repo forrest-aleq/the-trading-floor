@@ -50,6 +50,7 @@ type Executor struct {
 	mode        ExecutionMode
 	journalPath string
 	log         *slog.Logger
+	safety      *liveSafetyGuard
 }
 
 type ExecutionResult struct {
@@ -57,6 +58,7 @@ type ExecutionResult struct {
 	DryRun      bool           `json:"dry_run"`
 	MappedOrder MappedOrder    `json:"mapped_order"`
 	Response    *OrderResponse `json:"response,omitempty"`
+	Error       string         `json:"error,omitempty"`
 	RecordedAt  time.Time      `json:"recorded_at"`
 }
 
@@ -95,6 +97,7 @@ func NewExecutor(client *Client, mapper *Mapper, mode ExecutionMode, journalPath
 		mode:        mode,
 		journalPath: journalPath,
 		log:         slog.Default().With("component", "kalshi-execution"),
+		safety:      newLiveSafetyGuardFromEnv(),
 	}
 }
 
@@ -169,12 +172,33 @@ func (e *Executor) SubmitThesis(ctx context.Context, thesis *model.Thesis) (*Exe
 
 	if e.mode == ExecutionLive {
 		if e.client == nil {
-			return nil, fmt.Errorf("nil kalshi client")
+			err := fmt.Errorf("nil kalshi client")
+			result.Error = err.Error()
+			_ = e.record(result, err)
+			return result, err
+		}
+		if !e.client.liveTrading {
+			err := fmt.Errorf("kalshi live trading disabled; set KALSHI_LIVE_TRADING=true")
+			result.Error = err.Error()
+			_ = e.record(result, err)
+			return result, err
+		}
+		if e.client.liveConfirm != LiveConfirmation {
+			err := fmt.Errorf("kalshi live confirmation missing; set KALSHI_LIVE_CONFIRM=%s", LiveConfirmation)
+			result.Error = err.Error()
+			_ = e.record(result, err)
+			return result, err
+		}
+		if err := e.safety.reserve(mapped, result.RecordedAt); err != nil {
+			result.Error = err.Error()
+			_ = e.record(result, err)
+			return result, err
 		}
 		resp, err := e.client.CreateOrder(ctx, mapped.Request)
 		if err != nil {
+			result.Error = err.Error()
 			_ = e.record(result, err)
-			return nil, err
+			return result, err
 		}
 		result.Response = resp
 	}
@@ -197,6 +221,9 @@ func (e *Executor) record(result *ExecutionResult, submitErr error) error {
 	}
 	if result.Response != nil {
 		entry["response"] = result.Response
+	}
+	if result.Error != "" {
+		entry["error"] = result.Error
 	}
 	if submitErr != nil {
 		entry["error"] = submitErr.Error()

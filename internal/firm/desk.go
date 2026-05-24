@@ -605,6 +605,9 @@ func (d *Desk) handleKalshiThesis(ctx context.Context, thesis *model.Thesis, aut
 	defer cancel()
 	result, err := d.kalshi.SubmitThesis(executionCtx, thesis)
 	if err != nil {
+		if result != nil {
+			d.persistKalshiOrder(ctx, thesis, result)
+		}
 		d.log.Warn("kalshi thesis mapping/execution failed",
 			"thesis_id", thesis.ID,
 			"symbol", thesis.DisplaySymbol(),
@@ -720,7 +723,11 @@ func kalshiPersistedOrder(thesis *model.Thesis, result *kalshiexec.ExecutionResu
 	state := kalshiOrderState(result, filled, remaining)
 	brokerStatus := kalshiOrderStatus(result.Response)
 	if brokerStatus == "" {
-		brokerStatus = string(result.Mode)
+		if strings.TrimSpace(result.Error) != "" {
+			brokerStatus = "failed"
+		} else {
+			brokerStatus = string(result.Mode)
+		}
 	}
 	notional := float64(result.MappedOrder.EstimatedRiskCents) / 100.0
 	if notional <= 0 {
@@ -767,6 +774,9 @@ func kalshiPersistedOrder(thesis *model.Thesis, result *kalshiexec.ExecutionResu
 	}
 	if result.Response != nil {
 		snapshot.VenueOrderID = strings.TrimSpace(result.Response.OrderID)
+	}
+	if result.Error != "" {
+		snapshot.LastError = result.Error
 	}
 	if filled > 0 {
 		snapshot.AvgFillPrice = price

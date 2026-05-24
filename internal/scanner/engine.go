@@ -61,20 +61,24 @@ type Evaluation struct {
 }
 
 var (
-	scannerRequestTimeout         = readDurationEnv("SCANNER_REQUEST_TIMEOUT", 15*time.Second)
-	scannerMaxTokens              = readIntEnv("SCANNER_MAX_TOKENS", 128)
-	scannerCompactMaxTokens       = readIntEnv("SCANNER_COMPACT_MAX_TOKENS", 96)
-	scannerThinkingRequestTimeout = readDurationEnv("SCANNER_THINKING_REQUEST_TIMEOUT", 12*time.Second)
-	scannerThinkingMaxTokens      = readIntEnv("SCANNER_THINKING_MAX_TOKENS", 128)
-	scannerThinkingCompactTokens  = readIntEnv("SCANNER_THINKING_COMPACT_MAX_TOKENS", 96)
-	scannerCompilerTimeout        = readDurationEnv("SCANNER_COMPILER_TIMEOUT", 15*time.Second)
-	scannerCompilerMaxTokens      = readIntEnv("SCANNER_COMPILER_MAX_TOKENS", 128)
-	scannerContentLimit           = readIntEnv("SCANNER_CONTENT_LIMIT", 500)
-	scannerCompactContentMax      = readIntEnv("SCANNER_COMPACT_CONTENT_LIMIT", 220)
-	scannerStaleSignalAge         = readDurationEnv("SCANNER_STALE_SIGNAL_AGE", 6*time.Hour)
-	scannerLLMCooldown            = readDurationEnv("SCANNER_LLM_UNAVAILABLE_COOLDOWN", 20*time.Second)
-	scannerEvalCacheTTL           = readDurationEnv("SCANNER_EVAL_CACHE_TTL", 10*time.Minute)
-	scannerErrorCacheTTL          = readDurationEnv("SCANNER_ERROR_CACHE_TTL", 30*time.Second)
+	scannerRequestTimeout               = readDurationEnv("SCANNER_REQUEST_TIMEOUT", 15*time.Second)
+	scannerMaxTokens                    = readIntEnv("SCANNER_MAX_TOKENS", 128)
+	scannerCompactMaxTokens             = readIntEnv("SCANNER_COMPACT_MAX_TOKENS", 96)
+	scannerThinkingRequestTimeout       = readDurationEnv("SCANNER_THINKING_REQUEST_TIMEOUT", 12*time.Second)
+	scannerThinkingMaxTokens            = readIntEnv("SCANNER_THINKING_MAX_TOKENS", 128)
+	scannerThinkingCompactTokens        = readIntEnv("SCANNER_THINKING_COMPACT_MAX_TOKENS", 96)
+	scannerCompilerTimeout              = readDurationEnv("SCANNER_COMPILER_TIMEOUT", 15*time.Second)
+	scannerCompilerMaxTokens            = readIntEnv("SCANNER_COMPILER_MAX_TOKENS", 128)
+	scannerContentLimit                 = readIntEnv("SCANNER_CONTENT_LIMIT", 500)
+	scannerCompactContentMax            = readIntEnv("SCANNER_COMPACT_CONTENT_LIMIT", 220)
+	scannerStaleSignalAge               = readDurationEnv("SCANNER_STALE_SIGNAL_AGE", 6*time.Hour)
+	scannerLLMCooldown                  = readDurationEnv("SCANNER_LLM_UNAVAILABLE_COOLDOWN", 20*time.Second)
+	scannerEvalCacheTTL                 = readDurationEnv("SCANNER_EVAL_CACHE_TTL", 10*time.Minute)
+	scannerErrorCacheTTL                = readDurationEnv("SCANNER_ERROR_CACHE_TTL", 30*time.Second)
+	kalshiMarketDiscoveryEnabled        = readBoolEnv("KALSHI_MARKET_DISCOVERY_ENABLED", false)
+	kalshiMarketDiscoveryScore          = readFloatEnv("KALSHI_MARKET_DISCOVERY_SCORE", 58)
+	kalshiMarketDiscoveryMaxSpread      = readFloatEnv("KALSHI_MARKET_DISCOVERY_MAX_SPREAD", 0.20)
+	kalshiMarketDiscoveryBuyCheaperSide = readBoolEnv("KALSHI_MARKET_DISCOVERY_BUY_CHEAPER_SIDE", true)
 )
 
 func ReloadRuntimeConfig() {
@@ -92,6 +96,10 @@ func ReloadRuntimeConfig() {
 	scannerLLMCooldown = readDurationEnv("SCANNER_LLM_UNAVAILABLE_COOLDOWN", 20*time.Second)
 	scannerEvalCacheTTL = readDurationEnv("SCANNER_EVAL_CACHE_TTL", 10*time.Minute)
 	scannerErrorCacheTTL = readDurationEnv("SCANNER_ERROR_CACHE_TTL", 30*time.Second)
+	kalshiMarketDiscoveryEnabled = readBoolEnv("KALSHI_MARKET_DISCOVERY_ENABLED", false)
+	kalshiMarketDiscoveryScore = readFloatEnv("KALSHI_MARKET_DISCOVERY_SCORE", 58)
+	kalshiMarketDiscoveryMaxSpread = readFloatEnv("KALSHI_MARKET_DISCOVERY_MAX_SPREAD", 0.20)
+	kalshiMarketDiscoveryBuyCheaperSide = readBoolEnv("KALSHI_MARKET_DISCOVERY_BUY_CHEAPER_SIDE", true)
 }
 
 func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
@@ -165,6 +173,10 @@ func (e *Engine) evaluateDetailedUncached(ctx context.Context, sig signal.Signal
 			"evidence_score", evidenceScore(sig),
 		)
 		return Evaluation{Reason: "prefilter:" + reason}
+	}
+
+	if evaluation, ok := e.evaluateKalshiMarketDiscovery(sig, domain); ok {
+		return evaluation
 	}
 
 	if until, reason, shouldLog := e.llmCooldown(time.Now().UTC()); !until.IsZero() {
@@ -481,6 +493,185 @@ func cloneEvaluation(in Evaluation) Evaluation {
 		out.Opportunity = &cloned
 	}
 	return out
+}
+
+type kalshiMarketDiscoverySnapshot struct {
+	Ticker           string `json:"ticker"`
+	Title            string `json:"title"`
+	Subtitle         string `json:"subtitle"`
+	Status           string `json:"status"`
+	YesBidDollars    string `json:"yes_bid_dollars"`
+	YesAskDollars    string `json:"yes_ask_dollars"`
+	NoBidDollars     string `json:"no_bid_dollars"`
+	NoAskDollars     string `json:"no_ask_dollars"`
+	LastPriceDollars string `json:"last_price_dollars"`
+	CloseTime        string `json:"close_time"`
+	ExpirationTime   string `json:"expiration_time"`
+}
+
+func (e *Engine) evaluateKalshiMarketDiscovery(sig signal.Signal, domain string) (Evaluation, bool) {
+	if !kalshiMarketDiscoveryEnabled ||
+		!strings.EqualFold(strings.TrimSpace(domain), "prediction_market") ||
+		!strings.EqualFold(strings.TrimSpace(sig.Source), "kalshi-market") {
+		return Evaluation{}, false
+	}
+
+	market, ok := decodeKalshiMarketDiscoverySnapshot(sig)
+	if !ok {
+		return Evaluation{Reason: "kalshi_market_unreadable", Tradeable: true}, true
+	}
+	ticker := strings.ToUpper(strings.TrimSpace(market.Ticker))
+	if !model.IsKalshiTicker(ticker) {
+		return Evaluation{Reason: "no_instruments", Tradeable: true}, true
+	}
+	if !kalshiMarketDiscoveryStatusTradable(market.Status) {
+		return Evaluation{Reason: "kalshi_market_not_open", Tradeable: true}, true
+	}
+
+	direction := model.Long
+	entryPrice, priceOK := kalshiDiscoveryPrice(market.YesAskDollars, market.LastPriceDollars, market.YesBidDollars)
+	if kalshiMarketDiscoveryBuyCheaperSide {
+		if noPrice, noOK := kalshiDiscoveryPrice(market.NoAskDollars, "", market.NoBidDollars); noOK && (!priceOK || noPrice < entryPrice) {
+			direction = model.Short
+			entryPrice = noPrice
+			priceOK = true
+		}
+	}
+	if !priceOK {
+		return Evaluation{Reason: "kalshi_market_missing_price", Tradeable: true}, true
+	}
+
+	spread, spreadOK := kalshiDiscoverySpread(market, direction)
+	if spreadOK && kalshiMarketDiscoveryMaxSpread > 0 && spread > kalshiMarketDiscoveryMaxSpread {
+		return Evaluation{Reason: "kalshi_market_spread_too_wide", Score: kalshiDiscoveryScore(sig, spread), Tradeable: true}, true
+	}
+
+	score := kalshiDiscoveryScore(sig, spread)
+	if score < e.minScore {
+		return Evaluation{Reason: "score_below_threshold", Score: score, Tradeable: true}, true
+	}
+
+	inst := model.NormalizeKalshiInstrument(model.Instrument{
+		Symbol:   ticker,
+		SecType:  model.SecTypeKalshi,
+		Currency: "USD",
+	})
+	opp := &model.Opportunity{
+		ID:           uuid.New().String(),
+		SignalIDs:    []string{sig.ID},
+		Instruments:  []model.Instrument{inst},
+		Direction:    direction,
+		Urgency:      sig.Urgency,
+		Score:        score,
+		Category:     "prediction_market",
+		EvidenceMeta: sig.EvidenceMeta.Clone(),
+		CreatedAt:    time.Now().UTC(),
+	}
+	e.log.Info("kalshi market discovery opportunity",
+		"signal_id", sig.ID,
+		"ticker", ticker,
+		"direction", direction,
+		"entry_price", entryPrice,
+		"spread", spread,
+		"score", score,
+		"status", market.Status,
+		"title", institutional.TruncateForPrompt(firstNonEmptyScanner(market.Title, market.Subtitle), 120),
+	)
+	return Evaluation{
+		Opportunity: opp,
+		Accepted:    true,
+		Reason:      "kalshi_market_discovery",
+		Score:       score,
+		Tradeable:   true,
+	}, true
+}
+
+func decodeKalshiMarketDiscoverySnapshot(sig signal.Signal) (kalshiMarketDiscoverySnapshot, bool) {
+	var market kalshiMarketDiscoverySnapshot
+	if len(sig.Raw) > 0 {
+		if err := json.Unmarshal(sig.Raw, &market); err == nil && strings.TrimSpace(market.Ticker) != "" {
+			return market, true
+		}
+	}
+	for _, entity := range sig.Entities {
+		if model.IsKalshiTicker(entity.ID) {
+			market.Ticker = entity.ID
+			return market, true
+		}
+		if model.IsKalshiTicker(entity.Name) {
+			market.Ticker = entity.Name
+			return market, true
+		}
+	}
+	return market, false
+}
+
+func kalshiDiscoveryPrice(primary, secondary, tertiary string) (float64, bool) {
+	for _, raw := range []string{primary, secondary, tertiary} {
+		price, ok := parseScannerProbability(raw)
+		if ok {
+			return price, true
+		}
+	}
+	return 0, false
+}
+
+func kalshiMarketDiscoveryStatusTradable(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "active", "open":
+		return true
+	default:
+		return false
+	}
+}
+
+func kalshiDiscoverySpread(market kalshiMarketDiscoverySnapshot, direction model.TradeDirection) (float64, bool) {
+	bidRaw := market.YesBidDollars
+	askRaw := market.YesAskDollars
+	if direction == model.Short {
+		bidRaw = market.NoBidDollars
+		askRaw = market.NoAskDollars
+	}
+	bid, bidOK := parseScannerProbability(bidRaw)
+	ask, askOK := parseScannerProbability(askRaw)
+	if bidOK && askOK && ask > bid {
+		return ask - bid, true
+	}
+	return 0, false
+}
+
+func kalshiDiscoveryScore(sig signal.Signal, spread float64) float64 {
+	score := kalshiMarketDiscoveryScore
+	if sig.Urgency >= 0.6 {
+		score += 5
+	}
+	if spread > 0 && spread <= 0.05 {
+		score += 4
+	}
+	if score > 100 {
+		return 100
+	}
+	if score < 0 {
+		return 0
+	}
+	return score
+}
+
+func parseScannerProbability(raw string) (float64, bool) {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || value <= 0 || value >= 1 {
+		return 0, false
+	}
+	return value, true
+}
+
+func firstNonEmptyScanner(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func WithEvaluationTime(ctx context.Context, at time.Time) context.Context {
@@ -1059,6 +1250,31 @@ func readIntEnv(name string, fallback int) int {
 
 	parsed, err := strconv.Atoi(raw)
 	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func readFloatEnv(name string, fallback float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.ParseFloat(raw, 64)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func readBoolEnv(name string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
 		return fallback
 	}
 	return parsed

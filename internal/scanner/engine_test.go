@@ -240,6 +240,50 @@ func (s *scannerDeterministicClient) Complete(_ context.Context, _ llm.Request) 
 	}, nil
 }
 
+func restoreScannerRuntimeConfig(t *testing.T) {
+	t.Helper()
+
+	oldRequestTimeout := scannerRequestTimeout
+	oldMaxTokens := scannerMaxTokens
+	oldCompactMaxTokens := scannerCompactMaxTokens
+	oldThinkingRequestTimeout := scannerThinkingRequestTimeout
+	oldThinkingMaxTokens := scannerThinkingMaxTokens
+	oldThinkingCompactTokens := scannerThinkingCompactTokens
+	oldCompilerTimeout := scannerCompilerTimeout
+	oldCompilerMaxTokens := scannerCompilerMaxTokens
+	oldContentLimit := scannerContentLimit
+	oldCompactContentMax := scannerCompactContentMax
+	oldStaleSignalAge := scannerStaleSignalAge
+	oldLLMCooldown := scannerLLMCooldown
+	oldEvalCacheTTL := scannerEvalCacheTTL
+	oldErrorCacheTTL := scannerErrorCacheTTL
+	oldKalshiDiscoveryEnabled := kalshiMarketDiscoveryEnabled
+	oldKalshiDiscoveryScore := kalshiMarketDiscoveryScore
+	oldKalshiDiscoveryMaxSpread := kalshiMarketDiscoveryMaxSpread
+	oldKalshiDiscoveryBuyCheaper := kalshiMarketDiscoveryBuyCheaperSide
+
+	t.Cleanup(func() {
+		scannerRequestTimeout = oldRequestTimeout
+		scannerMaxTokens = oldMaxTokens
+		scannerCompactMaxTokens = oldCompactMaxTokens
+		scannerThinkingRequestTimeout = oldThinkingRequestTimeout
+		scannerThinkingMaxTokens = oldThinkingMaxTokens
+		scannerThinkingCompactTokens = oldThinkingCompactTokens
+		scannerCompilerTimeout = oldCompilerTimeout
+		scannerCompilerMaxTokens = oldCompilerMaxTokens
+		scannerContentLimit = oldContentLimit
+		scannerCompactContentMax = oldCompactContentMax
+		scannerStaleSignalAge = oldStaleSignalAge
+		scannerLLMCooldown = oldLLMCooldown
+		scannerEvalCacheTTL = oldEvalCacheTTL
+		scannerErrorCacheTTL = oldErrorCacheTTL
+		kalshiMarketDiscoveryEnabled = oldKalshiDiscoveryEnabled
+		kalshiMarketDiscoveryScore = oldKalshiDiscoveryScore
+		kalshiMarketDiscoveryMaxSpread = oldKalshiDiscoveryMaxSpread
+		kalshiMarketDiscoveryBuyCheaperSide = oldKalshiDiscoveryBuyCheaper
+	})
+}
+
 func TestEvaluateRetriesCompactPromptOnContextWindowError(t *testing.T) {
 	t.Setenv("SCANNER_RESPONSE_MODE", "json")
 
@@ -772,6 +816,141 @@ func TestEvaluateDetailedNormalizesKalshiTickerForPredictionMarket(t *testing.T)
 	inst := result.Opportunity.Instruments[0]
 	if inst.SecType != model.SecTypeKalshi || inst.Exchange != model.SecTypeKalshi {
 		t.Fatalf("expected Kalshi instrument, got %+v", inst)
+	}
+}
+
+func TestEvaluateDetailedDiscoversKalshiMarketSnapshotWhenEnabled(t *testing.T) {
+	restoreScannerRuntimeConfig(t)
+	t.Setenv("KALSHI_MARKET_DISCOVERY_ENABLED", "true")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_SCORE", "58")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_MAX_SPREAD", "0.20")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_BUY_CHEAPER_SIDE", "true")
+	ReloadRuntimeConfig()
+
+	client := &scannerErrorClient{err: fmt.Errorf("LLM should not be called")}
+	engine := NewEngine(llm.NewRouter(client, client, client), 50)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:        "sig-kalshi-market-discovery",
+		Source:    "kalshi-market",
+		Type:      signal.TypeAlternative,
+		Category:  "prediction_market",
+		Timestamp: time.Now(),
+		Urgency:   0.65,
+		Raw: []byte(`{
+			"ticker":"KXFEDCUT-26",
+			"title":"Will the Fed cut rates this year?",
+			"status":"active",
+			"yes_bid_dollars":"0.40",
+			"yes_ask_dollars":"0.42",
+			"no_bid_dollars":"0.56",
+			"no_ask_dollars":"0.58",
+			"last_price_dollars":"0.41"
+		}`),
+		Translated: "Kalshi market | KXFEDCUT-26 | yes_bid=0.40 yes_ask=0.42 no_bid=0.56 no_ask=0.58",
+	}, "prediction_market")
+	if !result.Accepted || result.Opportunity == nil {
+		t.Fatalf("expected deterministic Kalshi discovery opportunity, got %+v", result)
+	}
+	if result.Reason != "kalshi_market_discovery" {
+		t.Fatalf("reason = %q", result.Reason)
+	}
+	if result.Score < 50 {
+		t.Fatalf("expected score above threshold, got %.2f", result.Score)
+	}
+	if result.Opportunity.Direction != model.Long {
+		t.Fatalf("expected cheaper YES side to map long, got %s", result.Opportunity.Direction)
+	}
+	inst := result.Opportunity.Instruments[0]
+	if inst.Symbol != "KXFEDCUT-26" || inst.SecType != model.SecTypeKalshi {
+		t.Fatalf("unexpected Kalshi instrument: %+v", inst)
+	}
+	if client.requests != 0 {
+		t.Fatalf("expected no LLM call for deterministic Kalshi discovery, got %d", client.requests)
+	}
+}
+
+func TestEvaluateDetailedRejectsWideKalshiMarketDiscoverySpread(t *testing.T) {
+	restoreScannerRuntimeConfig(t)
+	t.Setenv("KALSHI_MARKET_DISCOVERY_ENABLED", "true")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_MAX_SPREAD", "0.05")
+	ReloadRuntimeConfig()
+
+	client := &scannerErrorClient{err: fmt.Errorf("LLM should not be called")}
+	engine := NewEngine(llm.NewRouter(client, client, client), 50)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:        "sig-kalshi-wide",
+		Source:    "kalshi-market",
+		Type:      signal.TypeAlternative,
+		Category:  "prediction_market",
+		Timestamp: time.Now(),
+		Urgency:   0.65,
+		Raw:       []byte(`{"ticker":"KXFEDCUT-26","yes_bid_dollars":"0.30","yes_ask_dollars":"0.46"}`),
+	}, "prediction_market")
+	if result.Accepted {
+		t.Fatalf("expected wide spread reject, got %+v", result)
+	}
+	if result.Reason != "kalshi_market_spread_too_wide" {
+		t.Fatalf("reason = %q", result.Reason)
+	}
+	if !result.Tradeable {
+		t.Fatal("expected tradeable=true to distinguish a market-quality reject from scanner noise")
+	}
+}
+
+func TestEvaluateDetailedRejectsClosedKalshiMarketDiscovery(t *testing.T) {
+	restoreScannerRuntimeConfig(t)
+	t.Setenv("KALSHI_MARKET_DISCOVERY_ENABLED", "true")
+	ReloadRuntimeConfig()
+
+	client := &scannerErrorClient{err: fmt.Errorf("LLM should not be called")}
+	engine := NewEngine(llm.NewRouter(client, client, client), 50)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:        "sig-kalshi-closed",
+		Source:    "kalshi-market",
+		Type:      signal.TypeAlternative,
+		Category:  "prediction_market",
+		Timestamp: time.Now(),
+		Urgency:   0.65,
+		Raw:       []byte(`{"ticker":"KXFEDCUT-26","status":"closed","yes_bid_dollars":"0.40","yes_ask_dollars":"0.42"}`),
+	}, "prediction_market")
+	if result.Accepted {
+		t.Fatalf("expected closed market reject, got %+v", result)
+	}
+	if result.Reason != "kalshi_market_not_open" {
+		t.Fatalf("reason = %q", result.Reason)
+	}
+	if client.requests != 0 {
+		t.Fatalf("expected no LLM call for closed Kalshi market, got %d", client.requests)
+	}
+}
+
+func TestEvaluateDetailedChecksChosenKalshiSideSpread(t *testing.T) {
+	restoreScannerRuntimeConfig(t)
+	t.Setenv("KALSHI_MARKET_DISCOVERY_ENABLED", "true")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_MAX_SPREAD", "0.05")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_BUY_CHEAPER_SIDE", "true")
+	ReloadRuntimeConfig()
+
+	client := &scannerErrorClient{err: fmt.Errorf("LLM should not be called")}
+	engine := NewEngine(llm.NewRouter(client, client, client), 50)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:        "sig-kalshi-no-wide",
+		Source:    "kalshi-market",
+		Type:      signal.TypeAlternative,
+		Category:  "prediction_market",
+		Timestamp: time.Now(),
+		Urgency:   0.65,
+		Raw:       []byte(`{"ticker":"KXFEDCUT-26","status":"active","yes_bid_dollars":"0.69","yes_ask_dollars":"0.70","no_bid_dollars":"0.10","no_ask_dollars":"0.30"}`),
+	}, "prediction_market")
+	if result.Accepted {
+		t.Fatalf("expected chosen NO side spread reject, got %+v", result)
+	}
+	if result.Reason != "kalshi_market_spread_too_wide" {
+		t.Fatalf("reason = %q", result.Reason)
 	}
 }
 

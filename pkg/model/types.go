@@ -17,11 +17,13 @@ const (
 	Short TradeDirection = "short"
 )
 
+const SecTypeKalshi = "KALSHI"
+
 // Instrument represents any tradeable instrument across all asset classes
 type Instrument struct {
 	Symbol     string  `json:"symbol"`
 	Exchange   string  `json:"exchange,omitempty"`
-	SecType    string  `json:"sec_type"` // STK, OPT, FUT, CASH, BOND
+	SecType    string  `json:"sec_type"` // STK, OPT, FUT, CASH, BOND, KALSHI
 	Currency   string  `json:"currency"`
 	Expiry     string  `json:"expiry,omitempty"`     // Options/futures
 	Strike     float64 `json:"strike,omitempty"`     // Options
@@ -43,6 +45,30 @@ func (i Instrument) Key() string {
 		strconv.FormatInt(i.ConID, 10),
 	}
 	return strings.Join(parts, "|")
+}
+
+func IsKalshiTicker(symbol string) bool {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	return strings.HasPrefix(symbol, "KX") && strings.Contains(symbol, "-")
+}
+
+func (i Instrument) IsKalshi() bool {
+	return strings.EqualFold(strings.TrimSpace(i.SecType), SecTypeKalshi) || IsKalshiTicker(i.Symbol)
+}
+
+func NormalizeKalshiInstrument(inst Instrument) Instrument {
+	inst.Symbol = strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	inst.SecType = SecTypeKalshi
+	inst.Exchange = SecTypeKalshi
+	if strings.TrimSpace(inst.Currency) == "" {
+		inst.Currency = "USD"
+	}
+	inst.Expiry = ""
+	inst.Strike = 0
+	inst.Right = ""
+	inst.Multiplier = ""
+	inst.ConID = 0
+	return inst
 }
 
 func (i Instrument) Label() string {

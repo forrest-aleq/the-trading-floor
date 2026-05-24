@@ -344,24 +344,11 @@ func (e *Engine) evaluateDetailedUncached(ctx context.Context, sig signal.Signal
 		return Evaluation{Reason: "score_below_threshold", Score: result.Score, Tradeable: true}
 	}
 
-	// Build instruments
 	instruments := make([]model.Instrument, 0, len(result.Instruments))
 	for _, inst := range result.Instruments {
-		symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
-		if symbol == "" || symbol == "NONE" || symbol == "UNKNOWN" {
+		instrument, ok := normalizeScannerInstrument(inst, domain)
+		if !ok {
 			continue
-		}
-		instrument := model.Instrument{
-			Symbol:   symbol,
-			SecType:  inst.SecType,
-			Currency: inst.Currency,
-			Exchange: "SMART", // IBKR smart routing default
-		}
-		if instrument.Currency == "" {
-			instrument.Currency = "USD"
-		}
-		if instrument.SecType == "" {
-			instrument.SecType = "STK"
 		}
 		instruments = append(instruments, instrument)
 	}
@@ -720,11 +707,52 @@ score: 0-100
 instruments: SYMBOL:SECTYPE:CURRENCY, ...
 direction: long|short|none
 urgency: 0.0-1.0
-category: macro|corporate|geopolitical|flows|tail|volatility|sector|systematic
+category: macro|corporate|geopolitical|flows|tail|volatility|sector|systematic|prediction_market
 reasoning: short explanation
 END_FINAL_DECISION
 
 Do not omit the terminal decision block.`
+}
+
+func normalizeScannerInstrument(inst struct {
+	Symbol   string `json:"symbol"`
+	SecType  string `json:"sec_type"`
+	Currency string `json:"currency"`
+}, domain string) (model.Instrument, bool) {
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	if symbol == "" || symbol == "NONE" || symbol == "UNKNOWN" {
+		return model.Instrument{}, false
+	}
+
+	secType := strings.ToUpper(strings.TrimSpace(inst.SecType))
+	currency := strings.ToUpper(strings.TrimSpace(inst.Currency))
+	if currency == "" {
+		currency = "USD"
+	}
+
+	isPredictionMarket := strings.EqualFold(strings.TrimSpace(domain), "prediction_market")
+	isExplicitKalshi := strings.EqualFold(secType, model.SecTypeKalshi)
+	isKalshiTicker := model.IsKalshiTicker(symbol)
+	if isExplicitKalshi && !isKalshiTicker {
+		return model.Instrument{}, false
+	}
+
+	instrument := model.Instrument{
+		Symbol:   symbol,
+		SecType:  secType,
+		Currency: currency,
+		Exchange: "SMART",
+	}
+	if isKalshiTicker && (isPredictionMarket || isExplicitKalshi) {
+		return model.NormalizeKalshiInstrument(instrument), true
+	}
+	if isExplicitKalshi {
+		return model.Instrument{}, false
+	}
+	if secType == "" {
+		instrument.SecType = "STK"
+	}
+	return instrument, true
 }
 
 func parseScanResponse(raw string) (scanResult, error) {

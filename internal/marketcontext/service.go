@@ -75,6 +75,9 @@ func (s *Service) BuildOpportunityContext(opp *model.Opportunity, sig signal.Sig
 		s.applyQuoteState(ctx, inst)
 		s.applyRealizedVolatility(ctx, inst)
 	}
+	if inst.IsKalshi() {
+		applyKalshiSignalSnapshot(ctx, sig, opp.Direction)
+	}
 
 	if extracted := extractConsensusSnapshot(sig); extracted != nil {
 		ctx.ConsensusAvailable = true
@@ -187,6 +190,104 @@ func extractConsensusSnapshot(sig signal.Signal) *consensusSnapshot {
 		}
 	}
 	return nil
+}
+
+func applyKalshiSignalSnapshot(ctx *model.MarketContext, sig signal.Signal, direction model.TradeDirection) {
+	if ctx == nil {
+		return
+	}
+	bidKey := "yes_bid_dollars"
+	askKey := "yes_ask_dollars"
+	invertLast := false
+	if direction == model.Short {
+		bidKey = "no_bid_dollars"
+		askKey = "no_ask_dollars"
+		invertLast = true
+	}
+
+	if bid, ok := kalshiSignalPrice(sig, bidKey); ok {
+		ctx.BidPrice = bid
+	}
+	if ask, ok := kalshiSignalPrice(sig, askKey); ok {
+		ctx.AskPrice = ask
+	}
+	if ctx.BidPrice > 0 && ctx.AskPrice > 0 {
+		ctx.MidPrice = (ctx.BidPrice + ctx.AskPrice) / 2
+		ctx.SpreadBps = math.Abs(ctx.AskPrice-ctx.BidPrice) / ctx.MidPrice * 10000
+	}
+
+	switch {
+	case ctx.AskPrice > 0:
+		ctx.CurrentPrice = ctx.AskPrice
+	case ctx.MidPrice > 0:
+		ctx.CurrentPrice = ctx.MidPrice
+	default:
+		if last, ok := kalshiSignalPrice(sig, "last_price_dollars"); ok {
+			if invertLast {
+				last = 1 - last
+			}
+			if last > 0 && last < 1 {
+				ctx.CurrentPrice = last
+			}
+		}
+	}
+	if ctx.CurrentPrice > 0 || ctx.BidPrice > 0 || ctx.AskPrice > 0 {
+		ctx.Notes = appendNote(ctx.Notes, "kalshi quote from signal snapshot")
+	}
+}
+
+func kalshiSignalPrice(sig signal.Signal, rawKey string) (float64, bool) {
+	if len(sig.Raw) > 0 {
+		var payload map[string]any
+		if err := json.Unmarshal(sig.Raw, &payload); err == nil {
+			if value, ok := normalizeKalshiSignalPrice(payload[rawKey]); ok {
+				return value, true
+			}
+		}
+	}
+
+	textKey := strings.TrimSuffix(rawKey, "_dollars")
+	text := strings.NewReplacer("|", " ", ",", " ", ";", " ").Replace(sig.Translated)
+	for _, token := range strings.Fields(text) {
+		valueText, ok := strings.CutPrefix(strings.TrimSpace(token), textKey+"=")
+		if !ok {
+			continue
+		}
+		if value, ok := normalizeKalshiSignalPrice(valueText); ok {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func normalizeKalshiSignalPrice(raw any) (float64, bool) {
+	var value float64
+	switch typed := raw.(type) {
+	case float64:
+		value = typed
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+		value = parsed
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		if err != nil {
+			return 0, false
+		}
+		value = parsed
+	default:
+		return 0, false
+	}
+	switch {
+	case value > 0 && value < 1:
+		return value, true
+	case value > 1 && value < 100:
+		return value / 100.0, true
+	default:
+		return 0, false
+	}
 }
 
 func (s *Service) bestEffortPrice(ctx context.Context, inst model.Instrument) (model.Instrument, float64, bool) {

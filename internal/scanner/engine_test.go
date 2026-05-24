@@ -749,6 +749,58 @@ func TestEvaluateDetailedReportsScoreThresholdReject(t *testing.T) {
 	}
 }
 
+func TestEvaluateDetailedNormalizesKalshiTickerForPredictionMarket(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+
+	client := &scannerDeterministicClient{
+		content: `{"tradeable":true,"score":91,"instruments":[{"symbol":"KXFEDCUT-26","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.8,"category":"prediction_market","reasoning":"event contract repricing"}`,
+	}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:         "sig-kalshi-scan",
+		Source:     "kalshi-market",
+		Type:       signal.TypeAlternative,
+		Category:   "prediction_market",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: "Kalshi market KXFEDCUT-26 yes_ask=0.42",
+	}, "prediction_market")
+	if !result.Accepted || result.Opportunity == nil {
+		t.Fatalf("expected Kalshi scanner opportunity, got %+v", result)
+	}
+	inst := result.Opportunity.Instruments[0]
+	if inst.SecType != model.SecTypeKalshi || inst.Exchange != model.SecTypeKalshi {
+		t.Fatalf("expected Kalshi instrument, got %+v", inst)
+	}
+}
+
+func TestEvaluateDetailedDoesNotConvertEquityStyleKXPrefix(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+
+	client := &scannerDeterministicClient{
+		content: `{"tradeable":true,"score":82,"instruments":[{"symbol":"KXIN","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.7,"category":"corporate","reasoning":"company catalyst"}`,
+	}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:         "sig-kxin",
+		Source:     "filing",
+		Type:       signal.TypeNews,
+		Category:   "corporate",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: "KXIN company catalyst.",
+	}, "corporate")
+	if !result.Accepted || result.Opportunity == nil {
+		t.Fatalf("expected equity-style KX prefix opportunity, got %+v", result)
+	}
+	inst := result.Opportunity.Instruments[0]
+	if inst.SecType != "STK" || inst.Exchange != "SMART" {
+		t.Fatalf("expected STK/SMART instrument, got %+v", inst)
+	}
+}
+
 func TestEvaluateDetailedUsesReplayEvaluationTimeForStaleness(t *testing.T) {
 	client := &scannerStubClient{}
 	engine := NewEngine(llm.NewRouter(client, client, client), 70)

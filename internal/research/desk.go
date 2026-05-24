@@ -673,6 +673,9 @@ func normalizeResearchInstrument(inst model.Instrument) model.Instrument {
 	if strings.TrimSpace(inst.Currency) == "" {
 		inst.Currency = "USD"
 	}
+	if inst.IsKalshi() {
+		return model.NormalizeKalshiInstrument(inst)
+	}
 	if parsed, ok := parseOptionContractString(inst.Symbol); ok {
 		if strings.TrimSpace(inst.Symbol) == "" || strings.EqualFold(inst.SecType, "STK") || strings.TrimSpace(inst.SecType) == "" {
 			inst.Symbol = parsed.Symbol
@@ -947,6 +950,23 @@ func enrichResearchJSON(cleaned string, opp *model.Opportunity, marketCtx *model
 		return cleaned
 	}
 
+	if inst, ok := kalshiOpportunityInstrument(opp); ok {
+		payload["structure"] = "single"
+		payload["instrument"] = instrumentPayload(inst)
+		payload["legs"] = []any{}
+		if researchDirectionMissing(payload["direction"]) && opp.Direction != "" {
+			payload["direction"] = string(opp.Direction)
+		}
+		normalizeKalshiPayloadPrice(payload, "entry_price", marketCtx)
+		normalizeKalshiPayloadPrice(payload, "target_price", nil)
+		normalizeKalshiPayloadPrice(payload, "stop_loss", nil)
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return cleaned
+		}
+		return string(encoded)
+	}
+
 	if !hasInstrumentPayload(payload["instrument"]) && opp != nil && len(opp.Instruments) > 0 {
 		payload["instrument"] = instrumentPayload(opp.Instruments[0])
 	}
@@ -964,6 +984,54 @@ func enrichResearchJSON(cleaned string, opp *model.Opportunity, marketCtx *model
 		return cleaned
 	}
 	return string(encoded)
+}
+
+func kalshiOpportunityInstrument(opp *model.Opportunity) (model.Instrument, bool) {
+	if opp == nil {
+		return model.Instrument{}, false
+	}
+	for _, inst := range opp.Instruments {
+		if inst.IsKalshi() {
+			return model.NormalizeKalshiInstrument(inst), true
+		}
+	}
+	return model.Instrument{}, false
+}
+
+func normalizeKalshiPayloadPrice(payload map[string]any, key string, marketCtx *model.MarketContext) {
+	if payload == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	if value, ok := numericValue(payload[key]); ok {
+		if normalized, priceOK := normalizeKalshiProbability(value); priceOK {
+			payload[key] = normalized
+			return
+		}
+	}
+	if key == "entry_price" && marketCtx != nil {
+		for _, candidate := range []float64{
+			marketCtx.MidPrice,
+			marketCtx.CurrentPrice,
+			marketCtx.AskPrice,
+			marketCtx.BidPrice,
+		} {
+			if normalized, ok := normalizeKalshiProbability(candidate); ok {
+				payload[key] = normalized
+				return
+			}
+		}
+	}
+}
+
+func normalizeKalshiProbability(value float64) (float64, bool) {
+	switch {
+	case value > 0 && value < 1:
+		return value, true
+	case value > 1 && value < 100:
+		return value / 100.0, true
+	default:
+		return 0, false
+	}
 }
 
 func hasInstrumentPayload(value any) bool {

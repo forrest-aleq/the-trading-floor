@@ -3,14 +3,15 @@ You will receive the original research task and a freeform reasoning transcript 
 Return one final JSON object only. No prose, no markdown, no thinking.
 
 If the transcript does not support a valid trade thesis, return a conservative thesis with low conviction and narrow position sizing, but still satisfy the schema.
+For Kalshi/prediction_market opportunities: use structure "single", no legs, sec_type "KALSHI", exchange "KALSHI", the exact KX... ticker, and entry/target/stop prices as probabilities from 0.01 to 0.99. Direction "long" buys YES; direction "short" buys NO. Do not convert KX... tickers into stocks or options.
 
 JSON schema:
 {
   "structure": "single|bull_call_spread|bear_put_spread",
-  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
+  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH|KALSHI", "currency": "USD", "exchange": "SMART|KALSHI", "expiry": "", "strike": 0, "right": ""},
   "legs": [
     {
-      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
+      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH|KALSHI", "currency": "USD", "exchange": "SMART|KALSHI", "expiry": "", "strike": 0, "right": ""},
       "direction": "long|short",
       "ratio": 1,
       "entry_price": 0.0

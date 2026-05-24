@@ -2,14 +2,15 @@ Return one final JSON object only.
 Use exactly this schema and keep the reasoning short.
 If the setup is weak or ambiguous, still return a conservative thesis with low conviction and small size.
 Use the provided opportunity instruments unless the signal directly supports another instrument. Do not invent unrelated proxy tickers.
+For Kalshi/prediction_market opportunities: use structure "single", no legs, sec_type "KALSHI", exchange "KALSHI", the exact KX... ticker, and entry/target/stop prices as probabilities from 0.01 to 0.99. Direction "long" buys YES; direction "short" buys NO. Do not convert KX... tickers into stocks or options.
 
 JSON schema:
 {
   "structure": "single|bull_call_spread|bear_put_spread",
-  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
+  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH|KALSHI", "currency": "USD", "exchange": "SMART|KALSHI", "expiry": "", "strike": 0, "right": ""},
   "legs": [
     {
-      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
+      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH|KALSHI", "currency": "USD", "exchange": "SMART|KALSHI", "expiry": "", "strike": 0, "right": ""},
       "direction": "long|short",
       "ratio": 1,
       "entry_price": 0.0

@@ -771,6 +771,61 @@ func TestNormalizeResearchInstrumentDowngradesIncompleteDerivativeLikeSymbolToUn
 	}
 }
 
+func TestEnrichResearchJSONOverridesBadKalshiInstrumentTyping(t *testing.T) {
+	opp := &model.Opportunity{
+		ID: "opp-kalshi",
+		Instruments: []model.Instrument{model.NormalizeKalshiInstrument(model.Instrument{
+			Symbol: "KXFEDCUT-26",
+		})},
+		Direction: model.Short,
+		Score:     88,
+	}
+
+	cleaned := `{
+	  "structure": "bull_call_spread",
+	  "instrument": {"symbol": "KXFEDCUT-26", "sec_type": "STK", "currency": "USD", "exchange": "SMART", "expiry": "20260101", "strike": 100, "right": "C"},
+	  "legs": [{"instrument": {"symbol": "KXFEDCUT-26", "sec_type": "OPT", "currency": "USD", "exchange": "SMART"}, "direction": "long", "ratio": 1, "entry_price": 0.65}],
+	  "direction": "",
+	  "entry_price": 65,
+	  "target_price": 80,
+	  "stop_loss": 30,
+	  "conviction": 0.78,
+	  "time_horizon_hours": 24,
+	  "position_size_pct": 0.01,
+	  "strategy": "event",
+	  "evidence": ["kalshi odds stale"],
+	  "counter_args": ["wide spread"],
+	  "kill_rules": [],
+	  "reasoning": "bad model typing should be corrected"
+	}`
+
+	enriched := enrichResearchJSON(cleaned, opp, nil)
+	var payload struct {
+		Structure  string               `json:"structure"`
+		Instrument model.Instrument     `json:"instrument"`
+		Legs       []model.TradeLeg     `json:"legs"`
+		Direction  model.TradeDirection `json:"direction"`
+		EntryPrice float64              `json:"entry_price"`
+		Target     float64              `json:"target_price"`
+		Stop       float64              `json:"stop_loss"`
+	}
+	if err := json.Unmarshal([]byte(enriched), &payload); err != nil {
+		t.Fatalf("unmarshal enriched kalshi payload: %v\n%s", err, enriched)
+	}
+	if payload.Structure != "single" || len(payload.Legs) != 0 {
+		t.Fatalf("expected single no-leg Kalshi thesis, got structure=%q legs=%d", payload.Structure, len(payload.Legs))
+	}
+	if payload.Instrument.SecType != model.SecTypeKalshi || payload.Instrument.Exchange != model.SecTypeKalshi {
+		t.Fatalf("expected Kalshi instrument, got %+v", payload.Instrument)
+	}
+	if payload.Direction != model.Short {
+		t.Fatalf("expected missing direction to inherit short, got %q", payload.Direction)
+	}
+	if payload.EntryPrice != 0.65 || payload.Target != 0.80 || payload.Stop != 0.30 {
+		t.Fatalf("expected percentage prices to normalize to probabilities, got entry=%.2f target=%.2f stop=%.2f", payload.EntryPrice, payload.Target, payload.Stop)
+	}
+}
+
 func TestBuildResearchPromptIncludesInstitutionalContext(t *testing.T) {
 	client := &researchStubClient{}
 	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)

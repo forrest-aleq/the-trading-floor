@@ -191,14 +191,27 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	stageStart := time.Now()
 	scanCtx, scanCancel := context.WithTimeout(ctx, deskScannerTimeout)
-	opp, ok := d.scanner.Evaluate(scanCtx, sig, d.Domain)
+	scanEval := d.scanner.EvaluateDetailed(scanCtx, sig, d.Domain)
 	scanCancel()
+	opp, ok := scanEval.Opportunity, scanEval.Accepted
 	d.logStage("scanner", stageStart,
 		"signal_id", sig.ID,
 		"tradeable", ok,
+		"scanner_reason", scanEval.Reason,
+		"scanner_score", scanEval.Score,
 		"scan_territory", scanTerritory.Status,
 	)
 	if !ok {
+		d.log.Info("signal rejected by scanner",
+			"signal_id", sig.ID,
+			"reason", scanEval.Reason,
+			"score", scanEval.Score,
+			"tradeable", scanEval.Tradeable,
+			"source", sig.Source,
+			"category", sig.Category,
+			"type", sig.Type,
+			"urgency", sig.Urgency,
+		)
 		return
 	}
 

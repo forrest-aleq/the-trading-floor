@@ -143,6 +143,32 @@ func TestBuildOpportunityContextIncludesConsensusAndPricePath(t *testing.T) {
 	}
 }
 
+func TestBuildOpportunityContextUsesKalshiSignalSnapshot(t *testing.T) {
+	service := NewService(nil)
+	opp := &model.Opportunity{
+		Instruments: []model.Instrument{model.NormalizeKalshiInstrument(model.Instrument{Symbol: "KXFEDCUT-26"})},
+		Direction:   model.Long,
+	}
+	sig := signal.Signal{
+		Timestamp: time.Now(),
+		Raw:       []byte(`{"ticker":"KXFEDCUT-26","yes_bid_dollars":"0.41","yes_ask_dollars":"0.44","no_bid_dollars":"0.55","no_ask_dollars":"0.58","last_price_dollars":"0.42"}`),
+	}
+
+	ctx := service.BuildOpportunityContext(opp, sig)
+	if ctx == nil {
+		t.Fatal("expected market context")
+	}
+	if ctx.BidPrice != 0.41 || ctx.AskPrice != 0.44 {
+		t.Fatalf("expected Kalshi yes book 0.41/0.44, got %.2f/%.2f", ctx.BidPrice, ctx.AskPrice)
+	}
+	if ctx.CurrentPrice != 0.44 {
+		t.Fatalf("expected entry/current price from ask, got %.2f", ctx.CurrentPrice)
+	}
+	if ctx.MidPrice < 0.4249 || ctx.MidPrice > 0.4251 {
+		t.Fatalf("expected midpoint 0.425, got %.3f", ctx.MidPrice)
+	}
+}
+
 func TestBuildThesisContextRehydratesPriceFromResolvedInstrument(t *testing.T) {
 	service := NewService(stubPriceView{
 		price: 18.4,

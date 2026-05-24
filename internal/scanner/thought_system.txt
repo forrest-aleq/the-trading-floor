@@ -21,9 +21,11 @@ score: 0-100
 instruments: SYMBOL[:SECTYPE[:CURRENCY]], SYMBOL[:SECTYPE[:CURRENCY]] or none
 direction: long|short|none
 urgency: 0.0-1.0
-category: geopolitical|macro|corporate|flows|tail|volatility|sector|systematic
+category: geopolitical|macro|corporate|flows|tail|volatility|sector|systematic|prediction_market
 reasoning: brief explanation, 12 words max
 END_FINAL_DECISION
+
+Use sec_type "KALSHI" for Kalshi KX... prediction-market tickers. Do not label KX... tickers as STK or OPT.
 
 If you are running out of room, output the final block immediately.
 Do not omit the final block.

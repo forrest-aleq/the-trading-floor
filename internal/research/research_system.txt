@@ -21,14 +21,15 @@ If you choose a spread, it must be a defined-risk debit vertical:
 - bull_call_spread = long lower-strike call + short higher-strike call, same expiry
 - bear_put_spread = long higher-strike put + short lower-strike put, same expiry
 Do not propose condors, calendars, straddles, pairs, baskets, naked shorts, or undefined-risk structures yet.
+For Kalshi/prediction_market opportunities: use structure "single", no legs, sec_type "KALSHI", exchange "KALSHI", the exact KX... ticker, and entry/target/stop prices as probabilities from 0.01 to 0.99. Direction "long" buys YES; direction "short" buys NO. Do not convert KX... tickers into stocks or options.
 
 Respond in JSON:
 {
   "structure": "single|bull_call_spread|bear_put_spread",
-  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
+  "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH|KALSHI", "currency": "USD", "exchange": "SMART|KALSHI", "expiry": "", "strike": 0, "right": ""},
   "legs": [
     {
-      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
+      "instrument": {"symbol": "...", "sec_type": "STK|OPT|FUT|CASH|KALSHI", "currency": "USD", "exchange": "SMART|KALSHI", "expiry": "", "strike": 0, "right": ""},
       "direction": "long|short",
       "ratio": 1,
       "entry_price": 0.0

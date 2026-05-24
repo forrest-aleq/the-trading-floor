@@ -212,6 +212,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 			"type", sig.Type,
 			"urgency", sig.Urgency,
 		)
+		d.recordScannerRejection(ctx, sig, scanEval)
 		return
 	}
 
@@ -1151,6 +1152,56 @@ func (d *Desk) recordAntiPortfolio(ctx context.Context, thesis *model.Thesis, re
 	}
 	if err := d.graph.RecordAntiPortfolio(ctx, thesis, reason); err != nil {
 		d.log.Warn("persist anti-portfolio to graph failed", "thesis_id", thesis.ID, "error", err)
+	}
+}
+
+func (d *Desk) recordScannerRejection(ctx context.Context, sig signal.Signal, eval scanner.Evaluation) {
+	if d == nil || d.store == nil {
+		return
+	}
+	entry := scannerRejectionEvent(d.ID, d.Domain, sig, eval)
+	if err := d.store.InsertEventLog(ctx, entry); err != nil {
+		d.log.Warn("persist scanner rejection event failed",
+			"signal_id", sig.ID,
+			"reason", eval.Reason,
+			"error", err,
+		)
+	}
+}
+
+func scannerRejectionEvent(deskID, domain string, sig signal.Signal, eval scanner.Evaluation) store.EventLogEntry {
+	reason := strings.TrimSpace(eval.Reason)
+	if reason == "" {
+		reason = "scanner_rejected"
+	}
+	return store.EventLogEntry{
+		Timestamp: time.Now().UTC(),
+		EventType: "scanner_rejected",
+		DeskID:    deskID,
+		Severity:  scannerRejectionSeverity(reason),
+		Message:   fmt.Sprintf("scanner rejected signal: %s", reason),
+		Metadata: map[string]any{
+			"desk_id":           deskID,
+			"domain":            domain,
+			"signal_id":         sig.ID,
+			"signal_source":     sig.Source,
+			"signal_type":       string(sig.Type),
+			"signal_category":   sig.Category,
+			"signal_urgency":    sig.Urgency,
+			"scanner_reason":    reason,
+			"scanner_score":     eval.Score,
+			"scanner_tradeable": eval.Tradeable,
+			"signal_excerpt":    institutional.TruncateForPrompt(firstNonEmptyInternal(sig.Translated, sig.OriginalText, string(sig.Raw)), 320),
+		},
+	}
+}
+
+func scannerRejectionSeverity(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "llm_error", "parse_error", "llm_cooldown":
+		return "warn"
+	default:
+		return "info"
 	}
 }
 

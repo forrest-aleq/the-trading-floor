@@ -202,6 +202,31 @@ func TestParseRoutingPolicyNormalizesKeysAndDomains(t *testing.T) {
 	}
 }
 
+func TestRoutingPolicyEnvOverridesDomainMatchCaps(t *testing.T) {
+	policy := routingPolicy{
+		DomainGroupMaxMatches: map[string]int{
+			"corporate":         1,
+			"prediction_market": 1,
+		},
+	}
+	env := map[string]string{
+		"DESK_ROUTING_DOMAIN_MAX_MATCHES":            "corporate=3,macro=2,bad",
+		"DESK_ROUTING_PREDICTION_MARKET_MAX_MATCHES": "0",
+	}
+
+	applyRoutingPolicyEnvOverrides(&policy, func(key string) string { return env[key] })
+
+	if policy.DomainGroupMaxMatches["corporate"] != 3 {
+		t.Fatalf("expected corporate cap override to 3, got %#v", policy.DomainGroupMaxMatches)
+	}
+	if policy.DomainGroupMaxMatches["macro"] != 2 {
+		t.Fatalf("expected macro cap override to 2, got %#v", policy.DomainGroupMaxMatches)
+	}
+	if _, ok := policy.DomainGroupMaxMatches["prediction_market"]; ok {
+		t.Fatalf("expected prediction_market cap removal for unlimited fanout, got %#v", policy.DomainGroupMaxMatches)
+	}
+}
+
 func TestShouldDeskReviewSignalUsesDeskSpecificRules(t *testing.T) {
 	sig := signal.Signal{
 		Source:   "earnings-calendar",

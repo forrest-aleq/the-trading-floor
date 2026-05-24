@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -79,7 +80,54 @@ func parseRoutingPolicy(raw []byte) (routingPolicy, error) {
 	policy.DomainGroupMaxMatches = normalizeIntMap(policy.DomainGroupMaxMatches)
 	policy.DeskRules = normalizeDeskRules(policy.DeskRules)
 	policy.FallbackDomains = normalizeDomains(policy.FallbackDomains)
+	applyRoutingPolicyEnvOverrides(&policy, os.Getenv)
 	return policy, nil
+}
+
+func applyRoutingPolicyEnvOverrides(policy *routingPolicy, lookup func(string) string) {
+	if policy == nil || lookup == nil {
+		return
+	}
+	if policy.DomainGroupMaxMatches == nil {
+		policy.DomainGroupMaxMatches = map[string]int{}
+	}
+
+	for _, item := range strings.Split(lookup("DESK_ROUTING_DOMAIN_MAX_MATCHES"), ",") {
+		domain, rawValue, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		applyDomainMaxMatchOverride(policy, domain, rawValue)
+	}
+
+	domains := newDomainSet()
+	for domain := range policy.DomainGroupMaxMatches {
+		domains.add(domain)
+	}
+	for _, domain := range []string{"geopolitical", "macro", "corporate", "flows", "tail", "volatility", "sector", "systematic", "prediction_market"} {
+		domains.add(domain)
+	}
+	for _, domain := range domains.values() {
+		key := "DESK_ROUTING_" + strings.ToUpper(strings.ReplaceAll(domain, "-", "_")) + "_MAX_MATCHES"
+		applyDomainMaxMatchOverride(policy, domain, lookup(key))
+	}
+}
+
+func applyDomainMaxMatchOverride(policy *routingPolicy, domain, rawValue string) {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	rawValue = strings.TrimSpace(rawValue)
+	if domain == "" || rawValue == "" {
+		return
+	}
+	value, err := strconv.Atoi(rawValue)
+	if err != nil {
+		return
+	}
+	if value <= 0 {
+		delete(policy.DomainGroupMaxMatches, domain)
+		return
+	}
+	policy.DomainGroupMaxMatches[domain] = value
 }
 
 func normalizeRuleMap(input map[string][]string) map[string][]string {

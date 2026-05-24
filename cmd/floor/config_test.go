@@ -127,6 +127,48 @@ func TestKalshiDeskConfigUsesOnlyExplicitDeskCapital(t *testing.T) {
 	}
 }
 
+func TestLoadDecisionThresholdsUsesEnv(t *testing.T) {
+	t.Setenv("SCANNER_MIN_SCORE", "52")
+	t.Setenv("RESEARCH_MIN_CONVICTION", "0.54")
+	t.Setenv("DESK_MIN_CONVICTION", "0.56")
+	t.Setenv("DESK_COUNCIL_THRESHOLD", "0.04")
+
+	cfg := loadDecisionThresholds()
+	if cfg.ScannerMinScore != 52 {
+		t.Fatalf("scanner min score = %.2f, want 52", cfg.ScannerMinScore)
+	}
+	if cfg.ResearchMinConviction != 0.54 {
+		t.Fatalf("research min conviction = %.2f, want 0.54", cfg.ResearchMinConviction)
+	}
+	if cfg.DeskMinConviction != 0.56 {
+		t.Fatalf("desk min conviction = %.2f, want 0.56", cfg.DeskMinConviction)
+	}
+	if cfg.CouncilThreshold != 0.04 {
+		t.Fatalf("council threshold = %.2f, want 0.04", cfg.CouncilThreshold)
+	}
+}
+
+func TestLoadDecisionThresholdsFallsBackOnInvalidEnv(t *testing.T) {
+	t.Setenv("SCANNER_MIN_SCORE", "150")
+	t.Setenv("RESEARCH_MIN_CONVICTION", "-1")
+	t.Setenv("DESK_MIN_CONVICTION", "2")
+	t.Setenv("DESK_COUNCIL_THRESHOLD", "not-a-number")
+
+	cfg := loadDecisionThresholds()
+	if cfg.ScannerMinScore != 70 {
+		t.Fatalf("scanner min score = %.2f, want default 70", cfg.ScannerMinScore)
+	}
+	if cfg.ResearchMinConviction != 0.65 {
+		t.Fatalf("research min conviction = %.2f, want default 0.65", cfg.ResearchMinConviction)
+	}
+	if cfg.DeskMinConviction != cfg.ResearchMinConviction {
+		t.Fatalf("desk min conviction = %.2f, want research default %.2f", cfg.DeskMinConviction, cfg.ResearchMinConviction)
+	}
+	if cfg.CouncilThreshold != 0.02 {
+		t.Fatalf("council threshold = %.2f, want default 0.02", cfg.CouncilThreshold)
+	}
+}
+
 func TestActiveDeskConfigRejectsUnknownAllowlistDesk(t *testing.T) {
 	t.Setenv("FLOOR_ENABLED_DESKS", "corp-earnings-a,no-such-desk")
 	t.Setenv("FLOOR_DESK_LIMIT", "")

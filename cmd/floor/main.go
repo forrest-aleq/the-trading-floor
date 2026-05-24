@@ -383,8 +383,9 @@ func main() {
 		}
 	}
 	learnWorker := memory.NewLearnWorker(beliefGraph, engramStore)
-	scan := scanner.NewEngine(llmRouter, 70)
-	researchDesk := research.NewDesk(llmRouter, 0.65)
+	decisionThresholds := loadDecisionThresholds()
+	scan := scanner.NewEngine(llmRouter, decisionThresholds.ScannerMinScore)
+	researchDesk := research.NewDesk(llmRouter, decisionThresholds.ResearchMinConviction)
 	researchDesk.SetMarketContextService(marketcontext.NewService(mdMgr))
 	quantService := quant.NewService()
 	prosecutor := research.NewProsecutor(llmRouter)
@@ -425,7 +426,12 @@ func main() {
 		beliefGraph.RecordLeadTimeObservation(belief.LeadTimeBeliefKey(source, category, language, region), observedHours)
 	})
 	startBeliefDecay(ctx, beliefGraph)
-	slog.Info("decision services initialized")
+	slog.Info("decision services initialized",
+		"scanner_min_score", decisionThresholds.ScannerMinScore,
+		"research_min_conviction", decisionThresholds.ResearchMinConviction,
+		"desk_min_conviction", decisionThresholds.DeskMinConviction,
+		"council_threshold", decisionThresholds.CouncilThreshold,
+	)
 
 	// --- Audit Log ---
 	auditPath := os.Getenv("AUDIT_LOG_PATH")
@@ -536,6 +542,9 @@ func main() {
 			Watchlist:     mdMgr.AddInstruments,
 			PublishSignal: wireMgr.Publish,
 			EntryControl:  entryControlForDesk(d, globalEntryControl, brokerEntryControl),
+
+			MinConviction:    decisionThresholds.DeskMinConviction,
+			CouncilThreshold: decisionThresholds.CouncilThreshold,
 		})
 		desksByID[d.id] = desk
 		floor.AddDesk(desk)
@@ -970,6 +979,23 @@ func readRuntimeDuration(name string, fallback time.Duration) time.Duration {
 	return parsed
 }
 
+type decisionThresholdConfig struct {
+	ScannerMinScore       float64
+	ResearchMinConviction float64
+	DeskMinConviction     float64
+	CouncilThreshold      float64
+}
+
+func loadDecisionThresholds() decisionThresholdConfig {
+	researchMin := readRuntimeFloatRange("RESEARCH_MIN_CONVICTION", 0.65, 0.01, 1.0)
+	return decisionThresholdConfig{
+		ScannerMinScore:       readRuntimeFloatRange("SCANNER_MIN_SCORE", 70, 1, 100),
+		ResearchMinConviction: researchMin,
+		DeskMinConviction:     readRuntimeFloatRange("DESK_MIN_CONVICTION", researchMin, 0.01, 1.0),
+		CouncilThreshold:      readRuntimeFloatRange("DESK_COUNCIL_THRESHOLD", 0.02, 0.0001, 1.0),
+	}
+}
+
 func readRuntimeFloat(name string, fallback float64) float64 {
 	raw := os.Getenv(name)
 	if raw == "" {
@@ -980,6 +1006,14 @@ func readRuntimeFloat(name string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+func readRuntimeFloatRange(name string, fallback, min, max float64) float64 {
+	value := readRuntimeFloat(name, fallback)
+	if value < min || value > max {
+		return fallback
+	}
+	return value
 }
 
 func readRuntimeInt(name string, fallback int) int {

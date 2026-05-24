@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -47,6 +48,10 @@ func main() {
 		ctx, db := mustOpenDB()
 		defer db.Close()
 		cmdEvents(ctx, db)
+	case "funnel":
+		ctx, db := mustOpenDB()
+		defer db.Close()
+		cmdFunnel(ctx, db)
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: unknown command '%s'\n", os.Args[1])
 		usage()
@@ -64,6 +69,7 @@ func usage() {
 	fmt.Println("  anti          Show anti-portfolio (rejected theses)")
 	fmt.Println("  ab            Show A/B test comparison")
 	fmt.Println("  events        Show recent event log entries")
+	fmt.Println("  funnel [HRS]  Show scanner/rejection funnel for recent hours")
 }
 
 func mustOpenDB() (context.Context, *store.DB) {
@@ -251,8 +257,17 @@ func cmdTheses(ctx context.Context, db *store.DB) {
 
 func cmdAntiPortfolio(ctx context.Context, db *store.DB) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT desk_id, rejection_reason, strategy, instrument->>'symbol' AS symbol, direction,
-		        COALESCE(would_have_pnl, 0), COALESCE(would_have_outcome, '')
+		`SELECT
+		        COALESCE(thesis_id, thesis_snapshot->>'id', '') AS thesis_id,
+		        desk_id,
+		        rejection_reason,
+		        COALESCE(metadata->>'stage', '') AS stage,
+		        instrument->>'symbol' AS symbol,
+		        direction,
+		        conviction,
+		        counterfactual_status,
+		        would_have_pnl,
+		        COALESCE(would_have_outcome, '')
 		 FROM anti_portfolio ORDER BY created_at DESC LIMIT 30`)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
@@ -261,20 +276,29 @@ func cmdAntiPortfolio(ctx context.Context, db *store.DB) {
 	defer rows.Close()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if !writeTablef(w, "DESK\tREASON\tSTRATEGY\tSYMBOL\tDIR\tWOULD_PNL\tOUTCOME\n") {
+	if !writeTablef(w, "THESIS\tDESK\tSTAGE\tREASON\tSYMBOL\tDIR\tCONV\tCOUNTERFACTUAL\tWOULD_PNL\tOUTCOME\n") {
 		return
 	}
 	for rows.Next() {
-		var desk, reason, strategy, symbol, dir, outcome string
-		var wouldPnl float64
-		if err := rows.Scan(&desk, &reason, &strategy, &symbol, &dir, &wouldPnl, &outcome); err != nil {
+		var thesisID, desk, reason, stage, symbol, dir, counterfactual, outcome string
+		var conviction, wouldPnl *float64
+		if err := rows.Scan(&thesisID, &desk, &reason, &stage, &symbol, &dir, &conviction, &counterfactual, &wouldPnl, &outcome); err != nil {
 			continue
 		}
-		if outcome == "" {
-			outcome = "pending"
+		if len(thesisID) > 8 {
+			thesisID = thesisID[:8]
 		}
-		if !writeTablef(w, "%s\t%s\t%s\t%s\t%s\t%.2f\t%s\n",
-			desk, reason, strategy, symbol, dir, wouldPnl, outcome) {
+		if thesisID == "" {
+			thesisID = "-"
+		}
+		if stage == "" {
+			stage = rejectionStageForReason(reason)
+		}
+		if outcome == "" {
+			outcome = "-"
+		}
+		if !writeTablef(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			thesisID, desk, stage, reason, symbol, dir, formatOptionalFloat(conviction, 2), counterfactual, formatOptionalFloat(wouldPnl, 2), outcome) {
 			return
 		}
 	}
@@ -334,7 +358,7 @@ func cmdABTest(ctx context.Context, db *store.DB) {
 
 func cmdEvents(ctx context.Context, db *store.DB) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT timestamp, event_type, COALESCE(desk_id, ''), severity, message
+		`SELECT timestamp::text, event_type, COALESCE(desk_id, ''), severity, message
 		 FROM event_log ORDER BY timestamp DESC LIMIT 30`)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
@@ -356,6 +380,153 @@ func cmdEvents(ctx context.Context, db *store.DB) {
 		}
 	}
 	flushTable(w)
+}
+
+func rejectionStageForReason(reason string) string {
+	switch reason {
+	case "conviction_below_threshold":
+		return "research"
+	case "killed_by_prosecutor", "prosecutor_weakened_below_threshold":
+		return "prosecutor"
+	case "council_rejected":
+		return "council"
+	case "blocked_by_runtime_health":
+		return "runtime_health"
+	case "blocked_by_risk_gate":
+		return "risk"
+	case "kalshi_executor_unavailable", "kalshi_execution_rejected", "kalshi_order_not_filled":
+		return "execution"
+	default:
+		return "unknown"
+	}
+}
+
+func cmdFunnel(ctx context.Context, db *store.DB) {
+	hours := 24
+	if len(os.Args) >= 3 {
+		if parsed, err := strconv.Atoi(os.Args[2]); err == nil && parsed > 0 && parsed <= 720 {
+			hours = parsed
+		}
+	}
+
+	fmt.Printf("Decision funnel (last %dh)\n\n", hours)
+	printFunnelEvents(ctx, db, hours)
+	fmt.Println()
+	printThesisStatusCounts(ctx, db, hours)
+	fmt.Println()
+	printWorkingOrderCounts(ctx, db)
+}
+
+func printFunnelEvents(ctx context.Context, db *store.DB, hours int) {
+	rows, err := db.Pool.Query(ctx, `
+		SELECT
+			COALESCE(metadata->>'stage', CASE WHEN event_type = 'scanner_rejected' THEN 'scanner' ELSE 'unknown' END) AS stage,
+			event_type,
+			COALESCE(metadata->>'scanner_reason', metadata->>'rejection_reason', '') AS reason,
+			COUNT(*) AS count,
+			AVG(NULLIF(metadata->>'scanner_score', '')::float8) AS avg_score,
+			AVG(NULLIF(metadata->>'conviction', '')::float8) AS avg_conviction
+		FROM event_log
+		WHERE timestamp >= NOW() - ($1::int * INTERVAL '1 hour')
+		  AND event_type IN ('scanner_rejected', 'thesis_rejected')
+		GROUP BY stage, event_type, reason
+		ORDER BY count DESC, stage, reason
+	`, hours)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "funnel events query failed: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if !writeTablef(w, "STAGE\tEVENT\tREASON\tCOUNT\tAVG_SCORE\tAVG_CONV\n") {
+		return
+	}
+	for rows.Next() {
+		var stage, eventType, reason string
+		var count int
+		var avgScore, avgConviction *float64
+		if err := rows.Scan(&stage, &eventType, &reason, &count, &avgScore, &avgConviction); err != nil {
+			continue
+		}
+		if reason == "" {
+			reason = "-"
+		}
+		if !writeTablef(w, "%s\t%s\t%s\t%d\t%s\t%s\n",
+			stage, eventType, reason, count, formatOptionalFloat(avgScore, 1), formatOptionalFloat(avgConviction, 2)) {
+			return
+		}
+	}
+	flushTable(w)
+}
+
+func printThesisStatusCounts(ctx context.Context, db *store.DB, hours int) {
+	rows, err := db.Pool.Query(ctx, `
+		SELECT status, COUNT(*), AVG(conviction)
+		FROM theses
+		WHERE created_at >= NOW() - ($1::int * INTERVAL '1 hour')
+		GROUP BY status
+		ORDER BY COUNT(*) DESC
+	`, hours)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "thesis status query failed: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if !writeTablef(w, "THESIS_STATUS\tCOUNT\tAVG_CONV\n") {
+		return
+	}
+	for rows.Next() {
+		var status string
+		var count int
+		var avgConviction *float64
+		if err := rows.Scan(&status, &count, &avgConviction); err != nil {
+			continue
+		}
+		if !writeTablef(w, "%s\t%d\t%s\n", status, count, formatOptionalFloat(avgConviction, 2)) {
+			return
+		}
+	}
+	flushTable(w)
+}
+
+func printWorkingOrderCounts(ctx context.Context, db *store.DB) {
+	rows, err := db.Pool.Query(ctx, `
+		SELECT state, COUNT(*)
+		FROM working_orders
+		GROUP BY state
+		ORDER BY COUNT(*) DESC
+	`)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "working orders query failed: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if !writeTablef(w, "ORDER_STATE\tCOUNT\n") {
+		return
+	}
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			continue
+		}
+		if !writeTablef(w, "%s\t%d\n", state, count) {
+			return
+		}
+	}
+	flushTable(w)
+}
+
+func formatOptionalFloat(value *float64, digits int) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.*f", digits, *value)
 }
 
 func writeTablef(w *tabwriter.Writer, format string, args ...any) bool {

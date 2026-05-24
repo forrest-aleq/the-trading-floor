@@ -1149,9 +1149,104 @@ func (d *Desk) recordAntiPortfolio(ctx context.Context, thesis *model.Thesis, re
 		if err := d.store.InsertAntiPortfolio(ctx, thesis, reason); err != nil {
 			d.log.Warn("persist anti-portfolio failed", "thesis_id", thesis.ID, "error", err)
 		}
+		if err := d.store.InsertEventLog(ctx, antiPortfolioDecisionEvent(d.ID, d.Domain, thesis, reason, d.minConviction)); err != nil {
+			d.log.Warn("persist anti-portfolio decision event failed", "thesis_id", thesis.ID, "reason", reason, "error", err)
+		}
 	}
 	if err := d.graph.RecordAntiPortfolio(ctx, thesis, reason); err != nil {
 		d.log.Warn("persist anti-portfolio to graph failed", "thesis_id", thesis.ID, "error", err)
+	}
+}
+
+func antiPortfolioDecisionEvent(deskID, domain string, thesis *model.Thesis, reason string, minConviction float64) store.EventLogEntry {
+	stage := rejectionStage(reason)
+	metadata := map[string]any{
+		"stage":                 stage,
+		"rejection_reason":      reason,
+		"thesis_id":             thesis.ID,
+		"opportunity_id":        thesis.OpportunityID,
+		"desk_id":               deskID,
+		"domain":                firstNonEmptyInternal(thesis.Domain, domain),
+		"strategy":              thesis.Strategy,
+		"symbol":                thesis.Instrument.Symbol,
+		"sec_type":              thesis.Instrument.SecType,
+		"direction":             string(thesis.Direction),
+		"status_at_rejection":   string(thesis.Status),
+		"conviction":            thesis.Conviction,
+		"min_conviction":        minConviction,
+		"position_size":         thesis.PositionSize,
+		"entry_price":           thesis.EntryPrice,
+		"target_price":          thesis.TargetPrice,
+		"stop_loss":             thesis.StopLoss,
+		"health":                thesis.Health,
+		"evidence_count":        len(thesis.Evidence),
+		"counter_args":          thesis.CounterArgs,
+		"counterfactual_status": "not_evaluated",
+		"counterfactual_reason": "counterfactual_pnl_not_evaluated",
+		"autonomy_mode":         thesis.AutonomyMode,
+		"scan_territory":        thesis.ScanTerritory,
+		"execution_territory":   thesis.ExecutionTerritory,
+		"competence_key":        thesis.CompetenceKey,
+		"competence_trust":      thesis.CompetenceTrust,
+		"competence_confidence": thesis.CompetenceConfidence,
+	}
+	if thesis.Prosecution != nil {
+		metadata["prosecution_verdict"] = thesis.Prosecution.Verdict
+		metadata["prosecution_confidence"] = thesis.Prosecution.Confidence
+		metadata["prosecution_bear_args"] = thesis.Prosecution.BearArgs
+		metadata["prosecution_analogues"] = thesis.Prosecution.Analogues
+	}
+	if thesis.CouncilVerdict != nil {
+		metadata["council_approved"] = thesis.CouncilVerdict.Approved
+		metadata["council_adjusted_conviction"] = thesis.CouncilVerdict.AdjustedConviction
+		metadata["council_adjusted_size"] = thesis.CouncilVerdict.AdjustedSize
+		metadata["council_weighted_vote_score"] = thesis.CouncilVerdict.WeightedVoteScore
+		metadata["council_total_weight"] = thesis.CouncilVerdict.TotalWeight
+		metadata["council_voice_count"] = len(thesis.CouncilVerdict.Voices)
+		metadata["council_voices"] = thesis.CouncilVerdict.Voices
+	}
+	if thesis.QuantMetrics != nil {
+		metadata["quant_metrics"] = thesis.QuantMetrics
+	}
+	if thesis.EvidenceMeta != nil {
+		metadata["evidence_meta"] = thesis.EvidenceMeta
+	}
+
+	return store.EventLogEntry{
+		Timestamp: time.Now().UTC(),
+		EventType: "thesis_rejected",
+		DeskID:    deskID,
+		Severity:  rejectionSeverity(reason),
+		Message:   fmt.Sprintf("thesis rejected at %s: %s", stage, reason),
+		Metadata:  metadata,
+	}
+}
+
+func rejectionStage(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "conviction_below_threshold":
+		return "research"
+	case "killed_by_prosecutor", "prosecutor_weakened_below_threshold":
+		return "prosecutor"
+	case "council_rejected":
+		return "council"
+	case "blocked_by_runtime_health":
+		return "runtime_health"
+	case "blocked_by_risk_gate":
+		return "risk"
+	case "kalshi_executor_unavailable", "kalshi_execution_rejected", "kalshi_order_not_filled":
+		return "execution"
+	default:
+		return "unknown"
+	}
+}
+
+func rejectionSeverity(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "blocked_by_runtime_health", "kalshi_executor_unavailable", "kalshi_execution_rejected":
+		return "warn"
+	default:
+		return "info"
 	}
 }
 

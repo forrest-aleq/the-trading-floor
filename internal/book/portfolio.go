@@ -697,7 +697,6 @@ func (b *Book) reconcile(ctx context.Context) {
 		}
 	}
 
-	positionsHealthy := true
 	if b.positionSource == nil {
 		if accountHealthy {
 			b.markBrokerSyncHealthy()
@@ -707,13 +706,12 @@ func (b *Book) reconcile(ctx context.Context) {
 
 	ibkrPositions, err := b.positionSource.GetPositions(ctx)
 	if err != nil {
-		positionsHealthy = false
 		b.recordBrokerSyncFailure("positions", err)
 		return
 	}
 
 	b.applyBrokerPositions(ibkrPositions)
-	if accountHealthy && positionsHealthy {
+	if accountHealthy {
 		b.markBrokerSyncHealthy()
 	}
 	discrepancies := b.Reconcile(ibkrPositions)

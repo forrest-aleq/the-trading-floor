@@ -30,6 +30,12 @@ if [[ -f "$REPO_ROOT/.env" ]]; then
 elif [[ -f "$REPO_ROOT/.env.example" && ! -f "$RUNTIME_ENV" ]]; then
   cp "$REPO_ROOT/.env.example" "$RUNTIME_ENV"
 fi
+if [[ -d "$REPO_ROOT/.secrets" ]]; then
+  mkdir -p "$RUNTIME_HOME/.secrets"
+  cp "$REPO_ROOT"/.secrets/* "$RUNTIME_HOME/.secrets"/
+  chmod 700 "$RUNTIME_HOME/.secrets"
+  chmod 600 "$RUNTIME_HOME"/.secrets/* 2>/dev/null || true
+fi
 
 export PROGRAM_PATH WORKDIR LOG_OUT LOG_ERR AUDIT_LOG_PATH
 perl -0pe 's#__PROGRAM_PATH__#$ENV{PROGRAM_PATH}#g; s#__WORKDIR__#$ENV{WORKDIR}#g; s#__LOG_OUT__#$ENV{LOG_OUT}#g; s#__LOG_ERR__#$ENV{LOG_ERR}#g; s#__AUDIT_LOG_PATH__#$ENV{AUDIT_LOG_PATH}#g' \

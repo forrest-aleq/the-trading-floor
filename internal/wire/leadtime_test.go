@@ -23,7 +23,7 @@ func TestLeadTimeTrackerLearnsFromEarlierForeignLanguageSignals(t *testing.T) {
 		TranslationConfidence: 0.91,
 		NarrativeClusterID:    "narrative-hormuz",
 	})
-	early = tracker.Enrich(early)
+	_ = tracker.Enrich(early)
 
 	consensus := NormalizeSignal(signal.Signal{
 		ID:                    "sig-consensus-en",

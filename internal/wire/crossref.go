@@ -235,10 +235,6 @@ func entityDisplayNames(entities []signal.Entity) map[string]string {
 	return names
 }
 
-func normalizeEntityKey(name string) string {
-	return entityresolve.NormalizeKey(name)
-}
-
 func signalLanguage(sig signal.Signal) string {
 	if len(sig.Languages) > 0 {
 		return strings.TrimSpace(strings.ToLower(sig.Languages[0]))

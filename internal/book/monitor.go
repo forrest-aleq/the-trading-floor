@@ -19,6 +19,7 @@ type Monitor struct {
 	onClose      func(position *model.Position, exitPrice float64, reason string)
 	onLifecycle  func(position *model.Position, alert model.LifecycleAlert)
 	interval     time.Duration
+	now          func() time.Time
 }
 
 func NewMonitor(book *Book, thesisLookup ThesisLookup, onClose func(*model.Position, float64, string)) *Monitor {
@@ -28,6 +29,7 @@ func NewMonitor(book *Book, thesisLookup ThesisLookup, onClose func(*model.Posit
 		thesisLookup: thesisLookup,
 		onClose:      onClose,
 		interval:     10 * time.Second,
+		now:          time.Now,
 	}
 }
 
@@ -58,6 +60,7 @@ func (m *Monitor) Run(ctx context.Context) {
 
 func (m *Monitor) RunOnce() {
 	positions := m.book.GetOpenPositions()
+	now := m.currentTime()
 	for _, pos := range positions {
 		if pos.CurrentPrice <= 0 {
 			continue
@@ -65,7 +68,7 @@ func (m *Monitor) RunOnce() {
 
 		thesis, _ := m.lookup(pos.ThesisID)
 		if thesis != nil {
-			lifecycleAlerts := detectLifecycleAlerts(pos, time.Now())
+			lifecycleAlerts := detectLifecycleAlerts(pos, now)
 			for _, alert := range lifecycleAlerts {
 				m.log.Warn("position lifecycle alert",
 					"symbol", pos.DisplaySymbol(),
@@ -90,7 +93,7 @@ func (m *Monitor) RunOnce() {
 				m.requestClose(pos, pos.CurrentPrice, "target_hit")
 				continue
 			}
-			if thesis.TimeHorizon > 0 && time.Since(pos.OpenedAt) >= thesis.TimeHorizon {
+			if thesis.TimeHorizon > 0 && now.Sub(pos.OpenedAt) >= thesis.TimeHorizon {
 				m.requestClose(pos, pos.CurrentPrice, "time_horizon")
 				continue
 			}
@@ -100,6 +103,13 @@ func (m *Monitor) RunOnce() {
 			m.requestClose(pos, pos.CurrentPrice, "emergency_loss_backstop")
 		}
 	}
+}
+
+func (m *Monitor) currentTime() time.Time {
+	if m != nil && m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 func (m *Monitor) lookup(thesisID string) (*model.Thesis, bool) {
@@ -221,11 +231,19 @@ func parseInstrumentExpiry(raw string) (time.Time, bool) {
 	if raw == "" {
 		return time.Time{}, false
 	}
-	for _, layout := range []string{"20060102", "2006-01-02", "200601"} {
+
+	for _, layout := range []string{"20060102", "2006-01-02"} {
 		if parsed, err := time.Parse(layout, raw); err == nil {
-			return parsed.UTC(), true
+			return expirationSessionClose(parsed), true
 		}
 	}
+
+	if parsed, err := time.Parse("200601", raw); err == nil {
+		year, month, _ := parsed.Date()
+		lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC)
+		return expirationSessionClose(lastDay), true
+	}
+
 	return time.Time{}, false
 }
 
@@ -238,4 +256,14 @@ func isShortOptionLeg(pos *model.Position, idx int) bool {
 	}
 	leg := pos.Legs[idx]
 	return leg.Direction == model.Short && (leg.Instrument.SecType == "OPT" || leg.Instrument.SecType == "FOP")
+}
+
+func expirationSessionClose(date time.Time) time.Time {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		loc = time.FixedZone("America/New_York", -5*60*60)
+	}
+
+	year, month, day := date.Date()
+	return time.Date(year, month, day, 16, 0, 0, 0, loc).UTC()
 }

@@ -66,6 +66,28 @@ func TestInternalSignalsRouteUsingExplicitTargetDomains(t *testing.T) {
 	}
 }
 
+func TestPredictionMarketSignalsRouteToPredictionDesk(t *testing.T) {
+	sig := signal.Signal{
+		Type:     signal.TypeAlternative,
+		Category: "prediction_market",
+		Raw:      []byte(`"Kalshi election odds repriced implied probability after court ruling"`),
+		EvidenceMeta: &evidence.Metadata{
+			SourceOwnerGroup: "prediction_market",
+			SourceType:       "alternative",
+		},
+	}
+
+	if !domainShouldReviewSignal("prediction_market", sig) {
+		t.Fatal("expected prediction-market desk to receive prediction-market signal")
+	}
+	if !domainShouldReviewSignal("macro", sig) {
+		t.Fatal("expected macro desk to receive prediction-market signal")
+	}
+	if domainShouldReviewSignal("corporate", sig) {
+		t.Fatal("did not expect corporate desk to receive prediction-market signal")
+	}
+}
+
 func TestSourceDrivenRoutingSpecializesDeskIntake(t *testing.T) {
 	geo := signal.Signal{
 		Type:     signal.TypeNews,

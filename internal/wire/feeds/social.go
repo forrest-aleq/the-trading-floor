@@ -85,7 +85,9 @@ func (f *SocialFeed) pollStockTwits(ctx context.Context, out chan<- signal.Signa
 		f.log.Warn("stocktwits fetch failed", "error", err, "retry_after", backoff)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		backoff := state.RecordFailure(time.Now(), f.interval)
@@ -177,7 +179,9 @@ func (f *SocialFeed) pollReddit(ctx context.Context, out chan<- signal.Signal, s
 		f.log.Warn("reddit fetch failed", "subreddit", subreddit, "error", err, "retry_after", backoff)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		backoff := state.RecordFailure(time.Now(), f.interval)

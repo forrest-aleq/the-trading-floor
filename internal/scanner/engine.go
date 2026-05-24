@@ -218,7 +218,6 @@ func (e *Engine) evaluateDetailedUncached(ctx context.Context, sig signal.Signal
 				resp = fallbackResp
 				usedPrompt = candidate.content
 				e.clearLLMCooldown()
-				err = nil
 				break
 			}
 		}
@@ -236,7 +235,6 @@ func (e *Engine) evaluateDetailedUncached(ctx context.Context, sig signal.Signal
 				resp = fallbackResp
 				usedPrompt = fallbackPrompt
 				e.clearLLMCooldown()
-				err = nil
 				break
 			}
 			e.log.Warn("scanner structured fallback failed",
@@ -258,7 +256,6 @@ func (e *Engine) evaluateDetailedUncached(ctx context.Context, sig signal.Signal
 					resp = fallbackResp
 					usedPrompt = fallbackPrompt
 					e.clearLLMCooldown()
-					err = nil
 					break
 				}
 				e.log.Warn("scanner structured fallback failed",
@@ -629,7 +626,7 @@ func scannerSelectedModel() string {
 	if model := strings.TrimSpace(os.Getenv("LLM_MODEL_SPEED")); model != "" {
 		return model
 	}
-	return "qwen/qwen3-8b"
+	return "openai/gpt-oss-120b"
 }
 
 func scannerFallbackModels(selectedModel string) []string {
@@ -1101,6 +1098,10 @@ Preferred instruments: sector ETFs, individual sector leaders/laggards, options 
 		return `Focus: momentum breakouts, mean reversion setups, statistical anomalies, factor exposures.
 Look for: quantitative signals — price/volume patterns, cross-sectional momentum, pairs divergence.
 Preferred instruments: high-liquidity stocks and ETFs suitable for systematic entry/exit.`
+	case "prediction_market":
+		return `Focus: prediction-market mispricings, election/event odds, Kalshi/Polymarket-style contracts, and event probabilities that imply tradeable cross-asset dislocations.
+Look for: probability moves that disagree with liquid-market pricing, stale odds after primary-source news, or event markets leading equities/rates/FX/crypto.
+Preferred instruments: Kalshi event tickers when the source signal contains a KX... ticker. Use sec_type "KALSHI", currency "USD", direction "long" to buy YES, direction "short" to buy NO, and entry_price as the dollar probability you are willing to pay for the intended YES/NO outcome.`
 	default:
 		return ""
 	}
@@ -1146,7 +1147,7 @@ func buildPrompt(domain, content string) string {
 
 func buildCompactPrompt(domain string, sig signal.Signal) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Domain: %s\n", domain))
+	_, _ = fmt.Fprintf(&sb, "Domain: %s\n", domain)
 	sb.WriteString(institutional.BuildSignalContext(sig, institutional.SignalContextOptions{
 		Compact:              true,
 		ContentLimit:         180,

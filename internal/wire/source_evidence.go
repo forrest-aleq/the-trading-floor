@@ -40,6 +40,8 @@ var (
 		{match: "reddit/", profile: sourceProfile{Domain: "reddit.com", OwnerGroup: "reddit", Tier: "social", Type: "social", Trust: 0.32, Region: "global"}},
 		{match: "telegram/", profile: sourceProfile{Domain: "telegram.org", OwnerGroup: "telegram", Tier: "social", Type: "social", Trust: 0.34, Region: "global"}},
 		{match: "ibkr-market", profile: sourceProfile{Domain: "interactivebrokers.com", OwnerGroup: "interactive_brokers", Tier: "primary", Type: "market", Trust: 0.97, Region: "global"}},
+		{match: "kalshi", profile: sourceProfile{Domain: "kalshi.com", OwnerGroup: "prediction_market", Tier: "market", Type: "alternative", Trust: 0.66, Region: "us"}},
+		{match: "polymarket", profile: sourceProfile{Domain: "polymarket.com", OwnerGroup: "prediction_market", Tier: "market", Type: "alternative", Trust: 0.58, Region: "global"}},
 		{match: "earnings-calendar", profile: sourceProfile{Domain: "", OwnerGroup: "earnings_provider", Tier: "aggregator", Type: "secondary", Trust: 0.68, Region: "us"}},
 		{match: "alternative/", profile: sourceProfile{Domain: "", OwnerGroup: "alternative_data", Tier: "industry", Type: "alternative", Trust: 0.60, Region: "global"}},
 	}
@@ -57,6 +59,8 @@ var (
 		{suffix: "reddit.com", profile: sourceProfile{Domain: "reddit.com", OwnerGroup: "reddit", Tier: "social", Type: "social", Trust: 0.32, Region: "global"}},
 		{suffix: "stocktwits.com", profile: sourceProfile{Domain: "stocktwits.com", OwnerGroup: "stocktwits", Tier: "social", Type: "social", Trust: 0.38, Region: "us"}},
 		{suffix: "interactivebrokers.com", profile: sourceProfile{Domain: "interactivebrokers.com", OwnerGroup: "interactive_brokers", Tier: "primary", Type: "market", Trust: 0.97, Region: "global"}},
+		{suffix: "kalshi.com", profile: sourceProfile{Domain: "kalshi.com", OwnerGroup: "prediction_market", Tier: "market", Type: "alternative", Trust: 0.66, Region: "us"}},
+		{suffix: "polymarket.com", profile: sourceProfile{Domain: "polymarket.com", OwnerGroup: "prediction_market", Tier: "market", Type: "alternative", Trust: 0.58, Region: "global"}},
 		{suffix: "telegram.org", profile: sourceProfile{Domain: "telegram.org", OwnerGroup: "telegram", Tier: "social", Type: "social", Trust: 0.34, Region: "global"}},
 	}
 	metricTerms = []string{

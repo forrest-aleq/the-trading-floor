@@ -14,6 +14,7 @@ import (
 
 	"github.com/hnic/trading-floor/internal/book"
 	"github.com/hnic/trading-floor/internal/execution"
+	kalshiexec "github.com/hnic/trading-floor/internal/execution/kalshi"
 	"github.com/hnic/trading-floor/internal/graphdb"
 	"github.com/hnic/trading-floor/internal/institutional"
 	"github.com/hnic/trading-floor/internal/llm"
@@ -47,6 +48,7 @@ type Desk struct {
 	council     *research.Council
 	riskGate    *risk.Gate
 	execution   *execution.Manager
+	kalshi      *kalshiexec.Executor
 	book        *book.Book
 	beliefs     *belief.Graph
 	learnWorker *memory.LearnWorker
@@ -81,6 +83,7 @@ type DeskConfig struct {
 	Council       *research.Council
 	RiskGate      *risk.Gate
 	Execution     *execution.Manager
+	Kalshi        *kalshiexec.Executor
 	Book          *book.Book
 	Beliefs       *belief.Graph
 	LearnWorker   *memory.LearnWorker
@@ -145,6 +148,7 @@ func NewDesk(cfg DeskConfig) *Desk {
 		council:          cfg.Council,
 		riskGate:         cfg.RiskGate,
 		execution:        cfg.Execution,
+		kalshi:           cfg.Kalshi,
 		book:             cfg.Book,
 		beliefs:          cfg.Beliefs,
 		learnWorker:      cfg.LearnWorker,
@@ -385,6 +389,19 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		d.recordAntiPortfolio(ctx, thesis, "blocked_by_runtime_health")
 		return
 	}
+	if d.isPredictionMarketDesk() {
+		if !d.handlesKalshiThesis() {
+			d.log.Warn("prediction-market thesis rejected; Kalshi executor is unavailable",
+				"thesis_id", thesis.ID,
+				"symbol", thesis.DisplaySymbol(),
+				"desk", d.ID,
+			)
+			d.recordAntiPortfolio(ctx, thesis, "kalshi_executor_unavailable")
+			return
+		}
+		d.handleKalshiThesis(ctx, thesis, autonomy)
+		return
+	}
 	d.research.HydrateThesisPricing(ctx, thesis)
 	d.normalizePositionSize(thesis)
 
@@ -539,6 +556,101 @@ func (d *Desk) currentEntryPolicy() EntryPolicy {
 	return policy
 }
 
+func (d *Desk) handlesKalshiThesis() bool {
+	return d != nil && d.kalshi != nil && strings.EqualFold(strings.TrimSpace(d.Domain), "prediction_market")
+}
+
+func (d *Desk) isPredictionMarketDesk() bool {
+	return d != nil && strings.EqualFold(strings.TrimSpace(d.Domain), "prediction_market")
+}
+
+func (d *Desk) handleKalshiThesis(ctx context.Context, thesis *model.Thesis, autonomy autonomyDecision) {
+	if d == nil || thesis == nil || d.kalshi == nil {
+		return
+	}
+
+	if autonomy.Mode == model.Restricted && !d.kalshi.IsDryRun() {
+		thesis.Status = model.ThesisNursery
+		d.rememberThesis(thesis)
+		d.persistThesis(ctx, thesis)
+		d.log.Info("kalshi live order blocked by restricted autonomy",
+			"thesis_id", thesis.ID,
+			"symbol", thesis.DisplaySymbol(),
+			"autonomy_mode", thesis.AutonomyMode,
+		)
+		return
+	}
+
+	executionCtx, cancel := context.WithTimeout(ctx, deskExecutionTimeout)
+	defer cancel()
+	result, err := d.kalshi.SubmitThesis(executionCtx, thesis)
+	if err != nil {
+		d.log.Warn("kalshi thesis mapping/execution failed",
+			"thesis_id", thesis.ID,
+			"symbol", thesis.DisplaySymbol(),
+			"error", err,
+		)
+		d.recordAntiPortfolio(ctx, thesis, "kalshi_execution_rejected")
+		return
+	}
+
+	switch {
+	case result.DryRun:
+		thesis.Status = model.ThesisNursery
+	case result.Response != nil && result.Response.HasFill():
+		thesis.Status = model.ThesisActive
+	case result.Response != nil && result.Response.IsResting():
+		thesis.Status = model.ThesisPending
+		d.log.Info("kalshi order resting without fill",
+			"thesis_id", thesis.ID,
+			"order_id", result.Response.OrderID,
+			"status", result.Response.Status,
+		)
+	case result.Response != nil:
+		thesis.Status = model.ThesisProsecuted
+		d.recordAntiPortfolio(ctx, thesis, "kalshi_order_not_filled")
+	default:
+		thesis.Status = model.ThesisPending
+	}
+	d.rememberThesis(thesis)
+	d.persistThesis(ctx, thesis)
+
+	if d.onTrade != nil && !result.DryRun && thesis.Status == model.ThesisActive {
+		d.onTrade()
+	}
+
+	d.log.Info("kalshi order mapped",
+		"thesis_id", thesis.ID,
+		"desk", d.ID,
+		"mode", result.Mode,
+		"dry_run", result.DryRun,
+		"ticker", result.MappedOrder.Request.Ticker,
+		"side", result.MappedOrder.Request.Side,
+		"action", result.MappedOrder.Request.Action,
+		"price", result.MappedOrder.Request.PriceDollars(),
+		"count", result.MappedOrder.Request.Count,
+		"estimated_risk", kalshiexec.FormatCents(result.MappedOrder.EstimatedRiskCents),
+		"filled_count", filledKalshiCount(result.Response),
+		"order_status", kalshiOrderStatus(result.Response),
+		"autonomy_mode", thesis.AutonomyMode,
+		"status", thesis.Status,
+	)
+}
+
+func filledKalshiCount(resp *kalshiexec.OrderResponse) float64 {
+	if resp == nil {
+		return 0
+	}
+	return resp.FilledCount()
+}
+
+func kalshiOrderStatus(resp *kalshiexec.OrderResponse) string {
+	if resp == nil {
+		return ""
+	}
+	return resp.Status
+}
+
 func (d *Desk) RecordExecutionFill(ctx context.Context, fill *model.Fill) (*model.Position, error) {
 	if d == nil || fill == nil {
 		return nil, errors.New("nil desk or fill")
@@ -668,11 +780,6 @@ func (d *Desk) collaborationInputForSignal(sig signal.Signal) *model.Collaborati
 		}
 		return peer, true
 	})
-}
-
-func (d *Desk) augmentSignalWithCollaborationContext(sig signal.Signal) signal.Signal {
-	input := d.collaborationInputForSignal(sig)
-	return institutional.AugmentSignalWithCollaborationContext(sig, input)
 }
 
 func (d *Desk) augmentSignalInstitutionalState(sig signal.Signal) signal.Signal {

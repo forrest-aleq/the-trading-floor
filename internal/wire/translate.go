@@ -235,7 +235,9 @@ func (t *deeplTranslator) translateText(text, language string) (string, string, 
 	if err != nil {
 		return "", "", fmt.Errorf("call deepl: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", "", fmt.Errorf("deepl non-200: %s", resp.Status)

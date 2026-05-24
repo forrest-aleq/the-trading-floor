@@ -1,4 +1,4 @@
-.PHONY: build run test lint clean ctl market backfill migrate service-install service-uninstall service-status service-restart
+.PHONY: build run test lint clean ctl market backfill modelbench migrate service-install service-uninstall service-status service-restart
 
 BINARY=trading-floor
 CMD_DIR=./cmd
@@ -7,6 +7,8 @@ build:
 	go build -o bin/floor $(CMD_DIR)/floor
 	go build -o bin/backfill $(CMD_DIR)/backfill
 	go build -o bin/ctl $(CMD_DIR)/ctl
+	go build -o bin/kalshi $(CMD_DIR)/kalshi
+	go build -o bin/modelbench $(CMD_DIR)/modelbench
 
 run: build
 	./bin/floor
@@ -28,6 +30,9 @@ market: build
 
 backfill: build
 	./bin/backfill $(ARGS)
+
+modelbench:
+	go run ./cmd/modelbench $(ARGS)
 
 migrate:
 	psql $(DATABASE_URL) -f store/migrations/001_init.sql

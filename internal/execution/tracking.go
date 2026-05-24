@@ -2,7 +2,6 @@ package execution
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -494,11 +493,6 @@ func normalizePendingOrderError(snapshot OrderSnapshot) error {
 		Status:  snapshot.BrokerStatus,
 		Cause:   fmt.Errorf("order %s already working at broker", snapshot.OrderID),
 	}
-}
-
-func isPendingBrokerError(err error) bool {
-	var pending *PendingFillError
-	return errors.As(err, &pending)
 }
 
 func persistedOrderFromTracked(tracked *trackedOrder) PersistedOrder {

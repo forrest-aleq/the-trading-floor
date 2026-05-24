@@ -99,7 +99,9 @@ func (f *EarningsFeed) poll(ctx context.Context, out chan<- signal.Signal) {
 		f.log.Warn("earnings fetch failed", "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		f.log.Warn("earnings non-200", "status", resp.StatusCode)

@@ -1281,10 +1281,10 @@ func (d *Desk) buildResearchPrompt(opp *model.Opportunity, sig signal.Signal, ma
 	if compact {
 		sb.WriteString(d.compactPrefix + "\n\n")
 	}
-	sb.WriteString(fmt.Sprintf("Opportunity (score: %.0f, urgency: %.2f, category: %s):\n", opp.Score, opp.Urgency, opp.Category))
-	sb.WriteString(fmt.Sprintf("Instruments: %v\n", instrumentNames(opp.Instruments)))
-	sb.WriteString(fmt.Sprintf("Direction: %s\n", opp.Direction))
-	sb.WriteString(fmt.Sprintf("Signal IDs: %v\n", opp.SignalIDs))
+	_, _ = fmt.Fprintf(&sb, "Opportunity (score: %.0f, urgency: %.2f, category: %s):\n", opp.Score, opp.Urgency, opp.Category)
+	_, _ = fmt.Fprintf(&sb, "Instruments: %v\n", instrumentNames(opp.Instruments))
+	_, _ = fmt.Fprintf(&sb, "Direction: %s\n", opp.Direction)
+	_, _ = fmt.Fprintf(&sb, "Signal IDs: %v\n", opp.SignalIDs)
 
 	sb.WriteString("\nSignal snapshot:\n")
 	sb.WriteString(formatSignalForResearch(sig, compact))
@@ -1296,8 +1296,8 @@ func (d *Desk) buildResearchPrompt(opp *model.Opportunity, sig signal.Signal, ma
 	}
 
 	if opp.CascadeInfo != nil {
-		sb.WriteString(fmt.Sprintf("\n\nCascade detected:\n  Source domain: %s\n  Target gaps: %v\n  Confidence: %.2f",
-			opp.CascadeInfo.SourceDomain, opp.CascadeInfo.TargetGaps, opp.CascadeInfo.Confidence))
+		_, _ = fmt.Fprintf(&sb, "\n\nCascade detected:\n  Source domain: %s\n  Target gaps: %v\n  Confidence: %.2f",
+			opp.CascadeInfo.SourceDomain, opp.CascadeInfo.TargetGaps, opp.CascadeInfo.Confidence)
 	}
 
 	if marketSummary := marketcontext.FormatForPrompt(marketCtx); marketSummary != "" {

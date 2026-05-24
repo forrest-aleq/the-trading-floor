@@ -10,7 +10,8 @@
     "flows": ["volatility", "systematic", "sector"],
     "tail": ["macro", "volatility", "geopolitical", "systematic"],
     "volatility": ["flows", "tail", "systematic"],
-    "sector": ["corporate", "flows", "systematic"],
-    "systematic": ["flows", "volatility", "macro", "sector"]
+    "sector": ["corporate", "flows", "systematic", "prediction_market"],
+    "systematic": ["flows", "volatility", "macro", "sector", "prediction_market"],
+    "prediction_market": ["macro", "tail", "geopolitical", "systematic", "volatility"]
   }
 }

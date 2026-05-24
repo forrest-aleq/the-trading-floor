@@ -40,7 +40,7 @@ func (p *FallbackProvider) Snapshot(ctx context.Context, inst model.Instrument) 
 	}
 
 	snapshot, err := p.primary.Snapshot(ctx, inst)
-	if err == nil && snapshot != nil && snapshot.ObservedAt.IsZero() == false {
+	if err == nil && snapshot != nil && !snapshot.ObservedAt.IsZero() {
 		return snapshot, nil
 	}
 	if err == nil && snapshot != nil && (snapshot.Last > 0 || snapshot.Bid > 0 || snapshot.Ask > 0) {

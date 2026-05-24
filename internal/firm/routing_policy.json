@@ -7,7 +7,8 @@
     "tail": ["tail", "volatility", "macro", "geopolitical"],
     "volatility": ["volatility", "tail"],
     "sector": ["sector", "corporate"],
-    "market": ["systematic", "volatility", "sector"]
+    "market": ["systematic", "volatility", "sector"],
+    "prediction_market": ["prediction_market", "macro", "tail", "systematic"]
   },
   "signal_type_domain_rules": {
     "filing": ["corporate"],
@@ -15,18 +16,19 @@
     "price": ["systematic", "volatility", "sector"],
     "social": ["flows", "volatility"],
     "flow": ["flows", "volatility"],
-    "alternative": ["macro", "sector"]
+    "alternative": ["macro", "sector", "prediction_market"]
   },
   "source_type_domain_rules": {
     "social": ["flows", "volatility"],
     "market": ["systematic", "volatility"],
-    "alternative": ["sector", "systematic"]
+    "alternative": ["sector", "systematic", "prediction_market"]
   },
   "owner_group_domain_rules": {
     "federal_reserve": ["macro", "tail", "systematic"],
     "sec": ["corporate", "sector"],
     "earnings_provider": ["corporate", "sector"],
-    "interactive_brokers": ["systematic", "volatility"]
+    "interactive_brokers": ["systematic", "volatility"],
+    "prediction_market": ["prediction_market", "macro", "tail", "systematic"]
   },
   "domain_group_max_matches": {
     "geopolitical": 1,
@@ -36,7 +38,8 @@
     "tail": 1,
     "volatility": 1,
     "sector": 1,
-    "systematic": 1
+    "systematic": 1,
+    "prediction_market": 1
   },
   "desk_rules": {
     "geo-cascade-a": {
@@ -262,6 +265,67 @@
       "categories": ["market", "flows", "sector"],
       "signal_types": ["price", "flow", "news"],
       "keywords_any": ["reversion", "oversold", "dislocation", "gap fill", "bounce", "snapback", "mean reversion"]
+    },
+
+    "pred-markets-a": {
+      "priority": 100,
+      "categories": ["prediction_market", "macro", "geopolitical", "tail"],
+      "signal_types": ["alternative", "news", "social"],
+      "keywords_any": ["prediction market", "kalshi", "polymarket", "manifold", "metaculus", "election odds", "contract odds", "implied probability", "probability market", "event odds", "yes contract", "no contract", "forecast market"]
+    },
+    "kalshi-rates-a": {
+      "priority": 100,
+      "categories": ["prediction_market", "macro"],
+      "signal_types": ["alternative", "economic", "news"],
+      "keywords_any": ["fed", "fomc", "rate", "rates", "cut", "hike", "cpi", "ppi", "pce", "inflation", "payroll", "jobs", "unemployment", "treasury", "yield"]
+    },
+    "kalshi-macro-a": {
+      "priority": 98,
+      "categories": ["prediction_market", "macro", "market"],
+      "signal_types": ["alternative", "economic", "news", "price"],
+      "keywords_any": ["recession", "gdp", "growth", "oil", "gas", "commodity", "dollar", "gold", "stock market", "s&p", "nasdaq", "dow", "close above", "close below"]
+    },
+    "kalshi-elections-a": {
+      "priority": 98,
+      "categories": ["prediction_market", "geopolitical", "macro"],
+      "signal_types": ["alternative", "news", "social"],
+      "keywords_any": ["election", "primary", "senate", "house", "governor", "president", "poll", "approval", "candidate", "nomination", "vote", "ballot"]
+    },
+    "kalshi-weather-a": {
+      "priority": 96,
+      "categories": ["prediction_market", "tail"],
+      "signal_types": ["alternative", "news"],
+      "keywords_any": ["temperature", "weather", "hurricane", "storm", "rain", "snow", "wind", "heat", "cold", "noaa", "forecast", "precipitation"]
+    },
+    "kalshi-sports-a": {
+      "priority": 94,
+      "categories": ["prediction_market"],
+      "signal_types": ["alternative", "news", "social"],
+      "keywords_any": ["nfl", "nba", "mlb", "nhl", "soccer", "football", "basketball", "baseball", "game", "player", "injury", "team", "playoff", "championship"]
+    },
+    "kalshi-crypto-a": {
+      "priority": 96,
+      "categories": ["prediction_market", "market", "flows"],
+      "signal_types": ["alternative", "news", "price", "social"],
+      "keywords_any": ["bitcoin", "btc", "ethereum", "eth", "crypto", "coinbase", "etf", "spot etf", "halving", "stablecoin", "defi"]
+    },
+    "kalshi-tech-a": {
+      "priority": 94,
+      "categories": ["prediction_market", "sector", "corporate"],
+      "signal_types": ["alternative", "news"],
+      "keywords_any": ["ai", "openai", "nvidia", "semiconductor", "chip", "iphone", "tesla", "spacex", "launch", "data center", "earnings"]
+    },
+    "kalshi-culture-a": {
+      "priority": 90,
+      "categories": ["prediction_market"],
+      "signal_types": ["alternative", "news", "social"],
+      "keywords_any": ["oscars", "grammy", "emmy", "movie", "album", "streaming", "box office", "celebrity", "award", "entertainment"]
+    },
+    "kalshi-marketstructure-a": {
+      "priority": 96,
+      "categories": ["prediction_market", "flows", "systematic"],
+      "signal_types": ["alternative", "price", "flow"],
+      "keywords_any": ["spread", "orderbook", "liquidity", "volume", "open interest", "mispricing", "arbitrage", "implied probability", "stale odds", "market maker"]
     }
   },
   "fallback_domains": ["macro", "systematic"]

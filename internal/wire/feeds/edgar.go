@@ -75,7 +75,9 @@ func (f *EDGARFeed) poll(ctx context.Context, out chan<- signal.Signal) {
 		f.log.Warn("edgar fetch failed", "error", err, "retry_after", backoff)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		backoff := f.state.RecordFailure(time.Now(), f.interval)

@@ -18,6 +18,7 @@ import (
 	"github.com/hnic/trading-floor/internal/book"
 	"github.com/hnic/trading-floor/internal/execution"
 	"github.com/hnic/trading-floor/internal/execution/ibkr"
+	kalshiexec "github.com/hnic/trading-floor/internal/execution/kalshi"
 	"github.com/hnic/trading-floor/internal/firm"
 	"github.com/hnic/trading-floor/internal/graphdb"
 	"github.com/hnic/trading-floor/internal/llm"
@@ -66,6 +67,30 @@ func main() {
 	}
 	slog.Info("runtime mode selected", "mode", runtimeMode)
 
+	desks, err := activeDeskConfig()
+	if err != nil {
+		slog.Error("invalid desk runtime configuration", "error", err)
+		os.Exit(1)
+	}
+	brokerExecutionRequired := desksRequireBrokerExecution(desks)
+	kalshiExecutionRequired := desksRequireKalshiExecution(desks)
+	slog.Info("desk runtime selected",
+		"desks", len(desks),
+		"broker_execution_required", brokerExecutionRequired,
+		"kalshi_execution_required", kalshiExecutionRequired,
+	)
+
+	kalshiExecutor, err := kalshiexec.NewExecutorFromEnv()
+	if err != nil {
+		slog.Warn("Kalshi execution disabled by configuration error", "error", err)
+	}
+	if kalshiExecutor != nil {
+		slog.Info("Kalshi execution adapter initialized", "dry_run", kalshiExecutor.IsDryRun())
+	}
+	if kalshiExecutionRequired {
+		reportKalshiBankroll(ctx, kalshiExecutor)
+	}
+
 	// --- LLM ---
 	llmRouter := llm.DefaultRouter()
 	slog.Info("LLM router initialized",
@@ -88,19 +113,31 @@ func main() {
 	if err != nil {
 		slog.Warn("Neo4j not available — running without graph brain", "error", err)
 	} else if graph != nil {
-		defer graph.Close(ctx)
+		defer func() {
+			if err := graph.Close(ctx); err != nil {
+				slog.Warn("Neo4j close failed", "error", err)
+			}
+		}()
 		slog.Info("Neo4j connected")
 	}
 
 	// --- IBKR ---
+	ibkrRuntimeEnabled := brokerExecutionRequired || readRuntimeBool("FLOOR_ENABLE_IBKR_RUNTIME", false)
 	pacing := ibkr.NewPacingBudget()
-	observe.SafeGo(slog.Default().With("component", "runtime"), "ibkr pacing loop panic", func() {
-		pacing.Run(ctx)
-	}, "task", "ibkr_pacing")
+	if ibkrRuntimeEnabled {
+		observe.SafeGo(slog.Default().With("component", "runtime"), "ibkr pacing loop panic", func() {
+			pacing.Run(ctx)
+		}, "task", "ibkr_pacing")
+	}
 
 	ibkrCfg := ibkr.DefaultConfig()
 	ibkrClient := ibkr.NewClient(ibkrCfg)
-	if err := ibkrClient.Connect(ctx); err != nil {
+	if !ibkrRuntimeEnabled {
+		slog.Info("IBKR startup skipped; selected desks do not use broker execution",
+			"host", ibkrCfg.Host,
+			"port", ibkrCfg.Port,
+		)
+	} else if err := ibkrClient.Connect(ctx); err != nil {
 		brokerStatus := ibkrClient.ConnectionStatus()
 		slog.Warn("IBKR unavailable at startup — continuing in degraded mode while reconnect loop retries",
 			"error", err,
@@ -129,9 +166,13 @@ func main() {
 		hydrateCancel()
 	}
 	bk := book.NewBook(ibkrClient, 1_000_000)
-	observe.SafeGo(slog.Default().With("component", "runtime"), "book reconcile loop panic", func() {
-		bk.StartReconcile(ctx)
-	}, "task", "book_reconcile")
+	if ibkrRuntimeEnabled {
+		observe.SafeGo(slog.Default().With("component", "runtime"), "book reconcile loop panic", func() {
+			bk.StartReconcile(ctx)
+		}, "task", "book_reconcile")
+	} else {
+		slog.Info("broker book reconciliation disabled; selected desks do not use broker execution")
+	}
 	slog.Info("book and execution initialized")
 
 	// --- Centralized Market Data ---
@@ -189,6 +230,9 @@ func main() {
 	if err := validateRuntimeReadiness(runtimeReadiness{
 		Mode:                    runtimeMode,
 		DBReady:                 db != nil,
+		BrokerExecutionRequired: brokerExecutionRequired,
+		KalshiExecutionRequired: kalshiExecutionRequired,
+		KalshiExecutionReady:    kalshiExecutor != nil,
 		BrokerConnected:         ibkrClient.IsConnected(),
 		BrokerPaper:             ibkrClient.IsPaper(),
 		MarketStateConfigured:   marketState.Provider != nil,
@@ -202,6 +246,9 @@ func main() {
 		slog.Error("runtime readiness validation failed",
 			"mode", runtimeMode,
 			"db_ready", db != nil,
+			"broker_execution_required", brokerExecutionRequired,
+			"kalshi_execution_required", kalshiExecutionRequired,
+			"kalshi_execution_ready", kalshiExecutor != nil,
 			"broker_connected", ibkrClient.IsConnected(),
 			"broker_paper", ibkrClient.IsPaper(),
 			"market_data_provider", firstNonEmpty(marketState.Label, string(marketState.Mode)),
@@ -391,12 +438,11 @@ func main() {
 		slog.Error("audit log init failed", "error", err)
 		os.Exit(1)
 	}
-	defer audit.Close()
-	desks, err := activeDeskConfig()
-	if err != nil {
-		slog.Error("invalid desk runtime configuration", "error", err)
-		os.Exit(1)
-	}
+	defer func() {
+		if err := audit.Close(); err != nil {
+			slog.Warn("audit log close failed", "error", err)
+		}
+	}()
 	audit.Record("system_start", "", "", map[string]any{
 		"session_id":     sessionID,
 		"paper":          ibkrClient.IsPaper(),
@@ -407,7 +453,7 @@ func main() {
 	})
 
 	var entryControl firm.EntryControl
-	if runtimeMode != runtimeModeDev || marketState.Provider != nil {
+	if brokerExecutionRequired && (runtimeMode != runtimeModeDev || marketState.Provider != nil) {
 		defaultMaxQuoteAge := 2 * time.Minute
 		if strings.HasPrefix(marketStateLabel, "massive_free+") {
 			defaultMaxQuoteAge = 10 * time.Minute
@@ -449,11 +495,13 @@ func main() {
 			"max_quote_age", maxQuoteAge,
 			"persistence_timeout", persistenceProbeTimeout,
 		)
+	} else if !brokerExecutionRequired {
+		slog.Info("runtime health supervisor disabled; selected desks do not use broker execution")
 	} else {
 		slog.Warn("runtime health supervisor disabled in dev mode without live market data provider")
 	}
 
-	feedCount := registerDefaultFeeds(wireMgr, mdMgr)
+	feedCount := registerDefaultFeeds(wireMgr, mdMgr, desks)
 
 	// --- Floor + Desks ---
 	floor := firm.NewFloor(wireMgr, sessionID)
@@ -475,6 +523,7 @@ func main() {
 			Council:       council,
 			RiskGate:      riskGate,
 			Execution:     execMgr,
+			Kalshi:        kalshiExecutor,
 			Book:          bk,
 			Beliefs:       beliefGraph,
 			LearnWorker:   learnWorker,
@@ -484,7 +533,7 @@ func main() {
 			OnTrade:       floor.RecordTrade,
 			Watchlist:     mdMgr.AddInstruments,
 			PublishSignal: wireMgr.Publish,
-			EntryControl:  entryControl,
+			EntryControl:  entryControlForDesk(d, entryControl),
 		})
 		desksByID[d.id] = desk
 		floor.AddDesk(desk)
@@ -781,13 +830,6 @@ func heartbeatInterval() time.Duration {
 	return d
 }
 
-func oppositeDirection(direction model.TradeDirection) model.TradeDirection {
-	if direction == model.Short {
-		return model.Long
-	}
-	return model.Short
-}
-
 func normalizeClosedAt(pos *model.Position) time.Time {
 	if pos != nil && pos.ClosedAt != nil {
 		return pos.ClosedAt.UTC()
@@ -949,6 +991,18 @@ func readRuntimeInt(name string, fallback int) int {
 	return parsed
 }
 
+func readRuntimeBool(name string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 func limitInstruments(instruments []model.Instrument, limit int) []model.Instrument {
 	if limit <= 0 || limit >= len(instruments) {
 		return instruments
@@ -974,6 +1028,12 @@ type deskDef struct {
 
 func activeDeskConfig() ([]deskDef, error) {
 	desks := fullDeskConfig()
+	if readRuntimeBool("FLOOR_ENABLE_KALSHI_DESKS", false) {
+		desks = append(desks, kalshiDeskConfig()...)
+	}
+	if readRuntimeBool("FLOOR_ENABLE_PREDICTION_MARKET_DESK", false) {
+		desks = append(desks, predictionMarketDeskConfig()...)
+	}
 	if allowlist := strings.TrimSpace(os.Getenv("FLOOR_ENABLED_DESKS")); allowlist != "" {
 		selected, err := filterDeskConfig(desks, allowlist)
 		if err != nil {
@@ -996,6 +1056,39 @@ func activeDeskConfig() ([]deskDef, error) {
 		return nil, fmt.Errorf("desk runtime configuration selected zero desks")
 	}
 	return desks, nil
+}
+
+func deskUsesKalshiExecution(d deskDef) bool {
+	return strings.EqualFold(strings.TrimSpace(d.domain), "prediction_market")
+}
+
+func deskUsesBrokerExecution(d deskDef) bool {
+	return !deskUsesKalshiExecution(d)
+}
+
+func desksRequireKalshiExecution(desks []deskDef) bool {
+	for _, desk := range desks {
+		if deskUsesKalshiExecution(desk) {
+			return true
+		}
+	}
+	return false
+}
+
+func desksRequireBrokerExecution(desks []deskDef) bool {
+	for _, desk := range desks {
+		if deskUsesBrokerExecution(desk) {
+			return true
+		}
+	}
+	return false
+}
+
+func entryControlForDesk(d deskDef, brokerControl firm.EntryControl) firm.EntryControl {
+	if deskUsesKalshiExecution(d) {
+		return nil
+	}
+	return brokerControl
 }
 
 func filterDeskConfig(desks []deskDef, rawAllowlist string) ([]deskDef, error) {
@@ -1027,21 +1120,28 @@ func filterDeskConfig(desks []deskDef, rawAllowlist string) ([]deskDef, error) {
 	return selected, nil
 }
 
-func registerDefaultFeeds(wireMgr *wire.Manager, marketClient feeds.MarketDataClient) int {
+func registerDefaultFeeds(wireMgr *wire.Manager, marketClient feeds.MarketDataClient, desks []deskDef) int {
 	marketWatchlist := feeds.DefaultWatchlist()
 	earningsWatchlist := feeds.DefaultEarningsWatchlist()
 	registered := 0
+	kalshiOnly := desksRequireKalshiExecution(desks) && !desksRequireBrokerExecution(desks)
 
-	feedSet := []wire.Feed{
-		feeds.NewNewsFeed(nil),
-		feeds.NewEDGARFeed(),
-		feeds.NewSocialFeed(),
-		feeds.NewMacroFeed(os.Getenv("FRED_API_KEY")),
-		feeds.NewTelegramFeed(nil),
-		feeds.NewEarningsFeed(os.Getenv("FMP_API_KEY"), earningsWatchlist),
-		feeds.NewAlternativeFeed(nil),
+	feedSet := []wire.Feed{}
+	if !kalshiOnly {
+		feedSet = append(feedSet,
+			feeds.NewNewsFeed(nil),
+			feeds.NewEDGARFeed(),
+			feeds.NewSocialFeed(),
+			feeds.NewMacroFeed(os.Getenv("FRED_API_KEY")),
+			feeds.NewTelegramFeed(nil),
+			feeds.NewEarningsFeed(os.Getenv("FMP_API_KEY"), earningsWatchlist),
+			feeds.NewAlternativeFeed(nil),
+		)
 	}
-	if marketClient != nil {
+	if kalshiClient := feeds.NewKalshiClientFromEnv(); kalshiClient != nil {
+		feedSet = append(feedSet, feeds.NewKalshiFeed(kalshiClient))
+	}
+	if marketClient != nil && !kalshiOnly {
 		feedSet = append(feedSet, feeds.NewMarketFeed(marketClient, marketWatchlist))
 	}
 
@@ -1113,6 +1213,77 @@ func fullDeskConfig() []deskDef {
 		{"sys-momentum-b", "systematic", "B", 25_000},
 		{"sys-meanrev-b", "systematic", "B", 25_000},
 	}
+}
+
+func predictionMarketDeskConfig() []deskDef {
+	return []deskDef{
+		{"pred-markets-a", "prediction_market", "A", 10_000},
+	}
+}
+
+func kalshiDeskConfig() []deskDef {
+	ids := []string{
+		"kalshi-rates-a",
+		"kalshi-macro-a",
+		"kalshi-elections-a",
+		"kalshi-weather-a",
+		"kalshi-sports-a",
+		"kalshi-crypto-a",
+		"kalshi-tech-a",
+		"kalshi-culture-a",
+		"kalshi-marketstructure-a",
+	}
+	capital := readRuntimeFloat("KALSHI_DESK_CAPITAL_DOLLARS", 0)
+	desks := make([]deskDef, 0, len(ids))
+	for _, id := range ids {
+		desks = append(desks, deskDef{id: id, domain: "prediction_market", group: "A", capital: capital})
+	}
+	return desks
+}
+
+func reportKalshiBankroll(ctx context.Context, executor *kalshiexec.Executor) {
+	maxOrderRisk := readRuntimeFloat("KALSHI_MAX_ORDER_DOLLARS", 0)
+	riskPct := readRuntimeFloat("KALSHI_RISK_PCT_EQUITY", 0)
+	if configured := readRuntimeFloat("KALSHI_ACCOUNT_EQUITY_DOLLARS", 0); configured > 0 {
+		slog.Info("Kalshi bankroll status",
+			"available", true,
+			"source", "configured_account_equity",
+			"equity", configured,
+			"max_order_risk", maxOrderRisk,
+			"risk_pct_equity", riskPct,
+		)
+		return
+	}
+	if executor == nil {
+		slog.Warn("Kalshi bankroll status",
+			"available", false,
+			"source", "unavailable",
+			"reason", "executor_unavailable",
+			"max_order_risk", maxOrderRisk,
+			"risk_pct_equity", riskPct,
+		)
+		return
+	}
+	balanceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	equityCents, err := executor.AccountEquityCents(balanceCtx)
+	if err != nil {
+		slog.Warn("Kalshi bankroll status",
+			"available", false,
+			"source", "unavailable",
+			"reason", err.Error(),
+			"max_order_risk", maxOrderRisk,
+			"risk_pct_equity", riskPct,
+		)
+		return
+	}
+	slog.Info("Kalshi bankroll status",
+		"available", true,
+		"source", "kalshi_api",
+		"equity", float64(equityCents)/100.0,
+		"max_order_risk", maxOrderRisk,
+		"risk_pct_equity", riskPct,
+	)
 }
 
 func engramsFromRecords(records []*store.EngramRecord) []*memory.Engram {

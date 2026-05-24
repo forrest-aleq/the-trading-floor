@@ -60,7 +60,7 @@ func researchSelectedModel() string {
 	if model := strings.TrimSpace(os.Getenv("LLM_MODEL_ANALYSIS")); model != "" {
 		return model
 	}
-	return "qwen/qwen3.5-35b-a3b"
+	return "openai/gpt-oss-120b"
 }
 
 func criticalSelectedModel() string {
@@ -73,7 +73,7 @@ func criticalSelectedModel() string {
 	if model := strings.TrimSpace(os.Getenv("LLM_MODEL_CRITICAL")); model != "" {
 		return model
 	}
-	return "qwen/qwen3.5-35b-a3b"
+	return "deepseek/deepseek-v4-pro"
 }
 
 func structuredCompilerModel(envName string) string {

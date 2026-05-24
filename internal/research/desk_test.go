@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -260,7 +259,7 @@ func (s *researchStringNumericClient) Complete(_ context.Context, req llm.Reques
 	return &llm.Response{
 		Content: `{
   "structure": "single",
-  "instrument": {"symbol": "TLT 2026-05-18 130PUT", "sec_type": "STK", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": "130", "right": "PUT"},
+  "instrument": {"symbol": "TLT 2099-05-18 130PUT", "sec_type": "STK", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": "130", "right": "PUT"},
   "legs": [],
   "direction": "long",
   "entry_price": "2.75",
@@ -666,7 +665,7 @@ func TestInvestigateAllowsMissingEntryPriceWhenDirectionAndInstrumentExist(t *te
 
 func TestNormalizeResearchInstrumentParsesOptionContractSymbol(t *testing.T) {
 	inst := normalizeResearchInstrument(model.Instrument{
-		Symbol:   "TLT 2026-05-18 130PUT",
+		Symbol:   "TLT 2099-05-18 130PUT",
 		SecType:  "STK",
 		Currency: "USD",
 		Exchange: "SMART",
@@ -678,8 +677,8 @@ func TestNormalizeResearchInstrumentParsesOptionContractSymbol(t *testing.T) {
 	if inst.SecType != "OPT" {
 		t.Fatalf("expected sec type OPT, got %q", inst.SecType)
 	}
-	if inst.Expiry != "20260518" {
-		t.Fatalf("expected normalized expiry 20260518, got %q", inst.Expiry)
+	if inst.Expiry != "20990518" {
+		t.Fatalf("expected normalized expiry 20990518, got %q", inst.Expiry)
 	}
 	if inst.Strike != 130 {
 		t.Fatalf("expected strike 130, got %.2f", inst.Strike)
@@ -839,7 +838,7 @@ func testSignal() signal.Signal {
 }
 
 func validResearchJSON() string {
-	return fmt.Sprintf(`{
+	return `{
   "structure": "single",
   "instrument": {"symbol": "TLT", "sec_type": "STK", "currency": "USD", "exchange": "SMART", "expiry": "", "strike": 0, "right": ""},
   "legs": [],
@@ -863,7 +862,7 @@ func validResearchJSON() string {
   "counter_args": ["speech may be ignored", "positioning could already be crowded"],
   "kill_rules": [{"condition": "price_below_stop", "threshold": 88.0, "action": "close"}],
   "reasoning": "hawkish repricing favors duration rebound after overshoot"
-}`)
+}`
 }
 
 func containsTerminalContract(prompt string) bool {

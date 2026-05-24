@@ -17,6 +17,9 @@ const (
 type runtimeReadiness struct {
 	Mode                    runtimeMode
 	DBReady                 bool
+	BrokerExecutionRequired bool
+	KalshiExecutionRequired bool
+	KalshiExecutionReady    bool
 	BrokerConnected         bool
 	BrokerPaper             bool
 	MarketStateConfigured   bool
@@ -50,55 +53,65 @@ func validateRuntimeReadiness(readiness runtimeReadiness) error {
 		if !readiness.DBReady {
 			return fmt.Errorf("paper mode requires PostgreSQL persistence")
 		}
-		if !readiness.BrokerConnected {
-			return fmt.Errorf("paper mode requires IBKR connectivity at startup")
+		if readiness.KalshiExecutionRequired && !readiness.KalshiExecutionReady {
+			return fmt.Errorf("paper mode requires Kalshi execution when prediction-market desks are selected")
 		}
-		if !readiness.BrokerPaper {
-			return fmt.Errorf("paper mode requires a paper IBKR session")
-		}
-		if !readiness.MarketStateConfigured {
-			return fmt.Errorf("paper mode requires an explicit market data provider; TWS is broker/account only")
-		}
-		if readiness.MarketStateBrokerBacked {
-			return fmt.Errorf("paper mode requires a non-broker market data provider; TWS is broker/account only")
-		}
-		if !readiness.StartupPricingReady {
-			return fmt.Errorf("paper mode requires a non-empty startup pricing watchlist")
-		}
-		if !readiness.RegimeDetectionEnabled {
-			return fmt.Errorf("paper mode requires regime detection to be enabled")
-		}
-		if !readiness.RegimeDetectorReady {
-			return fmt.Errorf("paper mode requires regime detection to have live market state access")
+		if readiness.BrokerExecutionRequired {
+			if !readiness.BrokerConnected {
+				return fmt.Errorf("paper mode requires IBKR connectivity at startup")
+			}
+			if !readiness.BrokerPaper {
+				return fmt.Errorf("paper mode requires a paper IBKR session")
+			}
+			if !readiness.MarketStateConfigured {
+				return fmt.Errorf("paper mode requires an explicit market data provider; TWS is broker/account only")
+			}
+			if readiness.MarketStateBrokerBacked {
+				return fmt.Errorf("paper mode requires a non-broker market data provider; TWS is broker/account only")
+			}
+			if !readiness.StartupPricingReady {
+				return fmt.Errorf("paper mode requires a non-empty startup pricing watchlist")
+			}
+			if !readiness.RegimeDetectionEnabled {
+				return fmt.Errorf("paper mode requires regime detection to be enabled")
+			}
+			if !readiness.RegimeDetectorReady {
+				return fmt.Errorf("paper mode requires regime detection to have live market state access")
+			}
 		}
 		return nil
 	case runtimeModeLive:
 		if !readiness.DBReady {
 			return fmt.Errorf("live mode requires PostgreSQL persistence")
 		}
-		if !readiness.BrokerConnected {
-			return fmt.Errorf("live mode requires IBKR connectivity at startup")
+		if readiness.KalshiExecutionRequired && !readiness.KalshiExecutionReady {
+			return fmt.Errorf("live mode requires Kalshi execution when prediction-market desks are selected")
 		}
-		if readiness.BrokerPaper {
-			return fmt.Errorf("live mode requires a non-paper IBKR session")
-		}
-		if !readiness.MarketStateConfigured {
-			return fmt.Errorf("live mode requires an explicit market data provider; TWS is broker/account only")
-		}
-		if readiness.MarketStateBrokerBacked {
-			return fmt.Errorf("live mode requires a non-broker market data provider; TWS is broker/account only")
-		}
-		if !readiness.StartupPricingReady {
-			return fmt.Errorf("live mode requires a non-empty startup pricing watchlist")
-		}
-		if !readiness.EarningsUniverseReady {
-			return fmt.Errorf("live mode requires a non-empty earnings watchlist")
-		}
-		if !readiness.RegimeDetectionEnabled {
-			return fmt.Errorf("live mode requires regime detection to be enabled")
-		}
-		if !readiness.RegimeDetectorReady {
-			return fmt.Errorf("live mode requires regime detection to have live market state access")
+		if readiness.BrokerExecutionRequired {
+			if !readiness.BrokerConnected {
+				return fmt.Errorf("live mode requires IBKR connectivity at startup")
+			}
+			if readiness.BrokerPaper {
+				return fmt.Errorf("live mode requires a non-paper IBKR session")
+			}
+			if !readiness.MarketStateConfigured {
+				return fmt.Errorf("live mode requires an explicit market data provider; TWS is broker/account only")
+			}
+			if readiness.MarketStateBrokerBacked {
+				return fmt.Errorf("live mode requires a non-broker market data provider; TWS is broker/account only")
+			}
+			if !readiness.StartupPricingReady {
+				return fmt.Errorf("live mode requires a non-empty startup pricing watchlist")
+			}
+			if !readiness.EarningsUniverseReady {
+				return fmt.Errorf("live mode requires a non-empty earnings watchlist")
+			}
+			if !readiness.RegimeDetectionEnabled {
+				return fmt.Errorf("live mode requires regime detection to be enabled")
+			}
+			if !readiness.RegimeDetectorReady {
+				return fmt.Errorf("live mode requires regime detection to have live market state access")
+			}
 		}
 		if !readiness.RiskTokenConfigured {
 			return fmt.Errorf("live mode requires an explicit RISK_TOKEN_SECRET with at least 32 characters")

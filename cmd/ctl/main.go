@@ -192,7 +192,7 @@ func cmdPositions(ctx context.Context, db *store.DB) {
 	rows, err := db.Pool.Query(ctx,
 		`SELECT id, desk_id, instrument->>'symbol' AS symbol, direction, quantity,
 		        entry_price, COALESCE(current_price, 0), COALESCE(unrealized_pnl, 0), status
-		 FROM positions ORDER BY opened_at DESC LIMIT 50`)
+		 FROM positions WHERE status = 'open' ORDER BY opened_at DESC LIMIT 50`)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
 		return
@@ -200,17 +200,21 @@ func cmdPositions(ctx context.Context, db *store.DB) {
 	defer rows.Close()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tDESK\tSYMBOL\tDIR\tQTY\tENTRY\tCURRENT\tUPNL\tSTATUS")
+	if !writeTablef(w, "ID\tDESK\tSYMBOL\tDIR\tQTY\tENTRY\tCURRENT\tUPNL\tSTATUS\n") {
+		return
+	}
 	for rows.Next() {
 		var id, desk, symbol, dir, status string
 		var qty, entry, current, upnl float64
 		if err := rows.Scan(&id, &desk, &symbol, &dir, &qty, &entry, &current, &upnl, &status); err != nil {
 			continue
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%s\n",
-			id[:8], desk, symbol, dir, qty, entry, current, upnl, status)
+		if !writeTablef(w, "%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%s\n",
+			id[:8], desk, symbol, dir, qty, entry, current, upnl, status) {
+			return
+		}
 	}
-	w.Flush()
+	flushTable(w)
 }
 
 func cmdTheses(ctx context.Context, db *store.DB) {
@@ -225,7 +229,9 @@ func cmdTheses(ctx context.Context, db *store.DB) {
 	defer rows.Close()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tDESK\tSTRATEGY\tSYMBOL\tDIR\tCONV\tSTATUS\tPNL")
+	if !writeTablef(w, "ID\tDESK\tSTRATEGY\tSYMBOL\tDIR\tCONV\tSTATUS\tPNL\n") {
+		return
+	}
 	for rows.Next() {
 		var id, desk, strategy, symbol, dir, status, pnl string
 		var conviction float64
@@ -235,10 +241,12 @@ func cmdTheses(ctx context.Context, db *store.DB) {
 		if pnl == "" {
 			pnl = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%.2f\t%s\t%s\n",
-			id[:8], desk, strategy, symbol, dir, conviction, status, pnl)
+		if !writeTablef(w, "%s\t%s\t%s\t%s\t%s\t%.2f\t%s\t%s\n",
+			id[:8], desk, strategy, symbol, dir, conviction, status, pnl) {
+			return
+		}
 	}
-	w.Flush()
+	flushTable(w)
 }
 
 func cmdAntiPortfolio(ctx context.Context, db *store.DB) {
@@ -253,7 +261,9 @@ func cmdAntiPortfolio(ctx context.Context, db *store.DB) {
 	defer rows.Close()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "DESK\tREASON\tSTRATEGY\tSYMBOL\tDIR\tWOULD_PNL\tOUTCOME")
+	if !writeTablef(w, "DESK\tREASON\tSTRATEGY\tSYMBOL\tDIR\tWOULD_PNL\tOUTCOME\n") {
+		return
+	}
 	for rows.Next() {
 		var desk, reason, strategy, symbol, dir, outcome string
 		var wouldPnl float64
@@ -263,10 +273,12 @@ func cmdAntiPortfolio(ctx context.Context, db *store.DB) {
 		if outcome == "" {
 			outcome = "pending"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%.2f\t%s\n",
-			desk, reason, strategy, symbol, dir, wouldPnl, outcome)
+		if !writeTablef(w, "%s\t%s\t%s\t%s\t%s\t%.2f\t%s\n",
+			desk, reason, strategy, symbol, dir, wouldPnl, outcome) {
+			return
+		}
 	}
-	w.Flush()
+	flushTable(w)
 }
 
 func cmdABTest(ctx context.Context, db *store.DB) {
@@ -289,16 +301,31 @@ func cmdABTest(ctx context.Context, db *store.DB) {
 			prefix = "%-b"
 		}
 
-		db.Pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM theses WHERE desk_id LIKE $1`, prefix).Scan(&stats.Theses)
-		db.Pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM theses WHERE desk_id LIKE $1 AND status = 'active'`, prefix).Scan(&stats.Active)
-		db.Pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM theses WHERE desk_id LIKE $1 AND status = 'resolved'`, prefix).Scan(&stats.Resolved)
-		db.Pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM theses WHERE desk_id LIKE $1 AND status = 'resolved' AND (outcome->>'profitable')::boolean = true`, prefix).Scan(&stats.Profitable)
-		db.Pool.QueryRow(ctx,
-			`SELECT COALESCE(SUM((outcome->>'realized_pnl')::float), 0) FROM theses WHERE desk_id LIKE $1 AND status = 'resolved'`, prefix).Scan(&stats.TotalPnL)
+		if err := db.Pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM theses WHERE desk_id LIKE $1`, prefix).Scan(&stats.Theses); err != nil {
+			fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
+			return
+		}
+		if err := db.Pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM theses WHERE desk_id LIKE $1 AND status = 'active'`, prefix).Scan(&stats.Active); err != nil {
+			fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
+			return
+		}
+		if err := db.Pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM theses WHERE desk_id LIKE $1 AND status = 'resolved'`, prefix).Scan(&stats.Resolved); err != nil {
+			fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
+			return
+		}
+		if err := db.Pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM theses WHERE desk_id LIKE $1 AND status = 'resolved' AND (outcome->>'profitable')::boolean = true`, prefix).Scan(&stats.Profitable); err != nil {
+			fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
+			return
+		}
+		if err := db.Pool.QueryRow(ctx,
+			`SELECT COALESCE(SUM((outcome->>'realized_pnl')::float), 0) FROM theses WHERE desk_id LIKE $1 AND status = 'resolved'`, prefix).Scan(&stats.TotalPnL); err != nil {
+			fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
+			return
+		}
 
 		out, _ := json.MarshalIndent(stats, "", "  ")
 		fmt.Printf("Group %s:\n%s\n\n", g, string(out))
@@ -316,13 +343,31 @@ func cmdEvents(ctx context.Context, db *store.DB) {
 	defer rows.Close()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "TIMESTAMP\tTYPE\tDESK\tSEVERITY\tMESSAGE")
+	if !writeTablef(w, "TIMESTAMP\tTYPE\tDESK\tSEVERITY\tMESSAGE\n") {
+		return
+	}
 	for rows.Next() {
 		var ts, eventType, desk, severity, msg string
 		if err := rows.Scan(&ts, &eventType, &desk, &severity, &msg); err != nil {
 			continue
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", ts[:19], eventType, desk, severity, msg)
+		if !writeTablef(w, "%s\t%s\t%s\t%s\t%s\n", ts[:19], eventType, desk, severity, msg) {
+			return
+		}
 	}
-	w.Flush()
+	flushTable(w)
+}
+
+func writeTablef(w *tabwriter.Writer, format string, args ...any) bool {
+	if _, err := fmt.Fprintf(w, format, args...); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "write failed: %v\n", err)
+		return false
+	}
+	return true
+}
+
+func flushTable(w *tabwriter.Writer) {
+	if err := w.Flush(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "flush failed: %v\n", err)
+	}
 }

@@ -128,17 +128,6 @@ func internalOriginDesk(sig signal.Signal) string {
 	return strings.TrimSpace(payload.OriginDesk)
 }
 
-func internalSignalDepth(sig signal.Signal) int {
-	payload, ok := model.DecodeColleagueMessage(sig.Raw)
-	if !ok {
-		return 0
-	}
-	if payload.InternalDepth < 0 {
-		return 0
-	}
-	return payload.InternalDepth
-}
-
 func isInternalSignal(sig signal.Signal) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(sig.Source)), "internal/")
 }

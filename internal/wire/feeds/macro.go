@@ -111,7 +111,9 @@ func (f *MacroFeed) fetchSeries(ctx context.Context, s macroSeries, out chan<- s
 		f.log.Warn("fred fetch failed", "series", s.ID, "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return

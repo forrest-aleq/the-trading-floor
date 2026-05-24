@@ -16,6 +16,7 @@
     {"id": "domain:volatility", "domains": ["volatility"], "weight": 1.0},
     {"id": "domain:sector", "domains": ["sector"], "weight": 1.0},
     {"id": "domain:systematic", "domains": ["systematic"], "weight": 1.0},
+    {"id": "domain:prediction_market", "domains": ["prediction_market"], "weight": 1.0},
 
     {"id": "asset:equity", "sec_types": ["STK"], "weight": 0.35},
     {"id": "asset:optionality", "sec_types": ["OPT", "FOP"], "weight": 0.35},

@@ -22,19 +22,28 @@ func (db *DB) UpsertPosition(ctx context.Context, pos *model.Position) error {
 		`INSERT INTO positions (
 			id, thesis_id, desk_id, structure, instrument, legs, direction, quantity, entry_price, current_price,
 			unrealized_pnl, realized_pnl, ibkr_order_id, ibkr_contract_id, shadow, status, opened_at, closed_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-			$11, $12, $13, $14, $15, $16, $17, $18
-		)
-		ON CONFLICT (id) DO UPDATE SET
-			structure = EXCLUDED.structure,
-			current_price = EXCLUDED.current_price,
-			legs = EXCLUDED.legs,
-			unrealized_pnl = EXCLUDED.unrealized_pnl,
-			realized_pnl = EXCLUDED.realized_pnl,
-			shadow = EXCLUDED.shadow,
-			status = EXCLUDED.status,
-			closed_at = EXCLUDED.closed_at`,
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+				$11, $12, $13, $14, $15, $16, $17, $18
+			)
+			ON CONFLICT (id) DO UPDATE SET
+				thesis_id = EXCLUDED.thesis_id,
+				desk_id = EXCLUDED.desk_id,
+				structure = EXCLUDED.structure,
+				instrument = EXCLUDED.instrument,
+				legs = EXCLUDED.legs,
+				direction = EXCLUDED.direction,
+				quantity = EXCLUDED.quantity,
+				entry_price = EXCLUDED.entry_price,
+				current_price = EXCLUDED.current_price,
+				unrealized_pnl = EXCLUDED.unrealized_pnl,
+				realized_pnl = EXCLUDED.realized_pnl,
+				ibkr_order_id = EXCLUDED.ibkr_order_id,
+				ibkr_contract_id = EXCLUDED.ibkr_contract_id,
+				shadow = EXCLUDED.shadow,
+				status = EXCLUDED.status,
+				opened_at = EXCLUDED.opened_at,
+				closed_at = EXCLUDED.closed_at`,
 		pos.ID,
 		pos.ThesisID,
 		pos.DeskID,

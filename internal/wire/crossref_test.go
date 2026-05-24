@@ -35,7 +35,7 @@ func TestCrossReferencerAddsCorroborationAcrossSourcesAndEntities(t *testing.T) 
 		Raw: []byte(`{"title":"Apple expands India supplier footprint as assembly diversifies"}`),
 	})
 
-	first = crossref.Enrich(clusterer.Assign(first))
+	_ = crossref.Enrich(clusterer.Assign(first))
 	second = crossref.Enrich(clusterer.Assign(second))
 
 	if len(second.RelatedSignalIDs) == 0 || second.RelatedSignalIDs[0] != "sig-1" {
@@ -105,7 +105,7 @@ func TestCrossReferencerDetectsContradictorySignalsAcrossIndependentOwners(t *te
 		Translated: "Apple revenue declined to $7B and management cut guidance.",
 	})
 
-	first = crossref.Enrich(first)
+	_ = crossref.Enrich(first)
 	second = crossref.Enrich(second)
 
 	if second.EvidenceMeta == nil {
@@ -153,7 +153,7 @@ func TestCrossReferencerResolvesMultilingualEntityAliases(t *testing.T) {
 		},
 	})
 
-	first = crossref.Enrich(first)
+	_ = crossref.Enrich(first)
 	second = crossref.Enrich(second)
 
 	if len(second.RelatedSignalIDs) == 0 || second.RelatedSignalIDs[0] != "sig-nvda-en" {

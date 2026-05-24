@@ -25,7 +25,6 @@ type SubTeam struct {
 
 	log *slog.Logger
 	llm *llm.Router
-	mu  sync.Mutex
 }
 
 const (

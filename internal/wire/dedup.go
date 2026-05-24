@@ -12,6 +12,7 @@ import (
 
 type dedupEntry struct {
 	hash      string
+	source    string
 	typ       signal.Type
 	category  string
 	text      string
@@ -42,8 +43,15 @@ func (d *Deduper) IsDuplicate(sig signal.Signal) bool {
 	if _, ok := d.seenHashes[sig.ContentHash]; ok {
 		return true
 	}
+	if exactHashOnlySource(sig.Source) {
+		d.seenHashes[sig.ContentHash] = struct{}{}
+		return false
+	}
 
 	for _, entry := range d.recent {
+		if exactHashOnlySource(entry.source) {
+			continue
+		}
 		if entry.typ != sig.Type || entry.category != sig.Category {
 			continue
 		}
@@ -57,6 +65,7 @@ func (d *Deduper) IsDuplicate(sig signal.Signal) bool {
 	d.seenHashes[sig.ContentHash] = struct{}{}
 	d.recent = append(d.recent, dedupEntry{
 		hash:      sig.ContentHash,
+		source:    sig.Source,
 		typ:       sig.Type,
 		category:  sig.Category,
 		text:      sig.Translated,
@@ -66,6 +75,10 @@ func (d *Deduper) IsDuplicate(sig signal.Signal) bool {
 		d.recent = d.recent[len(d.recent)-d.maxRecent:]
 	}
 	return false
+}
+
+func exactHashOnlySource(source string) bool {
+	return strings.EqualFold(strings.TrimSpace(source), "kalshi-market")
 }
 
 func hashSignalContent(sig signal.Signal) string {

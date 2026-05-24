@@ -56,6 +56,8 @@ func TestFullDeskConfigBalancedAB(t *testing.T) {
 func TestActiveDeskConfigUsesAllowlist(t *testing.T) {
 	t.Setenv("FLOOR_ENABLED_DESKS", "corp-earnings-a,macro-rates-a,sector-tech-a")
 	t.Setenv("FLOOR_DESK_LIMIT", "")
+	t.Setenv("FLOOR_ENABLE_KALSHI_DESKS", "")
+	t.Setenv("FLOOR_ENABLE_PREDICTION_MARKET_DESK", "")
 
 	desks, err := activeDeskConfig()
 	if err != nil {
@@ -69,9 +71,67 @@ func TestActiveDeskConfigUsesAllowlist(t *testing.T) {
 	}
 }
 
+func TestActiveDeskConfigCanEnablePredictionMarketDesk(t *testing.T) {
+	t.Setenv("FLOOR_ENABLED_DESKS", "pred-markets-a")
+	t.Setenv("FLOOR_DESK_LIMIT", "")
+	t.Setenv("FLOOR_ENABLE_KALSHI_DESKS", "")
+	t.Setenv("FLOOR_ENABLE_PREDICTION_MARKET_DESK", "true")
+
+	desks, err := activeDeskConfig()
+	if err != nil {
+		t.Fatalf("activeDeskConfig returned error: %v", err)
+	}
+	if len(desks) != 1 {
+		t.Fatalf("expected 1 desk, got %d", len(desks))
+	}
+	if desks[0].id != "pred-markets-a" || desks[0].domain != "prediction_market" {
+		t.Fatalf("unexpected prediction-market desk: %#v", desks[0])
+	}
+}
+
+func TestActiveDeskConfigCanEnableKalshiDeskPack(t *testing.T) {
+	t.Setenv("FLOOR_ENABLED_DESKS", "kalshi-rates-a,kalshi-weather-a")
+	t.Setenv("FLOOR_DESK_LIMIT", "")
+	t.Setenv("FLOOR_ENABLE_KALSHI_DESKS", "true")
+	t.Setenv("FLOOR_ENABLE_PREDICTION_MARKET_DESK", "")
+	t.Setenv("KALSHI_DESK_CAPITAL_DOLLARS", "")
+
+	desks, err := activeDeskConfig()
+	if err != nil {
+		t.Fatalf("activeDeskConfig returned error: %v", err)
+	}
+	if len(desks) != 2 {
+		t.Fatalf("expected 2 desks, got %d", len(desks))
+	}
+	for _, desk := range desks {
+		if desk.domain != "prediction_market" {
+			t.Fatalf("expected prediction_market domain, got %#v", desk)
+		}
+		if desk.capital != 0 {
+			t.Fatalf("expected default Kalshi desk capital to be unset, got %.2f", desk.capital)
+		}
+	}
+}
+
+func TestKalshiDeskConfigUsesOnlyExplicitDeskCapital(t *testing.T) {
+	t.Setenv("KALSHI_DESK_CAPITAL_DOLLARS", "7.50")
+
+	desks := kalshiDeskConfig()
+	if len(desks) == 0 {
+		t.Fatal("expected Kalshi desk config")
+	}
+	for _, desk := range desks {
+		if desk.capital != 7.50 {
+			t.Fatalf("expected explicit Kalshi desk capital 7.50, got %.2f", desk.capital)
+		}
+	}
+}
+
 func TestActiveDeskConfigRejectsUnknownAllowlistDesk(t *testing.T) {
 	t.Setenv("FLOOR_ENABLED_DESKS", "corp-earnings-a,no-such-desk")
 	t.Setenv("FLOOR_DESK_LIMIT", "")
+	t.Setenv("FLOOR_ENABLE_KALSHI_DESKS", "")
+	t.Setenv("FLOOR_ENABLE_PREDICTION_MARKET_DESK", "")
 
 	if _, err := activeDeskConfig(); err == nil {
 		t.Fatal("expected unknown desk allowlist entry to fail")
@@ -81,6 +141,8 @@ func TestActiveDeskConfigRejectsUnknownAllowlistDesk(t *testing.T) {
 func TestActiveDeskConfigAppliesDeskLimit(t *testing.T) {
 	t.Setenv("FLOOR_ENABLED_DESKS", "")
 	t.Setenv("FLOOR_DESK_LIMIT", "5")
+	t.Setenv("FLOOR_ENABLE_KALSHI_DESKS", "")
+	t.Setenv("FLOOR_ENABLE_PREDICTION_MARKET_DESK", "")
 
 	desks, err := activeDeskConfig()
 	if err != nil {
@@ -97,9 +159,10 @@ func TestRegisterDefaultFeedsRegistersExtendedWireSurface(t *testing.T) {
 	t.Setenv("EARNINGS_API_KEY", "")
 	t.Setenv("TELEGRAM_FEED_URLS", "")
 	t.Setenv("ALT_DATA_SOURCES", "")
+	t.Setenv("KALSHI_FEED_ENABLED", "")
 
 	wireMgr := wire.NewManager()
-	count := registerDefaultFeeds(wireMgr, stubMarketStateProvider{})
+	count := registerDefaultFeeds(wireMgr, stubMarketStateProvider{}, fullDeskConfig())
 	if count != 8 {
 		t.Fatalf("expected 8 registered feeds, got %d", count)
 	}
@@ -107,6 +170,21 @@ func TestRegisterDefaultFeedsRegistersExtendedWireSurface(t *testing.T) {
 	stats := wireMgr.Stats()
 	if stats.ActiveFeeds != 8 {
 		t.Fatalf("expected wire manager to track 8 active feeds, got %d", stats.ActiveFeeds)
+	}
+}
+
+func TestRegisterDefaultFeedsNarrowsToKalshiForKalshiOnlyDesks(t *testing.T) {
+	t.Setenv("KALSHI_FEED_ENABLED", "true")
+
+	wireMgr := wire.NewManager()
+	count := registerDefaultFeeds(wireMgr, stubMarketStateProvider{}, kalshiDeskConfig())
+	if count != 1 {
+		t.Fatalf("expected only Kalshi feed for Kalshi-only runtime, got %d", count)
+	}
+
+	stats := wireMgr.Stats()
+	if stats.ActiveFeeds != 1 {
+		t.Fatalf("expected wire manager to track 1 active feed, got %d", stats.ActiveFeeds)
 	}
 }
 
@@ -250,14 +328,15 @@ func TestReadMarketStateProviderDefaultsToMassiveAlias(t *testing.T) {
 
 func TestValidateRuntimeReadinessRequiresPaperBrokerForPaperMode(t *testing.T) {
 	err := validateRuntimeReadiness(runtimeReadiness{
-		Mode:                   runtimeModePaper,
-		DBReady:                true,
-		BrokerConnected:        true,
-		BrokerPaper:            false,
-		MarketStateConfigured:  true,
-		StartupPricingReady:    true,
-		RegimeDetectionEnabled: true,
-		RegimeDetectorReady:    true,
+		Mode:                    runtimeModePaper,
+		DBReady:                 true,
+		BrokerExecutionRequired: true,
+		BrokerConnected:         true,
+		BrokerPaper:             false,
+		MarketStateConfigured:   true,
+		StartupPricingReady:     true,
+		RegimeDetectionEnabled:  true,
+		RegimeDetectorReady:     true,
 	})
 	if err == nil {
 		t.Fatal("expected paper readiness validation to fail without paper broker")
@@ -266,16 +345,17 @@ func TestValidateRuntimeReadinessRequiresPaperBrokerForPaperMode(t *testing.T) {
 
 func TestValidateRuntimeReadinessRequiresExplicitRiskTokenForLiveMode(t *testing.T) {
 	err := validateRuntimeReadiness(runtimeReadiness{
-		Mode:                   runtimeModeLive,
-		DBReady:                true,
-		BrokerConnected:        true,
-		BrokerPaper:            false,
-		MarketStateConfigured:  true,
-		StartupPricingReady:    true,
-		EarningsUniverseReady:  true,
-		RegimeDetectionEnabled: true,
-		RegimeDetectorReady:    true,
-		RiskTokenConfigured:    false,
+		Mode:                    runtimeModeLive,
+		DBReady:                 true,
+		BrokerExecutionRequired: true,
+		BrokerConnected:         true,
+		BrokerPaper:             false,
+		MarketStateConfigured:   true,
+		StartupPricingReady:     true,
+		EarningsUniverseReady:   true,
+		RegimeDetectionEnabled:  true,
+		RegimeDetectorReady:     true,
+		RiskTokenConfigured:     false,
 	})
 	if err == nil {
 		t.Fatal("expected live readiness validation to fail without explicit risk token")
@@ -286,6 +366,7 @@ func TestValidateRuntimeReadinessRejectsBrokerBackedMarketStateInPaperMode(t *te
 	err := validateRuntimeReadiness(runtimeReadiness{
 		Mode:                    runtimeModePaper,
 		DBReady:                 true,
+		BrokerExecutionRequired: true,
 		BrokerConnected:         true,
 		BrokerPaper:             true,
 		MarketStateConfigured:   true,
@@ -296,6 +377,54 @@ func TestValidateRuntimeReadinessRejectsBrokerBackedMarketStateInPaperMode(t *te
 	})
 	if err == nil {
 		t.Fatal("expected paper readiness validation to reject broker-backed market state")
+	}
+}
+
+func TestValidateRuntimeReadinessAllowsKalshiOnlyWithoutBroker(t *testing.T) {
+	err := validateRuntimeReadiness(runtimeReadiness{
+		Mode:                    runtimeModePaper,
+		DBReady:                 true,
+		BrokerExecutionRequired: false,
+		KalshiExecutionRequired: true,
+		KalshiExecutionReady:    true,
+		BrokerConnected:         false,
+		BrokerPaper:             false,
+		MarketStateConfigured:   false,
+		StartupPricingReady:     false,
+		RegimeDetectionEnabled:  false,
+		RegimeDetectorReady:     false,
+	})
+	if err != nil {
+		t.Fatalf("expected Kalshi-only paper readiness to pass without broker, got %v", err)
+	}
+}
+
+func TestValidateRuntimeReadinessRequiresKalshiExecutorForKalshiDesks(t *testing.T) {
+	err := validateRuntimeReadiness(runtimeReadiness{
+		Mode:                    runtimeModePaper,
+		DBReady:                 true,
+		BrokerExecutionRequired: false,
+		KalshiExecutionRequired: true,
+		KalshiExecutionReady:    false,
+	})
+	if err == nil {
+		t.Fatal("expected Kalshi readiness validation to fail without executor")
+	}
+}
+
+func TestDeskExecutionRequirementHelpers(t *testing.T) {
+	desks := []deskDef{
+		{id: "kalshi-rates-a", domain: "prediction_market"},
+		{id: "corp-earnings-a", domain: "corporate"},
+	}
+	if !desksRequireKalshiExecution(desks) {
+		t.Fatal("expected Kalshi execution requirement")
+	}
+	if !desksRequireBrokerExecution(desks) {
+		t.Fatal("expected broker execution requirement")
+	}
+	if entryControlForDesk(desks[0], nil) != nil {
+		t.Fatal("expected Kalshi desk to skip broker entry control")
 	}
 }
 

@@ -1,0 +1,209 @@
+package kalshi
+
+import (
+	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestValidateOrderCapsRisk(t *testing.T) {
+	client, err := NewClient(Config{MaxOrderCents: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	validation, err := client.ValidateOrder(OrderRequest{
+		Ticker:          "KXTEST-26DEC31-YES",
+		ClientOrderID:   "test-order",
+		Side:            "yes",
+		Action:          "buy",
+		Count:           2,
+		YesPriceDollars: "0.5000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validation.EstimatedRiskCents != 100 {
+		t.Fatalf("estimated risk = %d, want 100", validation.EstimatedRiskCents)
+	}
+
+	_, err = client.ValidateOrder(OrderRequest{
+		Ticker:         "KXTEST-26DEC31-YES",
+		ClientOrderID:  "too-big",
+		Side:           "no",
+		Action:         "buy",
+		Count:          5,
+		NoPriceDollars: "0.9000",
+	})
+	if err == nil {
+		t.Fatal("expected risk cap violation")
+	}
+}
+
+func TestCreateOrderRequiresLiveTrading(t *testing.T) {
+	client, err := NewClient(Config{MaxOrderCents: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.CreateOrder(context.Background(), OrderRequest{
+		Ticker:          "KXTEST-26DEC31-YES",
+		ClientOrderID:   "blocked",
+		Side:            "yes",
+		Action:          "buy",
+		Count:           1,
+		YesPriceDollars: "0.1000",
+	})
+	if err == nil {
+		t.Fatal("expected disabled live trading to block order")
+	}
+}
+
+func TestCreateOrderRequiresLiveConfirmation(t *testing.T) {
+	client, err := NewClient(Config{LiveTrading: true, MaxOrderCents: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.CreateOrder(context.Background(), OrderRequest{
+		Ticker:          "KXTEST-26DEC31-YES",
+		ClientOrderID:   "blocked-confirm",
+		Side:            "yes",
+		Action:          "buy",
+		Count:           1,
+		YesPriceDollars: "0.1000",
+	})
+	if err == nil {
+		t.Fatal("expected missing live confirmation to block order")
+	}
+}
+
+func TestCreateOrderUsesCurrentKalshiOrderEndpointAndSchema(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/trade-api/v2/portfolio/orders" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["side"] != "no" || payload["action"] != "buy" {
+			t.Fatalf("unexpected side/action payload: %+v", payload)
+		}
+		if payload["no_price_dollars"] != "0.1700" {
+			t.Fatalf("no_price_dollars = %v, want 0.1700", payload["no_price_dollars"])
+		}
+		if _, ok := payload["price"]; ok {
+			t.Fatalf("legacy price field should not be sent: %+v", payload)
+		}
+		if payload["count"] != float64(1) {
+			t.Fatalf("count = %v, want 1", payload["count"])
+		}
+		_, _ = w.Write([]byte(`{"order":{"order_id":"ord-1","client_order_id":"client-123","ticker":"KXTEST-26DEC31-YES","side":"no","action":"buy","status":"resting","fill_count_fp":"0","remaining_count_fp":"1"}}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:       server.URL + "/trade-api/v2",
+		KeyID:         "key-id",
+		PrivateKeyPEM: privateKeyPEM(privateKey),
+		LiveTrading:   true,
+		LiveConfirm:   LiveConfirmation,
+		MaxOrderCents: 200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := client.CreateOrder(context.Background(), OrderRequest{
+		Ticker:         "KXTEST-26DEC31-YES",
+		ClientOrderID:  "client-123",
+		Side:           "no",
+		Action:         "buy",
+		Count:          1,
+		NoPriceDollars: "0.1700",
+		TimeInForce:    "immediate_or_cancel",
+		BuyMaxCost:     17,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OrderID != "ord-1" || !resp.IsResting() || resp.HasFill() {
+		t.Fatalf("unexpected order response: %+v", resp)
+	}
+}
+
+func TestAuthenticatedRequestSignsKalshiHeaders(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/trade-api/v2/portfolio/balance" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		keyID := r.Header.Get("KALSHI-ACCESS-KEY")
+		timestamp := r.Header.Get("KALSHI-ACCESS-TIMESTAMP")
+		signature := r.Header.Get("KALSHI-ACCESS-SIGNATURE")
+		if keyID != "key-id" || timestamp == "" || signature == "" {
+			t.Fatalf("missing auth headers: key=%q ts=%q sig=%q", keyID, timestamp, signature)
+		}
+		rawSig, err := base64.StdEncoding.DecodeString(signature)
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := timestamp + http.MethodGet + "/trade-api/v2/portfolio/balance"
+		digest := sha256.Sum256([]byte(msg))
+		if err := rsa.VerifyPSS(&privateKey.PublicKey, crypto.SHA256, digest[:], rawSig, &rsa.PSSOptions{
+			SaltLength: rsa.PSSSaltLengthEqualsHash,
+			Hash:       crypto.SHA256,
+		}); err != nil {
+			t.Fatalf("signature verification failed: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"balance":5000,"portfolio_value":5000,"updated_ts":123}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:       server.URL + "/trade-api/v2",
+		KeyID:         "key-id",
+		PrivateKeyPEM: privateKeyPEM(privateKey),
+		MaxOrderCents: 200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	balance, err := client.GetBalance(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance.Balance != 5000 || balance.PortfolioValue != 5000 {
+		t.Fatalf("unexpected balance: %+v", balance)
+	}
+}
+
+func privateKeyPEM(key *rsa.PrivateKey) string {
+	return string(pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	}))
+}

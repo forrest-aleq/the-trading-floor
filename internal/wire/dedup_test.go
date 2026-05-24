@@ -34,3 +34,31 @@ func TestDeduperCatchesNearDuplicates(t *testing.T) {
 		t.Fatal("expected semantic near-duplicate to be detected")
 	}
 }
+
+func TestDeduperKeepsKalshiMarketPriceUpdates(t *testing.T) {
+	deduper := NewDeduper(128, 0.92)
+
+	first := NormalizeSignal(signal.Signal{
+		ID:         "kalshi-1",
+		Source:     "kalshi-market",
+		Type:       signal.TypeAlternative,
+		Category:   "prediction_market",
+		Timestamp:  time.Now(),
+		Translated: "Kalshi market | KXTEST | yes_bid=0.1000 yes_ask=0.1200 last=0.1100",
+	})
+	second := NormalizeSignal(signal.Signal{
+		ID:         "kalshi-2",
+		Source:     "kalshi-market",
+		Type:       signal.TypeAlternative,
+		Category:   "prediction_market",
+		Timestamp:  time.Now(),
+		Translated: "Kalshi market | KXTEST | yes_bid=0.1000 yes_ask=0.1300 last=0.1100",
+	})
+
+	if deduper.IsDuplicate(first) {
+		t.Fatal("first Kalshi update should not be duplicate")
+	}
+	if deduper.IsDuplicate(second) {
+		t.Fatal("Kalshi price update should not be semantically deduped")
+	}
+}

@@ -358,7 +358,11 @@ func (c *Client) LoadDeskRelationshipBeliefs(ctx context.Context) ([]*model.Desk
 	}
 
 	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
-	defer session.Close(ctx)
+	defer func() {
+		if err := session.Close(ctx); err != nil {
+			c.log.Warn("close neo4j session failed", "error", err)
+		}
+	}()
 
 	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		rows, err := tx.Run(ctx, `
@@ -425,7 +429,11 @@ func (c *Client) LoadSourceReliabilityBeliefs(ctx context.Context) ([]*model.Sou
 	}
 
 	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
-	defer session.Close(ctx)
+	defer func() {
+		if err := session.Close(ctx); err != nil {
+			c.log.Warn("close neo4j session failed", "error", err)
+		}
+	}()
 
 	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		rows, err := tx.Run(ctx, `
@@ -583,7 +591,11 @@ func (c *Client) LoadSourceLeadTimeBeliefs(ctx context.Context) ([]*model.Source
 	}
 
 	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
-	defer session.Close(ctx)
+	defer func() {
+		if err := session.Close(ctx); err != nil {
+			c.log.Warn("close neo4j session failed", "error", err)
+		}
+	}()
 
 	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		rows, err := tx.Run(ctx, `
@@ -872,7 +884,11 @@ func (c *Client) LoadRecentPortfolioFactorHistory(ctx context.Context, portfolio
 	}
 
 	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
-	defer session.Close(ctx)
+	defer func() {
+		if err := session.Close(ctx); err != nil {
+			c.log.Warn("close neo4j session failed", "error", err)
+		}
+	}()
 
 	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		rows, err := tx.Run(ctx, `
@@ -932,7 +948,11 @@ func (c *Client) CouncilVoiceTelemetry(ctx context.Context, domain string) (map[
 	}
 
 	session := c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
-	defer session.Close(ctx)
+	defer func() {
+		if err := session.Close(ctx); err != nil {
+			c.log.Warn("close neo4j session failed", "error", err)
+		}
+	}()
 
 	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		rows, err := tx.Run(ctx, `
@@ -2345,7 +2365,11 @@ func (c *Client) executeWrite(ctx context.Context, fn func(tx neo4j.ManagedTrans
 	session := c.driver.NewSession(ctx, neo4j.SessionConfig{
 		DatabaseName: c.database,
 	})
-	defer session.Close(ctx)
+	defer func() {
+		if err := session.Close(ctx); err != nil {
+			c.log.Warn("close neo4j session failed", "error", err)
+		}
+	}()
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		return nil, fn(tx)

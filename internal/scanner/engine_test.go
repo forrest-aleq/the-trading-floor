@@ -464,7 +464,7 @@ func TestEvaluateUsesFastModelFallbackAfterTimeout(t *testing.T) {
 	if got := len(client.requests); got != 2 {
 		t.Fatalf("expected primary scanner plus fast fallback, got %d requests", got)
 	}
-	if client.requests[0].Model != "qwen/qwen3-8b" {
+	if client.requests[0].Model != "openai/gpt-oss-120b" {
 		t.Fatalf("unexpected primary model %q", client.requests[0].Model)
 	}
 	if client.requests[1].Model != "glm-4.7-flash:latest" {
@@ -770,12 +770,8 @@ func TestEvaluateDetailedUsesReplayEvaluationTimeForStaleness(t *testing.T) {
 }
 
 func TestEvaluateDetailedRejectsBlankInstruments(t *testing.T) {
-	client := &scannerStubClient{}
-	engine := NewEngine(llm.NewRouter(client, client, client), 70)
-
-	client.requests = nil
 	client2 := &scannerBlankInstrumentClient{}
-	engine = NewEngine(llm.NewRouter(client2, client2, client2), 70)
+	engine := NewEngine(llm.NewRouter(client2, client2, client2), 70)
 
 	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
 		ID:         "sig-blank-inst",

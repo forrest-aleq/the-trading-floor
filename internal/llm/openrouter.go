@@ -17,18 +17,32 @@ import (
 // OpenRouter client — OpenAI-compatible API that routes to any model.
 // Also works with Claude Foundry by changing the base URL.
 type OpenRouterClient struct {
-	apiKey  string
-	baseURL string
-	model   string
-	http    *http.Client
-	limiter chan struct{}
+	apiKey   string
+	baseURL  string
+	model    string
+	provider *orProviderRouting
+	http     *http.Client
+	limiter  chan struct{}
 }
 
 type OpenRouterConfig struct {
 	APIKey         string // OPENROUTER_API_KEY or ANTHROPIC_API_KEY
 	BaseURL        string // https://openrouter.ai/api/v1 or foundry URL
-	Model          string // e.g. "anthropic/claude-sonnet-4-20250514", "qwen/qwen3.5-72b"
+	Model          string // e.g. "deepseek/deepseek-v4-flash", "qwen/qwen3.6-35b-a3b"
 	MaxConcurrency int
+	Provider       *ProviderRouting
+	EnvPrefix      string
+}
+
+type ProviderRouting struct {
+	Order             []string
+	Only              []string
+	Ignore            []string
+	Sort              string
+	AllowFallbacks    *bool
+	RequireParameters *bool
+	DataCollection    string
+	ZDR               *bool
 }
 
 func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
@@ -39,10 +53,19 @@ func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
 		cfg.BaseURL = "https://openrouter.ai/api/v1"
 	}
 
+	provider := cfg.Provider
+	if provider == nil && cfg.EnvPrefix != "" {
+		provider = providerRoutingFromEnv(cfg.EnvPrefix)
+	}
+	if provider == nil {
+		provider = providerRoutingFromEnv("LLM")
+	}
+
 	return &OpenRouterClient{
-		apiKey:  cfg.APIKey,
-		baseURL: cfg.BaseURL,
-		model:   cfg.Model,
+		apiKey:   cfg.APIKey,
+		baseURL:  cfg.BaseURL,
+		model:    cfg.Model,
+		provider: provider.toOpenRouter(),
 		http: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -51,11 +74,13 @@ func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
 }
 
 type orRequest struct {
-	Model          string            `json:"model"`
-	Messages       []orMessage       `json:"messages"`
-	Temperature    float64           `json:"temperature,omitempty"`
-	MaxTokens      int               `json:"max_tokens,omitempty"`
-	ResponseFormat *orResponseFormat `json:"response_format,omitempty"`
+	Model          string             `json:"model"`
+	Messages       []orMessage        `json:"messages"`
+	Temperature    float64            `json:"temperature,omitempty"`
+	MaxTokens      int                `json:"max_tokens,omitempty"`
+	ResponseFormat *orResponseFormat  `json:"response_format,omitempty"`
+	Reasoning      *orReasoning       `json:"reasoning,omitempty"`
+	Provider       *orProviderRouting `json:"provider,omitempty"`
 }
 
 type orMessage struct {
@@ -65,6 +90,24 @@ type orMessage struct {
 
 type orResponseFormat struct {
 	Type string `json:"type"` // "json_object"
+}
+
+type orReasoning struct {
+	Exclude   bool   `json:"exclude,omitempty"`
+	Effort    string `json:"effort,omitempty"`
+	MaxTokens int    `json:"max_tokens,omitempty"`
+	Enabled   bool   `json:"enabled,omitempty"`
+}
+
+type orProviderRouting struct {
+	Order             []string `json:"order,omitempty"`
+	Only              []string `json:"only,omitempty"`
+	Ignore            []string `json:"ignore,omitempty"`
+	Sort              string   `json:"sort,omitempty"`
+	AllowFallbacks    *bool    `json:"allow_fallbacks,omitempty"`
+	RequireParameters *bool    `json:"require_parameters,omitempty"`
+	DataCollection    string   `json:"data_collection,omitempty"`
+	ZDR               *bool    `json:"zdr,omitempty"`
 }
 
 type orResponse struct {
@@ -103,9 +146,13 @@ func (c *OpenRouterClient) Complete(ctx context.Context, req Request) (*Response
 		Messages:    messages,
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
+		Provider:    c.provider,
 	}
 	if req.JSONMode && c.supportsStructuredJSON() {
 		orReq.ResponseFormat = &orResponseFormat{Type: "json_object"}
+	}
+	if c.supportsReasoningControls() {
+		orReq.Reasoning = openRouterReasoningConfig(req.JSONMode)
 	}
 
 	body, err := json.Marshal(orReq)
@@ -195,7 +242,9 @@ func (c *OpenRouterClient) doChatCompletionOnce(ctx context.Context, body []byte
 	if err != nil {
 		return nil, 0, fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -250,6 +299,41 @@ func (c *OpenRouterClient) supportsStructuredJSON() bool {
 	}
 }
 
+func (c *OpenRouterClient) supportsReasoningControls() bool {
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(u.Hostname()), "openrouter.ai")
+}
+
+func openRouterReasoningConfig(jsonMode bool) *orReasoning {
+	if jsonMode {
+		effort := firstNonEmptyEnv("LLM_JSON_REASONING_EFFORT", "low")
+		switch strings.ToLower(strings.TrimSpace(effort)) {
+		case "off", "none", "false", "disabled", "disable":
+			return nil
+		}
+		return &orReasoning{
+			Exclude: true,
+			Effort:  effort,
+		}
+	}
+	if !readBoolEnvDefault("LLM_REASONING_ENABLED", true) {
+		return nil
+	}
+
+	reasoning := &orReasoning{
+		Enabled: true,
+	}
+	if maxTokens := readPositiveIntEnv("LLM_REASONING_MAX_TOKENS"); maxTokens > 0 {
+		reasoning.MaxTokens = maxTokens
+		return reasoning
+	}
+	reasoning.Effort = firstNonEmptyEnv("LLM_REASONING_EFFORT", "medium")
+	return reasoning
+}
+
 func applyLocalJSONControls(baseURL, model string, jsonMode bool, messages []orMessage) []orMessage {
 	if !jsonMode || !isLocalLLM(baseURL) || len(messages) == 0 {
 		return messages
@@ -301,17 +385,6 @@ func isLocalLLM(baseURL string) bool {
 	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
-func isLocalQwenModel(baseURL, model string) bool {
-	if !isLocalLLM(baseURL) {
-		return false
-	}
-	lower := strings.ToLower(strings.TrimSpace(model))
-	return strings.Contains(lower, "qwen/") ||
-		strings.Contains(lower, "qwen3:") ||
-		strings.Contains(lower, "qwen2.5:") ||
-		strings.HasPrefix(lower, "qwen")
-}
-
 func shouldRetryLocalLLM(baseURL string, statusCode, attempt, attempts int) bool {
 	if !isLocalLLM(baseURL) {
 		return false
@@ -357,7 +430,7 @@ func normalizeChoiceContent(content, reasoning string) string {
 }
 
 // DefaultRouter creates a router using OpenRouter-compatible clients for all tiers.
-// The default speed/analysis ids match the local LM Studio setup used for this repo.
+// The default cloud ids favor current OpenRouter open-weight model families.
 func DefaultRouter() *Router {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	baseURL := os.Getenv("LLM_BASE_URL")
@@ -370,7 +443,7 @@ func DefaultRouter() *Router {
 		if isLocalLLM(baseURL) {
 			speedModel = "qwen3:8b"
 		} else {
-			speedModel = "qwen/qwen3.5-9b"
+			speedModel = "openai/gpt-oss-120b"
 		}
 	}
 	analysisModel := os.Getenv("LLM_MODEL_ANALYSIS")
@@ -378,7 +451,7 @@ func DefaultRouter() *Router {
 		if isLocalLLM(baseURL) {
 			analysisModel = "qwen3:30b"
 		} else {
-			analysisModel = "qwen/qwen3.5-35b-a3b"
+			analysisModel = "openai/gpt-oss-120b"
 		}
 	}
 	criticalModel := os.Getenv("LLM_MODEL_CRITICAL")
@@ -386,7 +459,7 @@ func DefaultRouter() *Router {
 		if isLocalLLM(baseURL) {
 			criticalModel = analysisModel
 		} else {
-			criticalModel = "anthropic/claude-sonnet-4-20250514"
+			criticalModel = "deepseek/deepseek-v4-pro"
 		}
 	}
 	speedConcurrency := readConcurrencyEnv("LLM_SPEED_MAX_CONCURRENCY")
@@ -398,6 +471,7 @@ func DefaultRouter() *Router {
 		BaseURL:        baseURL,
 		Model:          speedModel,
 		MaxConcurrency: speedConcurrency,
+		EnvPrefix:      "LLM_SPEED",
 	})
 
 	analysis := NewOpenRouterClient(OpenRouterConfig{
@@ -405,6 +479,7 @@ func DefaultRouter() *Router {
 		BaseURL:        baseURL,
 		Model:          analysisModel,
 		MaxConcurrency: analysisConcurrency,
+		EnvPrefix:      "LLM_ANALYSIS",
 	})
 
 	critical := NewOpenRouterClient(OpenRouterConfig{
@@ -412,6 +487,7 @@ func DefaultRouter() *Router {
 		BaseURL:        baseURL,
 		Model:          criticalModel,
 		MaxConcurrency: criticalConcurrency,
+		EnvPrefix:      "LLM_CRITICAL",
 	})
 
 	return NewRouter(speed, analysis, critical)
@@ -427,4 +503,120 @@ func readConcurrencyEnv(name string) int {
 		return 0
 	}
 	return parsed
+}
+
+func providerRoutingFromEnv(prefix string) *ProviderRouting {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil
+	}
+	routing := &ProviderRouting{
+		Order:          readCSVEnv(prefix + "_PROVIDER_ORDER"),
+		Only:           readCSVEnv(prefix + "_PROVIDER_ONLY"),
+		Ignore:         readCSVEnv(prefix + "_PROVIDER_IGNORE"),
+		Sort:           strings.TrimSpace(os.Getenv(prefix + "_PROVIDER_SORT")),
+		DataCollection: strings.TrimSpace(os.Getenv(prefix + "_PROVIDER_DATA_COLLECTION")),
+	}
+	if value, ok := readOptionalBoolEnv(prefix + "_PROVIDER_ALLOW_FALLBACKS"); ok {
+		routing.AllowFallbacks = &value
+	}
+	if value, ok := readOptionalBoolEnv(prefix + "_PROVIDER_REQUIRE_PARAMETERS"); ok {
+		routing.RequireParameters = &value
+	}
+	if value, ok := readOptionalBoolEnv(prefix + "_PROVIDER_ZDR"); ok {
+		routing.ZDR = &value
+	}
+	if routing.empty() {
+		return nil
+	}
+	return routing
+}
+
+func (p *ProviderRouting) toOpenRouter() *orProviderRouting {
+	if p == nil || p.empty() {
+		return nil
+	}
+	return &orProviderRouting{
+		Order:             p.Order,
+		Only:              p.Only,
+		Ignore:            p.Ignore,
+		Sort:              p.Sort,
+		AllowFallbacks:    p.AllowFallbacks,
+		RequireParameters: p.RequireParameters,
+		DataCollection:    p.DataCollection,
+		ZDR:               p.ZDR,
+	}
+}
+
+func (p *ProviderRouting) empty() bool {
+	if p == nil {
+		return true
+	}
+	return len(p.Order) == 0 &&
+		len(p.Only) == 0 &&
+		len(p.Ignore) == 0 &&
+		p.Sort == "" &&
+		p.AllowFallbacks == nil &&
+		p.RequireParameters == nil &&
+		p.DataCollection == "" &&
+		p.ZDR == nil
+}
+
+func readCSVEnv(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func readOptionalBoolEnv(name string) (bool, bool) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return false, false
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, false
+	}
+	return parsed, true
+}
+
+func readPositiveIntEnv(name string) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
+}
+
+func readBoolEnvDefault(name string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func firstNonEmptyEnv(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }

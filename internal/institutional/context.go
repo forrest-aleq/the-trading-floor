@@ -27,7 +27,7 @@ func BuildSignalContext(sig signal.Signal, opts SignalContextOptions) string {
 			sb.WriteByte('\n')
 		}
 		sb.WriteString(opts.Indent)
-		sb.WriteString(fmt.Sprintf(line, args...))
+		_, _ = fmt.Fprintf(&sb, line, args...)
 	}
 
 	if opts.IncludeInstitutional && strings.TrimSpace(sig.InstitutionalContext) != "" {
@@ -119,7 +119,7 @@ func BuildThesisContext(thesis *model.Thesis, opts ThesisContextOptions) string 
 			sb.WriteByte('\n')
 		}
 		sb.WriteString(opts.Indent)
-		sb.WriteString(fmt.Sprintf(line, args...))
+		_, _ = fmt.Fprintf(&sb, line, args...)
 	}
 
 	primary := thesis.PrimaryInstrument()
@@ -172,7 +172,7 @@ func BuildEvidenceContext(meta *evidence.Metadata, opts EvidenceContextOptions) 
 			sb.WriteByte('\n')
 		}
 		sb.WriteString(opts.Indent)
-		sb.WriteString(fmt.Sprintf(line, args...))
+		_, _ = fmt.Fprintf(&sb, line, args...)
 	}
 
 	write("Source trust: %.2f", meta.SourceTrust)

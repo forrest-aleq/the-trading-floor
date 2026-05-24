@@ -2,8 +2,11 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -146,6 +149,171 @@ func TestApplyLocalJSONControlsLeavesRemoteModelsUntouched(t *testing.T) {
 	if got[0].Content != "Return JSON only." {
 		t.Fatalf("expected remote model to be unchanged, got %q", got[0].Content)
 	}
+}
+
+func TestOpenRouterClientExcludesReasoningForRemoteJSONMode(t *testing.T) {
+	t.Setenv("LLM_JSON_REASONING_EFFORT", "low")
+	var body map[string]any
+	client := &OpenRouterClient{
+		apiKey:  "test-key",
+		baseURL: "https://openrouter.ai/api/v1",
+		model:   "deepseek/deepseek-v4-flash",
+		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"ok\":true}"}}],"model":"deepseek/deepseek-v4-flash","usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	}
+
+	_, err := client.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "return JSON"}},
+		JSONMode: true,
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+
+	reasoning, ok := body["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reasoning object in request body, got %#v", body["reasoning"])
+	}
+	if got, ok := reasoning["exclude"].(bool); !ok || !got {
+		t.Fatalf("expected reasoning.exclude=true, got %#v", reasoning["exclude"])
+	}
+	if got := reasoning["effort"]; got != "low" {
+		t.Fatalf("expected reasoning.effort=low, got %#v", got)
+	}
+}
+
+func TestOpenRouterClientCanDisableReasoningForRemoteJSONMode(t *testing.T) {
+	t.Setenv("LLM_JSON_REASONING_EFFORT", "off")
+	var body map[string]any
+	client := &OpenRouterClient{
+		apiKey:  "test-key",
+		baseURL: "https://openrouter.ai/api/v1",
+		model:   "qwen/qwen3-235b-a22b-2507",
+		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"ok\":true}"}}],"model":"qwen/qwen3-235b-a22b-2507","usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	}
+
+	_, err := client.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "return JSON"}},
+		JSONMode: true,
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	if _, ok := body["reasoning"]; ok {
+		t.Fatalf("expected no reasoning object in request body, got %#v", body["reasoning"])
+	}
+}
+
+func TestOpenRouterClientEnablesReasoningForRemoteThoughtMode(t *testing.T) {
+	t.Setenv("LLM_REASONING_ENABLED", "true")
+	t.Setenv("LLM_REASONING_EFFORT", "medium")
+
+	var body map[string]any
+	client := &OpenRouterClient{
+		apiKey:  "test-key",
+		baseURL: "https://openrouter.ai/api/v1",
+		model:   "qwen/qwen3.6-35b-a3b",
+		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"FINAL_DECISION\ntradeable: false\nscore: 10\ninstruments: none\ndirection: none\nurgency: 0.0\ncategory: macro\nreasoning: no edge\nEND_FINAL_DECISION"}}],"model":"qwen/qwen3.6-35b-a3b","usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	}
+
+	_, err := client.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "think then decide"}},
+		JSONMode: false,
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+
+	reasoning, ok := body["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reasoning object in request body, got %#v", body["reasoning"])
+	}
+	if got, ok := reasoning["enabled"].(bool); !ok || !got {
+		t.Fatalf("expected reasoning.enabled=true, got %#v", reasoning["enabled"])
+	}
+	if got := reasoning["effort"]; got != "medium" {
+		t.Fatalf("expected reasoning.effort=medium, got %#v", got)
+	}
+}
+
+func TestOpenRouterClientAddsProviderRouting(t *testing.T) {
+	allowFallbacks := false
+	requireParameters := true
+	var body map[string]any
+	client := NewOpenRouterClient(OpenRouterConfig{
+		APIKey:  "test-key",
+		BaseURL: "https://openrouter.ai/api/v1",
+		Model:   "openai/gpt-oss-120b",
+		Provider: &ProviderRouting{
+			Order:             []string{"groq"},
+			AllowFallbacks:    &allowFallbacks,
+			RequireParameters: &requireParameters,
+		},
+	})
+	client.http = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"OK"}}],"model":"openai/gpt-oss-120b","usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	_, err := client.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "ping"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+
+	provider, ok := body["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected provider object in request body, got %#v", body["provider"])
+	}
+	order, ok := provider["order"].([]any)
+	if !ok || len(order) != 1 || order[0] != "groq" {
+		t.Fatalf("unexpected provider.order %#v", provider["order"])
+	}
+	if got := provider["allow_fallbacks"]; got != false {
+		t.Fatalf("expected allow_fallbacks=false, got %#v", got)
+	}
+	if got := provider["require_parameters"]; got != true {
+		t.Fatalf("expected require_parameters=true, got %#v", got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestApplyLocalJSONControlsHandlesOllamaQwenModels(t *testing.T) {

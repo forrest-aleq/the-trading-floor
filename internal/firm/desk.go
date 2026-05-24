@@ -634,6 +634,7 @@ func (d *Desk) handleKalshiThesis(ctx context.Context, thesis *model.Thesis, aut
 	}
 	d.rememberThesis(thesis)
 	d.persistThesis(ctx, thesis)
+	d.persistKalshiOrder(ctx, thesis, result)
 
 	if d.onTrade != nil && !result.DryRun && thesis.Status == model.ThesisActive {
 		d.onTrade()
@@ -655,6 +656,230 @@ func (d *Desk) handleKalshiThesis(ctx context.Context, thesis *model.Thesis, aut
 		"autonomy_mode", thesis.AutonomyMode,
 		"status", thesis.Status,
 	)
+}
+
+func (d *Desk) persistKalshiOrder(ctx context.Context, thesis *model.Thesis, result *kalshiexec.ExecutionResult) {
+	if d == nil || d.store == nil || thesis == nil || result == nil {
+		return
+	}
+	record, ok := kalshiPersistedOrder(thesis, result)
+	if !ok {
+		return
+	}
+	if err := d.store.UpsertWorkingOrder(ctx, record); err != nil {
+		d.log.Warn("persist kalshi working order failed",
+			"thesis_id", thesis.ID,
+			"order_id", record.Snapshot.OrderID,
+			"state", record.Snapshot.State,
+			"error", err,
+		)
+	}
+}
+
+func kalshiPersistedOrder(thesis *model.Thesis, result *kalshiexec.ExecutionResult) (execution.PersistedOrder, bool) {
+	if thesis == nil || result == nil {
+		return execution.PersistedOrder{}, false
+	}
+	req := result.MappedOrder.Request
+	orderID := strings.TrimSpace(req.ClientOrderID)
+	if orderID == "" {
+		orderID = "tf-" + strings.TrimSpace(thesis.ID)
+	}
+	if orderID == "tf-" {
+		return execution.PersistedOrder{}, false
+	}
+	ticker := strings.ToUpper(strings.TrimSpace(req.Ticker))
+	if ticker == "" {
+		ticker = strings.ToUpper(strings.TrimSpace(thesis.PrimaryInstrument().Symbol))
+	}
+	if !model.IsKalshiTicker(ticker) {
+		return execution.PersistedOrder{}, false
+	}
+	price, priceOK := kalshiOrderPrice(req)
+	if !priceOK {
+		return execution.PersistedOrder{}, false
+	}
+	quantity := float64(req.Count)
+	if quantity <= 0 {
+		return execution.PersistedOrder{}, false
+	}
+	inst := model.NormalizeKalshiInstrument(model.Instrument{
+		Symbol:   ticker,
+		SecType:  model.SecTypeKalshi,
+		Currency: "USD",
+	})
+	now := result.RecordedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	filled := filledKalshiCount(result.Response)
+	remaining := quantity - filled
+	if remaining < 0 {
+		remaining = 0
+	}
+	state := kalshiOrderState(result, filled, remaining)
+	brokerStatus := kalshiOrderStatus(result.Response)
+	if brokerStatus == "" {
+		brokerStatus = string(result.Mode)
+	}
+	notional := float64(result.MappedOrder.EstimatedRiskCents) / 100.0
+	if notional <= 0 {
+		notional = price * quantity
+	}
+	order := model.Order{
+		ID:          orderID,
+		ThesisID:    thesis.ID,
+		DeskID:      thesis.DeskID,
+		Structure:   "single",
+		Instrument:  inst,
+		Direction:   thesis.Direction,
+		Quantity:    quantity,
+		OrderType:   model.OrderLimit,
+		LimitPrice:  price,
+		TimeInForce: strings.ToUpper(strings.TrimSpace(req.TimeInForce)),
+		Notional:    notional,
+		ExecutionIntent: &model.ExecutionIntent{
+			DecidedAt:      now,
+			DecisionPrice:  price,
+			ReferencePrice: kalshiReferencePrice(thesis),
+		},
+	}
+	applyKalshiMarketContext(order.ExecutionIntent, thesis.MarketContext)
+	snapshot := execution.OrderSnapshot{
+		OrderID:           orderID,
+		ThesisID:          thesis.ID,
+		DeskID:            thesis.DeskID,
+		DisplaySymbol:     ticker,
+		Venue:             "kalshi",
+		State:             state,
+		BrokerStatus:      brokerStatus,
+		Quantity:          quantity,
+		FilledQuantity:    filled,
+		RemainingQuantity: remaining,
+		SubmittedAt:       now,
+		UpdatedAt:         now,
+		Paper:             result.DryRun,
+		ExecutionQuality: execution.ExecutionQuality{
+			DecisionPrice:  price,
+			ReferencePrice: order.ExecutionIntent.ReferencePrice,
+			FillRatio:      safeRatio(filled, quantity),
+		},
+	}
+	if result.Response != nil {
+		snapshot.VenueOrderID = strings.TrimSpace(result.Response.OrderID)
+	}
+	if filled > 0 {
+		snapshot.AvgFillPrice = price
+		snapshot.LastFillPrice = price
+	}
+	record := execution.PersistedOrder{
+		Order:    order,
+		Snapshot: snapshot,
+	}
+	if filled > 0 {
+		record.Fill = &model.Fill{
+			OrderID:    orderID,
+			Structure:  "single",
+			Instrument: inst,
+			Direction:  thesis.Direction,
+			Quantity:   filled,
+			AvgPrice:   price,
+			FilledAt:   now,
+		}
+	}
+	return record, true
+}
+
+func kalshiOrderPrice(req kalshiexec.OrderRequest) (float64, bool) {
+	price, err := strconv.ParseFloat(strings.TrimSpace(req.PriceDollars()), 64)
+	if err != nil || price < 0.01 || price > 0.99 {
+		return 0, false
+	}
+	return price, true
+}
+
+func kalshiOrderState(result *kalshiexec.ExecutionResult, filled, remaining float64) execution.OrderState {
+	if result == nil {
+		return execution.OrderStateFailed
+	}
+	if result.DryRun {
+		return execution.OrderStateDryRun
+	}
+	if filled > 0 && remaining > 0 {
+		return execution.OrderStatePartiallyFilled
+	}
+	if filled > 0 {
+		return execution.OrderStateFilled
+	}
+	if result.Response != nil && result.Response.IsResting() {
+		return execution.OrderStateWorking
+	}
+	return execution.OrderStateFailed
+}
+
+func kalshiReferencePrice(thesis *model.Thesis) float64 {
+	if thesis == nil {
+		return 0
+	}
+	for _, candidate := range []float64{
+		thesis.EntryPrice,
+		thesis.TargetPrice,
+	} {
+		if candidate > 0 {
+			return candidate
+		}
+	}
+	if thesis.MarketContext != nil {
+		for _, candidate := range []float64{
+			thesis.MarketContext.CurrentPrice,
+			thesis.MarketContext.MidPrice,
+			thesis.MarketContext.AskPrice,
+			thesis.MarketContext.BidPrice,
+		} {
+			if candidate > 0 {
+				return candidate
+			}
+		}
+	}
+	return 0
+}
+
+func applyKalshiMarketContext(intent *model.ExecutionIntent, marketCtx *model.MarketContext) {
+	if intent == nil || marketCtx == nil {
+		return
+	}
+	intent.BidPrice = marketCtx.BidPrice
+	intent.AskPrice = marketCtx.AskPrice
+	intent.MidPrice = marketCtx.MidPrice
+	intent.SpreadBps = marketCtx.SpreadBps
+	intent.QuoteAgeSeconds = marketCtx.QuoteAgeSeconds
+	if intent.ReferencePrice <= 0 {
+		for _, candidate := range []float64{
+			marketCtx.CurrentPrice,
+			marketCtx.MidPrice,
+			marketCtx.AskPrice,
+			marketCtx.BidPrice,
+		} {
+			if candidate > 0 {
+				intent.ReferencePrice = candidate
+				break
+			}
+		}
+	}
+}
+
+func safeRatio(numerator, denominator float64) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	ratio := numerator / denominator
+	if ratio < 0 {
+		return 0
+	}
+	if ratio > 1 {
+		return 1
+	}
+	return ratio
 }
 
 func filledKalshiCount(resp *kalshiexec.OrderResponse) float64 {

@@ -20,6 +20,7 @@ const (
 	OrderStateFilled          OrderState = "filled"
 	OrderStateCancelled       OrderState = "cancelled"
 	OrderStateFailed          OrderState = "failed"
+	OrderStateDryRun          OrderState = "dry_run"
 )
 
 type ExecutionQuality struct {
@@ -38,6 +39,8 @@ type OrderSnapshot struct {
 	ThesisID          string
 	DeskID            string
 	DisplaySymbol     string
+	Venue             string
+	VenueOrderID      string
 	BrokerOrderID     int64
 	State             OrderState
 	BrokerStatus      string

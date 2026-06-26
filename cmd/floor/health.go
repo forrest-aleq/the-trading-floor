@@ -48,6 +48,9 @@ type runtimeHealthConfig struct {
 	MaxBrokerSyncAge          time.Duration
 	MaxQuoteAge               time.Duration
 	PersistenceProbeTimeout   time.Duration
+	MinBrokerSMA              float64
+	MinBrokerExcessLiquidity  float64
+	MinBrokerBuyingPower      float64
 	BrokerAckFailureThreshold int
 	BrokerAckFailureWindow    time.Duration
 	BrokerAckFailureCooldown  time.Duration
@@ -68,6 +71,9 @@ type runtimeHealthSupervisor struct {
 	maxBrokerSyncAge          time.Duration
 	maxQuoteAge               time.Duration
 	persistenceProbeTimeout   time.Duration
+	minBrokerSMA              float64
+	minBrokerExcessLiquidity  float64
+	minBrokerBuyingPower      float64
 	brokerAckFailureThreshold int
 	brokerAckFailureWindow    time.Duration
 	brokerAckFailureCooldown  time.Duration
@@ -118,6 +124,9 @@ func newRuntimeHealthSupervisor(cfg runtimeHealthConfig) *runtimeHealthSuperviso
 		maxBrokerSyncAge:          cfg.MaxBrokerSyncAge,
 		maxQuoteAge:               cfg.MaxQuoteAge,
 		persistenceProbeTimeout:   cfg.PersistenceProbeTimeout,
+		minBrokerSMA:              cfg.MinBrokerSMA,
+		minBrokerExcessLiquidity:  cfg.MinBrokerExcessLiquidity,
+		minBrokerBuyingPower:      cfg.MinBrokerBuyingPower,
 		brokerAckFailureThreshold: cfg.BrokerAckFailureThreshold,
 		brokerAckFailureWindow:    cfg.BrokerAckFailureWindow,
 		brokerAckFailureCooldown:  cfg.BrokerAckFailureCooldown,
@@ -294,6 +303,12 @@ func (s *runtimeHealthSupervisor) evaluate(now time.Time) (firm.EntryPolicy, map
 	details["broker_last_failure"] = syncStatus.LastFailure
 	details["broker_last_error"] = syncStatus.LastError
 	details["broker_consecutive_failures"] = syncStatus.ConsecutiveFailures
+	details["broker_buying_power"] = syncStatus.BuyingPower
+	details["broker_excess_liquidity"] = syncStatus.ExcessLiquidity
+	details["broker_sma"] = syncStatus.SMA
+	details["broker_min_buying_power"] = s.minBrokerBuyingPower
+	details["broker_min_excess_liquidity"] = s.minBrokerExcessLiquidity
+	details["broker_min_sma"] = s.minBrokerSMA
 	if syncStatus.LastSynced.IsZero() {
 		return firm.DisabledEntryPolicy("broker_sync_missing", now), details
 	}
@@ -304,6 +319,15 @@ func (s *runtimeHealthSupervisor) evaluate(now time.Time) (firm.EntryPolicy, map
 	details["broker_sync_age"] = brokerAge.String()
 	if s.maxBrokerSyncAge > 0 && brokerAge > s.maxBrokerSyncAge {
 		return firm.DisabledEntryPolicy(fmt.Sprintf("broker_sync_stale:%s", brokerAge.Round(time.Second)), now), details
+	}
+	if s.minBrokerSMA > 0 && syncStatus.SMA < s.minBrokerSMA {
+		return firm.DisabledEntryPolicy(fmt.Sprintf("broker_sma_low:%.2f<%.2f", syncStatus.SMA, s.minBrokerSMA), now), details
+	}
+	if s.minBrokerExcessLiquidity > 0 && syncStatus.ExcessLiquidity < s.minBrokerExcessLiquidity {
+		return firm.DisabledEntryPolicy(fmt.Sprintf("broker_excess_liquidity_low:%.2f<%.2f", syncStatus.ExcessLiquidity, s.minBrokerExcessLiquidity), now), details
+	}
+	if s.minBrokerBuyingPower > 0 && syncStatus.BuyingPower < s.minBrokerBuyingPower {
+		return firm.DisabledEntryPolicy(fmt.Sprintf("broker_buying_power_low:%.2f<%.2f", syncStatus.BuyingPower, s.minBrokerBuyingPower), now), details
 	}
 
 	ackFailures := s.brokerAckFailureSnapshot(now)

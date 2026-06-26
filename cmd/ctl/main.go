@@ -32,6 +32,8 @@ func main() {
 		cmdMarket()
 	case "broker-orders":
 		cmdBrokerOrders()
+	case "broker-positions":
+		cmdBrokerPositions()
 	case "broker-probe-order":
 		cmdBrokerProbeOrder()
 	case "positions":
@@ -71,6 +73,7 @@ func usage() {
 	fmt.Println("commands:")
 	fmt.Println("  market [SYMBOL]  Show live market data from the configured market data provider")
 	fmt.Println("  broker-orders    Show open orders reported directly by IBKR/TWS")
+	fmt.Println("  broker-positions Show positions reported directly by IBKR/TWS")
 	fmt.Println("  broker-probe-order [SYMBOL] [--side buy|sell] [--qty N] [--type limit|market] [--limit P] [--keep-open]")
 	fmt.Println("  positions     List all open positions from the database")
 	fmt.Println("  theses        List recent theses with status")
@@ -180,6 +183,50 @@ func cmdBrokerOrders() {
 			order.FilledQuantity,
 			order.RemainingQuantity,
 			whyHeld,
+		) {
+			return
+		}
+	}
+	flushTable(w)
+}
+
+func cmdBrokerPositions() {
+	cfg := diagnosticIBKRConfig()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := ibkr.NewClient(cfg)
+	if err := client.Connect(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl broker-positions: connect failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	positions, err := client.GetPositions(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ctl broker-positions: %v\n", err)
+		os.Exit(1)
+	}
+	if len(positions) == 0 {
+		fmt.Println("No broker positions.")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if !writeTablef(w, "CONID\tSYMBOL\tSEC\tEXCHANGE\tCUR\tQTY\tAVG_COST\tNOTIONAL\n") {
+		return
+	}
+	for _, pos := range positions {
+		if !writeTablef(w, "%d\t%s\t%s\t%s\t%s\t%.4g\t%.4f\t%.2f\n",
+			pos.ConID,
+			pos.Symbol,
+			pos.SecType,
+			pos.Exchange,
+			pos.Currency,
+			pos.Quantity,
+			pos.AvgCost,
+			pos.Quantity*pos.AvgCost,
 		) {
 			return
 		}

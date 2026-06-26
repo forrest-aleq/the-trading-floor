@@ -304,6 +304,73 @@ func TestSnapshotUsesBrokerPositionsForCountsAndExposure(t *testing.T) {
 	}
 }
 
+func TestHydrateOpenPositionsRestoresRuntimeBook(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 1000)
+
+	count := bk.HydrateOpenPositions([]*model.Position{
+		{
+			ID:           "pos-long",
+			ThesisID:     "thesis-long",
+			DeskID:       "desk-a",
+			Instrument:   model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+			Direction:    model.Long,
+			Quantity:     10,
+			EntryPrice:   100,
+			CurrentPrice: 110,
+			Status:       "open",
+			OpenedAt:     time.Now().Add(-time.Hour),
+		},
+		{
+			ID:           "pos-short",
+			ThesisID:     "thesis-short",
+			DeskID:       "desk-b",
+			Instrument:   model.Instrument{Symbol: "QQQ", SecType: "STK", Currency: "USD"},
+			Direction:    model.Short,
+			Quantity:     2,
+			EntryPrice:   50,
+			CurrentPrice: 45,
+			Status:       "open",
+			OpenedAt:     time.Now().Add(-time.Hour),
+		},
+		{
+			ID:           "pos-shadow",
+			ThesisID:     "thesis-shadow",
+			DeskID:       "desk-shadow",
+			Instrument:   model.Instrument{Symbol: "MSFT", SecType: "STK", Currency: "USD"},
+			Direction:    model.Long,
+			Quantity:     1,
+			EntryPrice:   200,
+			CurrentPrice: 200,
+			Shadow:       true,
+			Status:       "open",
+		},
+	})
+	if count != 3 {
+		t.Fatalf("hydrated count = %d, want 3", count)
+	}
+
+	snapshot := bk.Snapshot()
+	if snapshot.OpenPositions != 2 {
+		t.Fatalf("open positions = %d, want 2", snapshot.OpenPositions)
+	}
+	if snapshot.Cash != 100 {
+		t.Fatalf("cash = %.2f, want 100.00", snapshot.Cash)
+	}
+	if snapshot.NAV != 1110 {
+		t.Fatalf("nav = %.2f, want 1110.00", snapshot.NAV)
+	}
+	if snapshot.GrossExposure != 1190 {
+		t.Fatalf("gross exposure = %.2f, want 1190.00", snapshot.GrossExposure)
+	}
+	if snapshot.NetExposure != 1010 {
+		t.Fatalf("net exposure = %.2f, want 1010.00", snapshot.NetExposure)
+	}
+
+	if dupes := bk.HydrateOpenPositions([]*model.Position{{ID: "pos-long", Status: "open"}}); dupes != 0 {
+		t.Fatalf("duplicate hydrate count = %d, want 0", dupes)
+	}
+}
+
 func TestReconcileRepairsBookQuantityAndAvgCostFromBroker(t *testing.T) {
 	bk := NewBook(stubPositionSource{}, 1000)
 	inst := model.Instrument{

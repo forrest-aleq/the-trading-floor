@@ -375,6 +375,20 @@ func connectIB(ctx context.Context, host string, port, clientID int) (*ibsync.IB
 	if err := ib.Connect(cfg); err != nil {
 		return nil, err
 	}
+	if readBoolEnv("IBKR_POSITION_SYNC", true) {
+		ib.ReqPositions()
+		warmup := readDurationEnv("IBKR_POSITION_SYNC_WARMUP", 750*time.Millisecond)
+		if warmup > 0 {
+			timer := time.NewTimer(warmup)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				_ = ib.Disconnect()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
 	return ib, nil
 }
 

@@ -131,10 +131,7 @@ func (e *Executor) IsDryRun() bool {
 }
 
 func (e *Executor) AccountEquityCents(ctx context.Context) (int64, error) {
-	if e == nil || e.client == nil || !e.client.hasCredentials() {
-		return 0, fmt.Errorf("kalshi credentials unavailable")
-	}
-	balance, err := e.client.GetBalance(ctx)
+	balance, err := e.AccountBalance(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -143,6 +140,21 @@ func (e *Executor) AccountEquityCents(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("kalshi account equity unavailable")
 	}
 	return equityCents, nil
+}
+
+func (e *Executor) AccountBalance(ctx context.Context) (*Balance, error) {
+	if e == nil || e.client == nil || !e.client.hasCredentials() {
+		return nil, fmt.Errorf("kalshi credentials unavailable")
+	}
+	balance, err := e.client.GetBalance(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return balance, nil
+}
+
+func (e *Executor) EffectiveMaxOrderCents(ctx context.Context) int64 {
+	return e.effectiveMaxOrderCents(ctx)
 }
 
 func (e *Executor) SubmitThesis(ctx context.Context, thesis *model.Thesis) (*ExecutionResult, error) {

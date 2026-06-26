@@ -115,6 +115,58 @@ func TestRunBlockingIBCallRespectsContextDeadline(t *testing.T) {
 	}
 }
 
+func TestAccountSummaryFromValuesParsesAccountUpdateFields(t *testing.T) {
+	t.Setenv("IBKR_ACCOUNT", "DU123")
+
+	summary, ok, err := accountSummaryFromValues(ibsync.AccountValues{
+		{Account: "DU123", Tag: "NetLiquidation", Value: "1011575.88", Currency: "USD"},
+		{Account: "DU123", Tag: "TotalCashValue", Value: "2744047.00", Currency: "USD"},
+		{Account: "DU123", Tag: "BuyingPower", Value: "338900.00", Currency: "USD"},
+		{Account: "DU123", Tag: "SMA", Value: "-117000.00", Currency: "USD"},
+		{Account: "DU123", Tag: "MaintMarginReq", Value: "669000.00", Currency: "USD"},
+		{Account: "DU123", Tag: "ExcessLiquidity", Value: "358900.00", Currency: "USD"},
+		{Account: "DU123", Tag: "RegTEquity", Value: "800000.00", Currency: "USD"},
+		{Account: "DU123", Tag: "RegTMargin", Value: "600000.00", Currency: "USD"},
+	}, []string{"DU123"})
+	if err != nil {
+		t.Fatalf("accountSummaryFromValues returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected account values to produce a summary")
+	}
+	if summary.NetLiquidation != 1011575.88 {
+		t.Fatalf("net liquidation = %.2f", summary.NetLiquidation)
+	}
+	if summary.Cash != 2744047.00 {
+		t.Fatalf("cash = %.2f", summary.Cash)
+	}
+	if summary.SMA != -117000.00 {
+		t.Fatalf("SMA = %.2f", summary.SMA)
+	}
+	if summary.MaintMarginReq != 669000.00 {
+		t.Fatalf("maintenance margin = %.2f", summary.MaintMarginReq)
+	}
+	if summary.ExcessLiquidity != 358900.00 {
+		t.Fatalf("excess liquidity = %.2f", summary.ExcessLiquidity)
+	}
+	if summary.RegTEquity != 800000.00 || summary.RegTMargin != 600000.00 {
+		t.Fatalf("RegT fields not parsed: %+v", summary)
+	}
+}
+
+func TestAccountSummaryFromValuesRejectsAmbiguousAccounts(t *testing.T) {
+	_, ok, err := accountSummaryFromValues(ibsync.AccountValues{
+		{Account: "DU123", Tag: "NetLiquidation", Value: "1000", Currency: "USD"},
+		{Account: "DU456", Tag: "NetLiquidation", Value: "2000", Currency: "USD"},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected ambiguous account error")
+	}
+	if ok {
+		t.Fatal("expected ambiguous values not to produce a summary")
+	}
+}
+
 func TestNormalizeQuantityUsesWholeSharesForStocks(t *testing.T) {
 	if got := normalizeQuantity(12.75, "STK"); got != 12 {
 		t.Fatalf("expected stock quantity to floor to 12, got %.4f", got)

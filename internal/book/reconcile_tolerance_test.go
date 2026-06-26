@@ -80,6 +80,77 @@ func TestReconcileStillFlagsRealDrift(t *testing.T) {
 	}
 }
 
+func TestReconcilePreservesDuplicateDeskPositionsAndAddsBrokerDelta(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 100000)
+	inst := model.Instrument{Symbol: "QQQ", SecType: "STK", Exchange: "SMART", Currency: "USD"}
+	first := bk.OpenPosition(&model.Fill{
+		OrderID:    "desk-short-1",
+		Instrument: inst,
+		Direction:  model.Short,
+		Quantity:   2,
+		AvgPrice:   710,
+		FilledAt:   time.Now(),
+	}, &model.Thesis{
+		ID:         "thesis-short-1",
+		DeskID:     "sector-tech-a",
+		Instrument: inst,
+		Direction:  model.Short,
+	})
+	second := bk.OpenPosition(&model.Fill{
+		OrderID:    "desk-short-2",
+		Instrument: inst,
+		Direction:  model.Short,
+		Quantity:   3,
+		AvgPrice:   710,
+		FilledAt:   time.Now(),
+	}, &model.Thesis{
+		ID:         "thesis-short-2",
+		DeskID:     "sys-momentum-a",
+		Instrument: inst,
+		Direction:  model.Short,
+	})
+
+	discrepancies := bk.Reconcile([]ibkr.IBKRPosition{{
+		ConID:    320227571,
+		Symbol:   "QQQ",
+		SecType:  "STK",
+		Exchange: "SMART",
+		Currency: "USD",
+		Quantity: -10,
+		AvgCost:  710,
+	}})
+
+	if len(discrepancies) != 1 {
+		t.Fatalf("expected aggregate broker quantity drift to be reported, got %+v", discrepancies)
+	}
+	if discrepancies[0].BookQty != -5 || discrepancies[0].IBKRQty != -10 {
+		t.Fatalf("expected aggregate drift -5 -> -10, got %+v", discrepancies[0])
+	}
+	if first.Quantity != 2 || first.Direction != model.Short {
+		t.Fatalf("first desk position was mutated: %+v", first)
+	}
+	if second.Quantity != 3 || second.Direction != model.Short {
+		t.Fatalf("second desk position was mutated: %+v", second)
+	}
+
+	var recovery *model.Position
+	for _, pos := range bk.GetOpenPositions() {
+		if pos.DeskID == brokerRecoveryDeskID {
+			recovery = pos
+			break
+		}
+	}
+	if recovery == nil {
+		t.Fatal("expected broker recovery delta position")
+	}
+	if recovery.Direction != model.Short || recovery.Quantity != 5 {
+		t.Fatalf("expected short recovery delta of 5 shares, got %+v", recovery)
+	}
+	if got := aggregateSignedQuantity(bk.GetOpenPositions()); got != -10 {
+		t.Fatalf("expected aggregate signed QQQ quantity -10, got %.2f", got)
+	}
+}
+
 // IBKR reports option avgCost per contract (premium × multiplier, plus fees);
 // the book stores per-share premiums. A matched option position must not be
 // flagged — or worse, "repaired" to a 100x entry price.

@@ -167,6 +167,16 @@ func main() {
 		hydrateCancel()
 	}
 	bk := book.NewBook(ibkrClient, 1_000_000)
+	if db != nil {
+		hydrateCtx, hydrateCancel := context.WithTimeout(ctx, 10*time.Second)
+		positions, err := db.ListOpenPositions(hydrateCtx, false)
+		hydrateCancel()
+		if err != nil {
+			slog.Warn("hydrate open positions failed", "error", err)
+		} else if count := bk.HydrateOpenPositions(positions); count > 0 {
+			slog.Info("runtime book hydrated from store", "positions", count)
+		}
+	}
 	if ibkrRuntimeEnabled {
 		observe.SafeGo(slog.Default().With("component", "runtime"), "book reconcile loop panic", func() {
 			bk.StartReconcile(ctx)
@@ -213,6 +223,22 @@ func main() {
 			positionWriter.Enqueue(bk.GetOpenPositions())
 		}
 	})
+	if positionWriter != nil {
+		snapshotInterval := readRuntimeDuration("POSITION_PERSIST_SNAPSHOT_INTERVAL", 30*time.Second)
+		observe.SafeGo(slog.Default().With("component", "runtime"), "position persistence snapshot loop panic", func() {
+			ticker := time.NewTicker(snapshotInterval)
+			defer ticker.Stop()
+			positionWriter.Enqueue(bk.GetOpenPositions())
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					positionWriter.Enqueue(bk.GetOpenPositions())
+				}
+			}
+		}, "task", "position_persist_snapshot", "interval", snapshotInterval.String())
+	}
 	if marketState.Provider != nil {
 		observe.SafeGo(slog.Default().With("component", "runtime"), "market data loop panic", func() {
 			mdMgr.Run(ctx)
@@ -486,6 +512,9 @@ func main() {
 		maxBrokerSyncAge := readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute)
 		maxQuoteAge := readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", defaultMaxQuoteAge)
 		persistenceProbeTimeout := readRuntimeDuration("RUNTIME_HEALTH_PERSISTENCE_TIMEOUT", 2*time.Second)
+		minBrokerSMA := readRuntimeFloat("RUNTIME_HEALTH_MIN_BROKER_SMA_DOLLARS", 25_000)
+		minBrokerExcessLiquidity := readRuntimeFloat("RUNTIME_HEALTH_MIN_BROKER_EXCESS_LIQUIDITY_DOLLARS", 50_000)
+		minBrokerBuyingPower := readRuntimeFloat("RUNTIME_HEALTH_MIN_BROKER_BUYING_POWER_DOLLARS", 0)
 		brokerAckFailureThreshold := readRuntimeInt("RUNTIME_HEALTH_BROKER_ACK_FAILURE_THRESHOLD", 3)
 		brokerAckFailureWindow := readRuntimeDuration("RUNTIME_HEALTH_BROKER_ACK_FAILURE_WINDOW", 2*time.Minute)
 		brokerAckFailureCooldown := readRuntimeDuration("RUNTIME_HEALTH_BROKER_ACK_FAILURE_COOLDOWN", 5*time.Minute)
@@ -502,6 +531,9 @@ func main() {
 			MaxBrokerSyncAge:          maxBrokerSyncAge,
 			MaxQuoteAge:               maxQuoteAge,
 			PersistenceProbeTimeout:   persistenceProbeTimeout,
+			MinBrokerSMA:              minBrokerSMA,
+			MinBrokerExcessLiquidity:  minBrokerExcessLiquidity,
+			MinBrokerBuyingPower:      minBrokerBuyingPower,
 			BrokerAckFailureThreshold: brokerAckFailureThreshold,
 			BrokerAckFailureWindow:    brokerAckFailureWindow,
 			BrokerAckFailureCooldown:  brokerAckFailureCooldown,
@@ -529,6 +561,9 @@ func main() {
 			"max_broker_sync_age", maxBrokerSyncAge,
 			"max_quote_age", maxQuoteAge,
 			"persistence_timeout", persistenceProbeTimeout,
+			"min_broker_sma", minBrokerSMA,
+			"min_broker_excess_liquidity", minBrokerExcessLiquidity,
+			"min_broker_buying_power", minBrokerBuyingPower,
 			"broker_ack_failure_threshold", brokerAckFailureThreshold,
 			"broker_ack_failure_window", brokerAckFailureWindow,
 			"broker_ack_failure_cooldown", brokerAckFailureCooldown,
@@ -1004,6 +1039,16 @@ func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book
 					"broker_sync_connected", brokerSync.Connected,
 					"broker_sync_nav", brokerSync.NAV,
 					"broker_sync_cash", brokerSync.Cash,
+					"broker_sync_buying_power", brokerSync.BuyingPower,
+					"broker_sync_equity_with_loan_value", brokerSync.EquityWithLoanValue,
+					"broker_sync_gross_position_value", brokerSync.GrossPositionValue,
+					"broker_sync_reg_t_equity", brokerSync.RegTEquity,
+					"broker_sync_reg_t_margin", brokerSync.RegTMargin,
+					"broker_sync_sma", brokerSync.SMA,
+					"broker_sync_init_margin_req", brokerSync.InitMarginReq,
+					"broker_sync_maint_margin_req", brokerSync.MaintMarginReq,
+					"broker_sync_available_funds", brokerSync.AvailableFunds,
+					"broker_sync_excess_liquidity", brokerSync.ExcessLiquidity,
 					"broker_sync_daily_pnl", brokerSync.DailyPnL,
 					"broker_sync_daily_pnl_available", brokerSync.DailyPnLAvailable,
 					"broker_sync_daily_pnl_source", brokerSync.DailyPnLSource,
@@ -1439,7 +1484,7 @@ func reportKalshiBankroll(ctx context.Context, executor *kalshiexec.Executor) {
 	}
 	balanceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	equityCents, err := executor.AccountEquityCents(balanceCtx)
+	balance, err := executor.AccountBalance(balanceCtx)
 	if err != nil {
 		slog.Warn("Kalshi bankroll status",
 			"available", false,
@@ -1450,11 +1495,16 @@ func reportKalshiBankroll(ctx context.Context, executor *kalshiexec.Executor) {
 		)
 		return
 	}
+	equityCents := balance.Balance + balance.PortfolioValue
+	effectiveOrderRisk := float64(executor.EffectiveMaxOrderCents(balanceCtx)) / 100.0
 	slog.Info("Kalshi bankroll status",
 		"available", true,
 		"source", "kalshi_api",
 		"equity", float64(equityCents)/100.0,
+		"available_cash", float64(balance.Balance)/100.0,
+		"portfolio_value", float64(balance.PortfolioValue)/100.0,
 		"max_order_risk", maxOrderRisk,
+		"effective_max_order_risk", effectiveOrderRisk,
 		"risk_pct_equity", riskPct,
 	)
 }

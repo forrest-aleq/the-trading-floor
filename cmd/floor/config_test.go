@@ -664,6 +664,57 @@ func TestRuntimeHealthAllowsEntriesWhenBrokerAndQuotesAreHealthy(t *testing.T) {
 	}
 }
 
+func TestRuntimeHealthDisablesEntriesWhenBrokerSMALow(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:       true,
+			LastSynced:      now.Add(-30 * time.Second),
+			SMA:             5_000,
+			ExcessLiquidity: 250_000,
+			BuyingPower:     1_000_000,
+		}},
+		DisableQuoteGate:         true,
+		MinBrokerSMA:             25_000,
+		MinBrokerExcessLiquidity: 50_000,
+	})
+
+	policy := supervisor.EvaluateNow(now)
+	if policy.AllowEntries {
+		t.Fatal("expected low broker SMA to disable entries")
+	}
+	if policy.Reason != "broker_sma_low:5000.00<25000.00" {
+		t.Fatalf("expected broker SMA reason, got %q", policy.Reason)
+	}
+}
+
+func TestRuntimeHealthAllowsEntriesWhenBrokerMarginThresholdsPass(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:       true,
+			LastSynced:      now.Add(-30 * time.Second),
+			SMA:             50_000,
+			ExcessLiquidity: 250_000,
+			BuyingPower:     1_000_000,
+		}},
+		DisableQuoteGate:         true,
+		MinBrokerSMA:             25_000,
+		MinBrokerExcessLiquidity: 50_000,
+		MinBrokerBuyingPower:     100_000,
+	})
+
+	policy := supervisor.EvaluateNow(now)
+	if !policy.AllowEntries {
+		t.Fatalf("expected healthy broker margin to allow entries, got reason %q", policy.Reason)
+	}
+	if policy.Mode != firm.EntryModeNormal {
+		t.Fatalf("expected normal mode, got %s", policy.Mode)
+	}
+}
+
 func TestRuntimeHealthAllowsEntriesWhenMinimumFreshQuotesMet(t *testing.T) {
 	now := time.Now().UTC()
 	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{

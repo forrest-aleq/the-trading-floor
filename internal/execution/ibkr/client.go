@@ -60,16 +60,25 @@ type IBKRPosition struct {
 }
 
 type AccountSummary struct {
-	NetLiquidation float64
-	BuyingPower    float64
-	Cash           float64
-	UnrealizedPnL  float64
-	RealizedPnL    float64
-	DailyPnL       float64
-	DailyPnLReady  bool
-	PnLSource      string
-	PnLAccount     string
-	PnLError       string
+	NetLiquidation      float64
+	BuyingPower         float64
+	Cash                float64
+	EquityWithLoanValue float64
+	GrossPositionValue  float64
+	RegTEquity          float64
+	RegTMargin          float64
+	SMA                 float64
+	InitMarginReq       float64
+	MaintMarginReq      float64
+	AvailableFunds      float64
+	ExcessLiquidity     float64
+	UnrealizedPnL       float64
+	RealizedPnL         float64
+	DailyPnL            float64
+	DailyPnLReady       bool
+	PnLSource           string
+	PnLAccount          string
+	PnLError            string
 }
 
 type AccountPnL struct {
@@ -88,6 +97,8 @@ type HistoricalBar struct {
 	Low   float64
 	Close float64
 }
+
+const accountSummaryTags = "NetLiquidation,TotalCashValue,BuyingPower,EquityWithLoanValue,GrossPositionValue,RegTEquity,RegTMargin,SMA,InitMarginReq,MaintMarginReq,AvailableFunds,ExcessLiquidity,UnrealizedPnL,RealizedPnL"
 
 var ErrOrderNotFound = errors.New("order not found")
 
@@ -884,6 +895,13 @@ func (c *Client) GetAccountSummary(ctx context.Context) (*AccountSummary, error)
 		return nil, fmt.Errorf("not connected to IBKR")
 	}
 
+	if summary, ok, err := accountSummaryFromValues(ib.AccountValues(), ib.ManagedAccounts()); err != nil {
+		return nil, err
+	} else if ok {
+		c.attachAccountPnL(ctx, summary)
+		return summary, nil
+	}
+
 	// Keep this request deliberately narrow. ibsync.AccountSummary() requests
 	// the full Account Window tag set including ledgers, which can stall long
 	// enough to make broker reconciliation look dead even when TWS is connected.
@@ -897,7 +915,7 @@ func (c *Client) GetAccountSummary(ctx context.Context) (*AccountSummary, error)
 	}
 	resultCh := make(chan accountSummaryResult, 1)
 	go func() {
-		items, err := ib.ReqAccountSummary("All", "NetLiquidation,TotalCashValue,BuyingPower")
+		items, err := ib.ReqAccountSummary("All", accountSummaryTags)
 		resultCh <- accountSummaryResult{items: items, err: err}
 	}()
 
@@ -911,22 +929,34 @@ func (c *Client) GetAccountSummary(ctx context.Context) (*AccountSummary, error)
 		}
 		items = result.items
 	}
-	if len(items) == 0 {
+	summary, ok, err := accountSummaryFromValues(ibsync.AccountValues(items), ib.ManagedAccounts())
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
 		return nil, fmt.Errorf("empty account summary")
 	}
+	c.attachAccountPnL(ctx, summary)
+	return summary, nil
+}
 
+func accountSummaryFromValues(items ibsync.AccountValues, managedAccounts []string) (*AccountSummary, bool, error) {
+	if len(items) == 0 {
+		return nil, false, nil
+	}
 	accountCandidates := make([]string, 0, 2)
 	for _, item := range items {
 		if account := strings.TrimSpace(item.Account); account != "" && !strings.EqualFold(account, "all") {
 			accountCandidates = append(accountCandidates, account)
 		}
 	}
-	selectedAccount := resolveBrokerDataAccount(ib.ManagedAccounts(), accountCandidates)
+	selectedAccount := resolveBrokerDataAccount(managedAccounts, accountCandidates)
 	if selectedAccount == "" && multipleUniqueAccounts(accountCandidates) {
-		return nil, fmt.Errorf("account summary ambiguous across multiple accounts; set IBKR_ACCOUNT or IBKR_PNL_ACCOUNT")
+		return nil, false, fmt.Errorf("account summary ambiguous across multiple accounts; set IBKR_ACCOUNT or IBKR_PNL_ACCOUNT")
 	}
 
 	summary := &AccountSummary{PnLAccount: selectedAccount}
+	foundAccountMetric := false
 	for _, item := range items {
 		if selectedAccount != "" {
 			account := strings.TrimSpace(item.Account)
@@ -937,30 +967,58 @@ func (c *Client) GetAccountSummary(ctx context.Context) (*AccountSummary, error)
 		switch item.Tag {
 		case "NetLiquidation":
 			summary.NetLiquidation = parseFloat(item.Value)
+			foundAccountMetric = foundAccountMetric || summary.NetLiquidation > 0
 		case "BuyingPower":
 			summary.BuyingPower = parseFloat(item.Value)
+			foundAccountMetric = foundAccountMetric || summary.BuyingPower != 0
 		case "TotalCashValue":
 			summary.Cash = parseFloat(item.Value)
+			foundAccountMetric = foundAccountMetric || summary.Cash != 0
+		case "EquityWithLoanValue":
+			summary.EquityWithLoanValue = parseFloat(item.Value)
+		case "GrossPositionValue":
+			summary.GrossPositionValue = parseFloat(item.Value)
+		case "RegTEquity":
+			summary.RegTEquity = parseFloat(item.Value)
+		case "RegTMargin":
+			summary.RegTMargin = parseFloat(item.Value)
+		case "SMA":
+			summary.SMA = parseFloat(item.Value)
+		case "InitMarginReq":
+			summary.InitMarginReq = parseFloat(item.Value)
+		case "MaintMarginReq":
+			summary.MaintMarginReq = parseFloat(item.Value)
+		case "AvailableFunds":
+			summary.AvailableFunds = parseFloat(item.Value)
+		case "ExcessLiquidity":
+			summary.ExcessLiquidity = parseFloat(item.Value)
 		case "UnrealizedPnL":
 			summary.UnrealizedPnL = parseFloat(item.Value)
 		case "RealizedPnL":
 			summary.RealizedPnL = parseFloat(item.Value)
 		}
 	}
-	if readBoolEnv("IBKR_ACCOUNT_PNL_SYNC", true) {
-		if summary.PnLAccount == "" {
-			summary.PnLError = "account pnl unavailable: set IBKR_ACCOUNT when multiple accounts are visible"
-		} else if pnl, err := c.GetAccountPnL(ctx, summary.PnLAccount); err != nil {
-			summary.PnLError = err.Error()
-		} else {
-			summary.DailyPnL = pnl.DailyPnL
-			summary.UnrealizedPnL = pnl.UnrealizedPnL
-			summary.RealizedPnL = pnl.RealizedPnL
-			summary.DailyPnLReady = true
-			summary.PnLSource = "ibkr_req_pnl"
-		}
+	if !foundAccountMetric {
+		return nil, false, nil
 	}
-	return summary, nil
+	return summary, true, nil
+}
+
+func (c *Client) attachAccountPnL(ctx context.Context, summary *AccountSummary) {
+	if c == nil || summary == nil || !readBoolEnv("IBKR_ACCOUNT_PNL_SYNC", true) {
+		return
+	}
+	if summary.PnLAccount == "" {
+		summary.PnLError = "account pnl unavailable: set IBKR_ACCOUNT when multiple accounts are visible"
+	} else if pnl, err := c.GetAccountPnL(ctx, summary.PnLAccount); err != nil {
+		summary.PnLError = err.Error()
+	} else {
+		summary.DailyPnL = pnl.DailyPnL
+		summary.UnrealizedPnL = pnl.UnrealizedPnL
+		summary.RealizedPnL = pnl.RealizedPnL
+		summary.DailyPnLReady = true
+		summary.PnLSource = "ibkr_req_pnl"
+	}
 }
 
 func (c *Client) GetAccountPnL(ctx context.Context, account string) (*AccountPnL, error) {

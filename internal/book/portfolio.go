@@ -65,6 +65,16 @@ type brokerAccountState struct {
 	connected           bool
 	nav                 float64
 	cash                float64
+	buyingPower         float64
+	equityWithLoanValue float64
+	grossPositionValue  float64
+	regTEquity          float64
+	regTMargin          float64
+	sma                 float64
+	initMarginReq       float64
+	maintMarginReq      float64
+	availableFunds      float64
+	excessLiquidity     float64
 	dailyPnL            float64
 	dailyPnLAvailable   bool
 	dailyPnLSource      string
@@ -87,6 +97,16 @@ type BrokerSyncStatus struct {
 	Connected           bool
 	NAV                 float64
 	Cash                float64
+	BuyingPower         float64
+	EquityWithLoanValue float64
+	GrossPositionValue  float64
+	RegTEquity          float64
+	RegTMargin          float64
+	SMA                 float64
+	InitMarginReq       float64
+	MaintMarginReq      float64
+	AvailableFunds      float64
+	ExcessLiquidity     float64
 	DailyPnL            float64
 	DailyPnLAvailable   bool
 	DailyPnLSource      string
@@ -203,6 +223,50 @@ func (b *Book) SetDeskCapital(deskID string, capital float64) {
 	b.mu.Unlock()
 }
 
+func (b *Book) HydrateOpenPositions(positions []*model.Position) int {
+	if b == nil || len(positions) == 0 {
+		return 0
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	count := 0
+	for _, source := range positions {
+		if source == nil || source.ID == "" || source.Status != "open" {
+			continue
+		}
+		if _, exists := b.positions[source.ID]; exists {
+			continue
+		}
+
+		pos := cloneBookPosition(source)
+		if pos.CurrentPrice <= 0 {
+			pos.CurrentPrice = pos.EntryPrice
+		}
+		if pos.OpenedAt.IsZero() {
+			pos.OpenedAt = b.currentTime()
+		}
+		b.positions[pos.ID] = pos
+		if !pos.Shadow {
+			b.deskPositions[pos.DeskID]++
+			b.totalTrades++
+			notional := positionCashNotional(pos, pos.EntryPrice)
+			if pos.Direction == model.Long {
+				b.cash -= notional
+			} else {
+				b.cash += notional
+			}
+		}
+		count++
+	}
+	if count > 0 {
+		b.recalculateLocked()
+		b.log.Info("open positions hydrated", "positions", count)
+	}
+	return count
+}
+
 func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Position {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -237,6 +301,21 @@ func (b *Book) OpenPosition(fill *model.Fill, thesis *model.Thesis) *model.Posit
 	)
 
 	return pos
+}
+
+func cloneBookPosition(pos *model.Position) *model.Position {
+	if pos == nil {
+		return nil
+	}
+	cloned := *pos
+	if len(pos.Legs) > 0 {
+		cloned.Legs = append([]model.TradeLeg(nil), pos.Legs...)
+	}
+	if pos.ClosedAt != nil {
+		closedAt := *pos.ClosedAt
+		cloned.ClosedAt = &closedAt
+	}
+	return &cloned
 }
 
 func (b *Book) ApplyExecutionFill(fill *model.Fill, thesis *model.Thesis) *model.Position {
@@ -614,6 +693,16 @@ func (b *Book) BrokerSyncStatus() BrokerSyncStatus {
 		Connected:           b.brokerSync.connected,
 		NAV:                 b.brokerSync.nav,
 		Cash:                b.brokerSync.cash,
+		BuyingPower:         b.brokerSync.buyingPower,
+		EquityWithLoanValue: b.brokerSync.equityWithLoanValue,
+		GrossPositionValue:  b.brokerSync.grossPositionValue,
+		RegTEquity:          b.brokerSync.regTEquity,
+		RegTMargin:          b.brokerSync.regTMargin,
+		SMA:                 b.brokerSync.sma,
+		InitMarginReq:       b.brokerSync.initMarginReq,
+		MaintMarginReq:      b.brokerSync.maintMarginReq,
+		AvailableFunds:      b.brokerSync.availableFunds,
+		ExcessLiquidity:     b.brokerSync.excessLiquidity,
 		DailyPnL:            b.brokerSync.dailyPnL,
 		DailyPnLAvailable:   b.brokerSync.dailyPnLAvailable,
 		DailyPnLSource:      b.brokerSync.dailyPnLSource,
@@ -673,23 +762,32 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	bookByKey := make(map[string]*model.Position)
+	bookByConID := make(map[string][]*model.Position)
+	bookBySymbol := make(map[string][]*model.Position)
 	for _, pos := range b.positions {
 		if pos.Status != "open" || pos.Shadow {
 			continue
 		}
-		bookByKey[reconcileKey(pos.IBKRContractID, pos.Instrument.Symbol)] = pos
+		if pos.IBKRContractID > 0 {
+			key := reconcileKey(pos.IBKRContractID, pos.Instrument.Symbol)
+			bookByConID[key] = append(bookByConID[key], pos)
+		}
+		symbolKey := reconcileSymbolKey(pos.Instrument.Symbol)
+		bookBySymbol[symbolKey] = append(bookBySymbol[symbolKey], pos)
 	}
 
 	seen := make(map[string]bool)
+	seenPositions := make(map[*model.Position]bool)
 	var discrepancies []Discrepancy
 
 	for _, ip := range ibkrPositions {
-		key := reconcileKey(ip.ConID, ip.Symbol)
+		key, positions := reconcileGroup(ip, bookByConID, bookBySymbol)
 		seen[key] = true
+		for _, pos := range positions {
+			seenPositions[pos] = true
+		}
 
-		pos, exists := bookByKey[key]
-		if !exists {
+		if len(positions) == 0 {
 			recovered := recoveredBrokerPosition(ip)
 			b.positions[recovered.ID] = recovered
 			if !recovered.Shadow {
@@ -705,11 +803,15 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 			continue
 		}
 
-		bookQty := signedPositionQuantity(pos)
-		bookAvg := pos.EntryPrice
-		brokerAvg := normalizedBrokerAvgCost(pos, ip.AvgCost)
-		if !approxEqual(bookQty, ip.Quantity) || !approxEqual(bookAvg, brokerAvg) {
-			applyBrokerRepair(pos, ip, brokerAvg)
+		bookQty := aggregateSignedQuantity(positions)
+		bookAvg := aggregateEntryPrice(positions)
+		brokerAvg := normalizedBrokerAvgCost(positions[0], ip.AvgCost)
+		if !approxEqual(bookQty, ip.Quantity) || !approxPriceEqual(bookAvg, brokerAvg) {
+			if len(positions) == 1 && positions[0].DeskID != brokerRecoveryDeskID {
+				applyBrokerRepair(positions[0], ip, brokerAvg)
+			} else {
+				b.applyBrokerRecoveryDeltaLocked(key, positions, ip, brokerAvg)
+			}
 			discrepancies = append(discrepancies, Discrepancy{
 				Symbol:      ip.Symbol,
 				BookQty:     bookQty,
@@ -720,15 +822,42 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 		}
 	}
 
-	for key, pos := range bookByKey {
+	for key, positions := range bookByConID {
 		if seen[key] {
 			continue
 		}
+		positions = unseenReconcilePositions(positions, seenPositions)
+		if len(positions) == 0 {
+			continue
+		}
+		for _, pos := range positions {
+			seen[reconcileSymbolKey(pos.Instrument.Symbol)] = true
+		}
+		bookQty := aggregateSignedQuantity(positions)
+		bookAvg := aggregateEntryPrice(positions)
 		discrepancies = append(discrepancies, Discrepancy{
-			Symbol:      pos.DisplaySymbol(),
-			BookQty:     pos.Quantity,
+			Symbol:      positions[0].DisplaySymbol(),
+			BookQty:     bookQty,
 			IBKRQty:     0,
-			BookAvgCost: pos.EntryPrice,
+			BookAvgCost: bookAvg,
+			IBKRAvgCost: 0,
+		})
+	}
+	for key, positions := range bookBySymbol {
+		if seen[key] {
+			continue
+		}
+		positions = unseenReconcilePositions(positions, seenPositions)
+		if len(positions) == 0 {
+			continue
+		}
+		bookQty := aggregateSignedQuantity(positions)
+		bookAvg := aggregateEntryPrice(positions)
+		discrepancies = append(discrepancies, Discrepancy{
+			Symbol:      positions[0].DisplaySymbol(),
+			BookQty:     bookQty,
+			IBKRQty:     0,
+			BookAvgCost: bookAvg,
 			IBKRAvgCost: 0,
 		})
 	}
@@ -745,6 +874,13 @@ func approxEqual(a, b float64) bool {
 		return true
 	}
 	return diff <= math.Max(math.Abs(a), math.Abs(b))*1e-9
+}
+
+func approxPriceEqual(a, b float64) bool {
+	if approxEqual(a, b) {
+		return true
+	}
+	return math.Abs(a-b) <= 0.01
 }
 
 func (b *Book) GetOpenPositions() []*model.Position {
@@ -902,6 +1038,16 @@ func (b *Book) applyAccountSummary(summary *ibkr.AccountSummary) {
 		}
 	}
 	b.brokerSync.cash = summary.Cash
+	b.brokerSync.buyingPower = summary.BuyingPower
+	b.brokerSync.equityWithLoanValue = summary.EquityWithLoanValue
+	b.brokerSync.grossPositionValue = summary.GrossPositionValue
+	b.brokerSync.regTEquity = summary.RegTEquity
+	b.brokerSync.regTMargin = summary.RegTMargin
+	b.brokerSync.sma = summary.SMA
+	b.brokerSync.initMarginReq = summary.InitMarginReq
+	b.brokerSync.maintMarginReq = summary.MaintMarginReq
+	b.brokerSync.availableFunds = summary.AvailableFunds
+	b.brokerSync.excessLiquidity = summary.ExcessLiquidity
 	if summary.DailyPnLReady {
 		b.brokerSync.dailyPnL = summary.DailyPnL
 		b.brokerSync.dailyPnLAvailable = true
@@ -1028,7 +1174,33 @@ func reconcileKey(conID int64, symbol string) string {
 	if conID > 0 {
 		return fmt.Sprintf("conid:%d", conID)
 	}
-	return "symbol:" + symbol
+	return reconcileSymbolKey(symbol)
+}
+
+func reconcileSymbolKey(symbol string) string {
+	return "symbol:" + strings.ToUpper(strings.TrimSpace(symbol))
+}
+
+func reconcileGroup(ip ibkr.IBKRPosition, byConID map[string][]*model.Position, bySymbol map[string][]*model.Position) (string, []*model.Position) {
+	conIDKey := ""
+	var conIDGroup []*model.Position
+	if ip.ConID > 0 {
+		conIDKey = reconcileKey(ip.ConID, ip.Symbol)
+		conIDGroup = byConID[conIDKey]
+	}
+
+	symbolKey := reconcileSymbolKey(ip.Symbol)
+	symbolGroup := bySymbol[symbolKey]
+	if len(symbolGroup) > len(conIDGroup) {
+		return symbolKey, symbolGroup
+	}
+	if len(conIDGroup) > 0 {
+		return conIDKey, conIDGroup
+	}
+	if len(symbolGroup) > 0 {
+		return symbolKey, symbolGroup
+	}
+	return reconcileKey(ip.ConID, ip.Symbol), nil
 }
 
 func signedPositionQuantity(pos *model.Position) float64 {
@@ -1039,6 +1211,54 @@ func signedPositionQuantity(pos *model.Position) float64 {
 		return -pos.Quantity
 	}
 	return pos.Quantity
+}
+
+func aggregateSignedQuantity(positions []*model.Position) float64 {
+	total := 0.0
+	for _, pos := range positions {
+		total += signedPositionQuantity(pos)
+	}
+	return total
+}
+
+func aggregateEntryPrice(positions []*model.Position) float64 {
+	weighted := 0.0
+	quantity := 0.0
+	for _, pos := range positions {
+		if pos == nil || pos.Quantity <= 0 {
+			continue
+		}
+		qty := math.Abs(pos.Quantity)
+		weighted += pos.EntryPrice * qty
+		quantity += qty
+	}
+	if quantity <= 0 {
+		return 0
+	}
+	return weighted / quantity
+}
+
+func unseenReconcilePositions(positions []*model.Position, seen map[*model.Position]bool) []*model.Position {
+	if len(positions) == 0 || len(seen) == 0 {
+		return positions
+	}
+	filtered := positions[:0]
+	for _, pos := range positions {
+		if pos != nil && !seen[pos] {
+			filtered = append(filtered, pos)
+		}
+	}
+	return filtered
+}
+
+func firstNonEmptyBookString(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // normalizedBrokerAvgCost converts IBKR's avgCost to the book's per-share
@@ -1091,6 +1311,65 @@ func applyBrokerRepair(pos *model.Position, brokerPos ibkr.IBKRPosition, avgCost
 	}
 	if brokerPos.ConID > 0 {
 		pos.IBKRContractID = brokerPos.ConID
+	}
+}
+
+func (b *Book) applyBrokerRecoveryDeltaLocked(key string, positions []*model.Position, brokerPos ibkr.IBKRPosition, avgCost float64) {
+	attributedQty := 0.0
+	var recovery *model.Position
+	for _, pos := range positions {
+		if pos == nil {
+			continue
+		}
+		if pos.DeskID == brokerRecoveryDeskID || strings.HasPrefix(pos.ID, "broker-recovered:") {
+			if recovery == nil {
+				recovery = pos
+			}
+			continue
+		}
+		attributedQty += signedPositionQuantity(pos)
+	}
+
+	delta := brokerPos.Quantity - attributedQty
+	if approxEqual(delta, 0) {
+		if recovery != nil {
+			now := b.currentTime()
+			recovery.Quantity = 0
+			recovery.Status = "closed"
+			recovery.ClosedAt = &now
+		}
+		return
+	}
+
+	if recovery == nil {
+		recovery = recoveredBrokerPosition(brokerPos)
+		recovery.ID = "broker-recovered:" + key
+		b.positions[recovery.ID] = recovery
+		if !recovery.Shadow {
+			b.deskPositions[recovery.DeskID]++
+		}
+	}
+
+	recovery.Status = "open"
+	recovery.ClosedAt = nil
+	recovery.Direction = model.Long
+	if delta < 0 {
+		recovery.Direction = model.Short
+	}
+	recovery.Quantity = math.Abs(delta)
+	if avgCost > 0 {
+		recovery.EntryPrice = avgCost
+		if recovery.CurrentPrice <= 0 {
+			recovery.CurrentPrice = avgCost
+		}
+	}
+	recovery.Instrument.Symbol = firstNonEmptyBookString(recovery.Instrument.Symbol, brokerPos.Symbol)
+	recovery.Instrument.SecType = firstNonEmptyBookString(recovery.Instrument.SecType, brokerPos.SecType)
+	recovery.Instrument.Exchange = firstNonEmptyBookString(recovery.Instrument.Exchange, brokerPos.Exchange)
+	recovery.Instrument.Currency = firstNonEmptyBookString(recovery.Instrument.Currency, brokerPos.Currency)
+	if brokerPos.ConID > 0 {
+		recovery.Instrument.ConID = brokerPos.ConID
+		recovery.IBKRContractID = brokerPos.ConID
 	}
 }
 

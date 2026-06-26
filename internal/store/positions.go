@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"time"
 
@@ -45,7 +46,7 @@ func (db *DB) UpsertPosition(ctx context.Context, pos *model.Position) error {
 				opened_at = EXCLUDED.opened_at,
 				closed_at = EXCLUDED.closed_at`,
 		pos.ID,
-		pos.ThesisID,
+		nullableText(pos.ThesisID),
 		pos.DeskID,
 		pos.Structure,
 		instrument,
@@ -80,4 +81,77 @@ func (db *DB) UpdatePositionClose(ctx context.Context, id string, pnl float64, e
 		closedAt,
 	)
 	return err
+}
+
+func (db *DB) ListOpenPositions(ctx context.Context, includeShadow bool) ([]*model.Position, error) {
+	query := `
+		SELECT id, COALESCE(thesis_id, ''), desk_id, COALESCE(structure, ''), instrument,
+		       COALESCE(legs, '[]'::jsonb), direction, quantity, entry_price,
+		       COALESCE(current_price, entry_price), unrealized_pnl, realized_pnl,
+		       COALESCE(ibkr_order_id, 0), COALESCE(ibkr_contract_id, 0),
+		       COALESCE(shadow, false), status, opened_at
+		  FROM positions
+		 WHERE status = 'open'`
+	args := []any{}
+	if !includeShadow {
+		query += ` AND COALESCE(shadow, false) = false`
+	}
+	query += ` ORDER BY opened_at ASC, id ASC`
+
+	rows, err := db.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var positions []*model.Position
+	for rows.Next() {
+		var pos model.Position
+		var instrument []byte
+		var legs []byte
+		var direction string
+		var openedAt sql.NullTime
+		if err := rows.Scan(
+			&pos.ID,
+			&pos.ThesisID,
+			&pos.DeskID,
+			&pos.Structure,
+			&instrument,
+			&legs,
+			&direction,
+			&pos.Quantity,
+			&pos.EntryPrice,
+			&pos.CurrentPrice,
+			&pos.UnrealizedPnL,
+			&pos.RealizedPnL,
+			&pos.IBKROrderID,
+			&pos.IBKRContractID,
+			&pos.Shadow,
+			&pos.Status,
+			&openedAt,
+		); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(instrument, &pos.Instrument); err != nil {
+			return nil, err
+		}
+		if len(legs) > 0 {
+			if err := json.Unmarshal(legs, &pos.Legs); err != nil {
+				return nil, err
+			}
+		}
+		pos.Direction = model.TradeDirection(direction)
+		if openedAt.Valid {
+			pos.OpenedAt = openedAt.Time
+		}
+		positions = append(positions, &pos)
+	}
+	return positions, rows.Err()
+}
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

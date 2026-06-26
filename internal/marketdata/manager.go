@@ -43,13 +43,14 @@ type Manager struct {
 	budget   RequestBudget
 	interval time.Duration
 
-	mu            sync.RWMutex
-	watchlist     map[string]model.Instrument // instrument key -> instrument
-	prices        map[string]float64          // instrument key -> last price
-	quotes        map[string]model.MarketQuote
-	history       map[string][]PricePoint // instrument key/symbol -> rolling history
-	suppressUntil map[string]time.Time
-	subscribers   []Subscriber
+	mu                    sync.RWMutex
+	watchlist             map[string]model.Instrument // instrument key -> instrument
+	openPositionWatchlist map[string]model.Instrument // replaceable open-position overlay
+	prices                map[string]float64          // instrument key -> last price
+	quotes                map[string]model.MarketQuote
+	history               map[string][]PricePoint // instrument key/symbol -> rolling history
+	suppressUntil         map[string]time.Time
+	subscribers           []Subscriber
 }
 
 // NewManager creates a new centralized market data manager.
@@ -58,15 +59,16 @@ func NewManager(client SnapshotProvider, budget RequestBudget, interval time.Dur
 		interval = 30 * time.Second
 	}
 	return &Manager{
-		log:           slog.Default().With("component", "marketdata"),
-		client:        client,
-		budget:        budget,
-		interval:      interval,
-		watchlist:     make(map[string]model.Instrument),
-		prices:        make(map[string]float64),
-		quotes:        make(map[string]model.MarketQuote),
-		history:       make(map[string][]PricePoint),
-		suppressUntil: make(map[string]time.Time),
+		log:                   slog.Default().With("component", "marketdata"),
+		client:                client,
+		budget:                budget,
+		interval:              interval,
+		watchlist:             make(map[string]model.Instrument),
+		openPositionWatchlist: make(map[string]model.Instrument),
+		prices:                make(map[string]float64),
+		quotes:                make(map[string]model.MarketQuote),
+		history:               make(map[string][]PricePoint),
+		suppressUntil:         make(map[string]time.Time),
 	}
 }
 
@@ -80,6 +82,22 @@ func (m *Manager) AddInstruments(instruments []model.Instrument) {
 		}
 		m.watchlist[inst.Key()] = inst
 	}
+}
+
+// SetOpenPositionInstruments replaces the open-position overlay watchlist.
+// Strategy/startup instruments registered with AddInstruments are left intact.
+func (m *Manager) SetOpenPositionInstruments(instruments []model.Instrument) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	next := make(map[string]model.Instrument, len(instruments))
+	for _, inst := range instruments {
+		if inst.Symbol == "" {
+			continue
+		}
+		next[inst.Key()] = inst
+	}
+	m.openPositionWatchlist = next
 }
 
 // Subscribe registers a callback for price updates.
@@ -359,8 +377,16 @@ func (m *Manager) poll(ctx context.Context) {
 	}
 
 	m.mu.RLock()
-	instruments := make([]model.Instrument, 0, len(m.watchlist))
-	for _, inst := range m.watchlist {
+	instruments := make([]model.Instrument, 0, len(m.watchlist)+len(m.openPositionWatchlist))
+	seen := make(map[string]struct{}, len(m.watchlist)+len(m.openPositionWatchlist))
+	for key, inst := range m.watchlist {
+		seen[key] = struct{}{}
+		instruments = append(instruments, inst)
+	}
+	for key, inst := range m.openPositionWatchlist {
+		if _, ok := seen[key]; ok {
+			continue
+		}
 		instruments = append(instruments, inst)
 	}
 	m.mu.RUnlock()

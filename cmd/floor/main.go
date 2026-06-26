@@ -223,6 +223,7 @@ func main() {
 			positionWriter.Enqueue(bk.GetOpenPositions())
 		}
 	})
+	startOpenPositionMarketDataSync(ctx, bk, mdMgr, readRuntimeDuration("POSITION_MARK_WATCHLIST_SYNC_INTERVAL", 15*time.Second))
 	if positionWriter != nil {
 		snapshotInterval := readRuntimeDuration("POSITION_PERSIST_SNAPSHOT_INTERVAL", 30*time.Second)
 		observe.SafeGo(slog.Default().With("component", "runtime"), "position persistence snapshot loop panic", func() {

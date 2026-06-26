@@ -133,3 +133,21 @@ func TestKalshiPersistedOrderRecordsLiveFill(t *testing.T) {
 		t.Fatalf("expected live fill payload, got %+v", record.Fill)
 	}
 }
+
+func TestKalshiEntryWorkShouldPauseOnlyForLivePredictionDeskWithZeroCapacity(t *testing.T) {
+	if !kalshiEntryWorkShouldPause(true, true, false, 0, false) {
+		t.Fatal("expected live prediction desk with zero capacity to pause new entry work")
+	}
+	if kalshiEntryWorkShouldPause(true, true, true, 0, false) {
+		t.Fatal("dry-run Kalshi desks should not pause on live-capacity state")
+	}
+	if kalshiEntryWorkShouldPause(false, true, false, 0, false) {
+		t.Fatal("non-prediction desks should not pause on Kalshi capacity")
+	}
+	if kalshiEntryWorkShouldPause(true, false, false, 0, false) {
+		t.Fatal("missing executor should follow the existing unavailable-executor path")
+	}
+	if kalshiEntryWorkShouldPause(true, true, false, 100, true) {
+		t.Fatal("positive live capacity should not pause new entry work")
+	}
+}

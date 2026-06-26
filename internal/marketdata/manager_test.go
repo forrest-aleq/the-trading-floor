@@ -15,6 +15,7 @@ type stubHistoricalClient struct {
 	bars      []HistoricalBar
 }
 
+// Snapshot returns a configured quote or error for market-data manager tests.
 func (s stubHistoricalClient) Snapshot(context.Context, model.Instrument) (*Snapshot, error) {
 	if s.marketErr != nil {
 		return nil, s.marketErr
@@ -25,8 +26,20 @@ func (s stubHistoricalClient) Snapshot(context.Context, model.Instrument) (*Snap
 	return &Snapshot{}, nil
 }
 
+// HistoricalBars returns configured bars for historical fallback tests.
 func (s stubHistoricalClient) HistoricalBars(context.Context, model.Instrument, time.Time, string, string, string, bool) ([]HistoricalBar, error) {
 	return s.bars, nil
+}
+
+// recordingSnapshotClient captures symbols requested by manager polling.
+type recordingSnapshotClient struct {
+	symbols []string
+}
+
+// Snapshot records the requested instrument and returns a usable quote.
+func (r *recordingSnapshotClient) Snapshot(_ context.Context, inst model.Instrument) (*Snapshot, error) {
+	r.symbols = append(r.symbols, inst.Symbol)
+	return &Snapshot{Last: 100, ObservedAt: time.Now().UTC()}, nil
 }
 
 func TestMarketDataBackoffUsesLongerWindowForSubscriptionErrors(t *testing.T) {
@@ -38,6 +51,36 @@ func TestMarketDataBackoffUsesLongerWindowForSubscriptionErrors(t *testing.T) {
 	backoff = marketDataBackoff(errors.New("temporary gateway hiccup"), 30*time.Second)
 	if backoff != 30*time.Second {
 		t.Fatalf("expected default backoff for transient error, got %s", backoff)
+	}
+}
+
+// TestSetOpenPositionInstrumentsReplacesOverlayWatchlist verifies overlay pruning.
+func TestSetOpenPositionInstrumentsReplacesOverlayWatchlist(t *testing.T) {
+	client := &recordingSnapshotClient{}
+	manager := NewManager(client, nil, time.Minute)
+	manager.AddInstruments([]model.Instrument{{Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD"}})
+	manager.SetOpenPositionInstruments([]model.Instrument{
+		{Symbol: "QQQ", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+	})
+	manager.SetOpenPositionInstruments([]model.Instrument{
+		{Symbol: "QQQ", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+	})
+
+	manager.poll(context.Background())
+
+	counts := map[string]int{}
+	for _, symbol := range client.symbols {
+		counts[symbol]++
+	}
+	if counts["SPY"] != 1 {
+		t.Fatalf("expected startup watchlist SPY to remain polled, got %#v", counts)
+	}
+	if counts["QQQ"] != 1 {
+		t.Fatalf("expected current open-position QQQ to be polled, got %#v", counts)
+	}
+	if counts["MSFT"] != 0 {
+		t.Fatalf("expected removed open-position MSFT to be pruned, got %#v", counts)
 	}
 }
 

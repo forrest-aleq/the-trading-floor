@@ -36,6 +36,12 @@ type OpenRouterConfig struct {
 	EnvPrefix      string
 }
 
+const (
+	DefaultCloudSpeedModel    = "z-ai/glm-5.2"
+	DefaultCloudAnalysisModel = "z-ai/glm-5.2"
+	DefaultCloudCriticalModel = "moonshotai/kimi-k2.7-code"
+)
+
 type ProviderRouting struct {
 	Order             []string
 	Only              []string
@@ -70,7 +76,7 @@ func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
 		apiKey:         cfg.APIKey,
 		baseURL:        cfg.BaseURL,
 		model:          cfg.Model,
-		fallbackModels: fallbackModelsFromEnv(cfg.EnvPrefix, cfg.FallbackModels),
+		fallbackModels: fallbackModelsFromEnv(cfg.EnvPrefix, cfg.FallbackModels, cfg.Model),
 		provider:       provider.toOpenRouter(),
 		http: &http.Client{
 			Timeout: 120 * time.Second,
@@ -505,7 +511,7 @@ func DefaultRouter() *Router {
 		if isLocalLLM(baseURL) {
 			speedModel = "qwen3:8b"
 		} else {
-			speedModel = "openai/gpt-oss-120b"
+			speedModel = DefaultCloudSpeedModel
 		}
 	}
 	analysisModel := os.Getenv("LLM_MODEL_ANALYSIS")
@@ -513,7 +519,7 @@ func DefaultRouter() *Router {
 		if isLocalLLM(baseURL) {
 			analysisModel = "qwen3:30b"
 		} else {
-			analysisModel = "openai/gpt-oss-120b"
+			analysisModel = DefaultCloudAnalysisModel
 		}
 	}
 	criticalModel := os.Getenv("LLM_MODEL_CRITICAL")
@@ -521,7 +527,7 @@ func DefaultRouter() *Router {
 		if isLocalLLM(baseURL) {
 			criticalModel = analysisModel
 		} else {
-			criticalModel = "deepseek/deepseek-v4-pro"
+			criticalModel = DefaultCloudCriticalModel
 		}
 	}
 	speedConcurrency := readConcurrencyEnv("LLM_SPEED_MAX_CONCURRENCY")
@@ -532,7 +538,7 @@ func DefaultRouter() *Router {
 		APIKey:         apiKey,
 		BaseURL:        baseURL,
 		Model:          speedModel,
-		FallbackModels: defaultOpenRouterFallbackModels(baseURL),
+		FallbackModels: defaultOpenRouterFallbackModels(baseURL, speedModel),
 		MaxConcurrency: speedConcurrency,
 		EnvPrefix:      "LLM_SPEED",
 	})
@@ -541,7 +547,7 @@ func DefaultRouter() *Router {
 		APIKey:         apiKey,
 		BaseURL:        baseURL,
 		Model:          analysisModel,
-		FallbackModels: defaultOpenRouterFallbackModels(baseURL),
+		FallbackModels: defaultOpenRouterFallbackModels(baseURL, analysisModel),
 		MaxConcurrency: analysisConcurrency,
 		EnvPrefix:      "LLM_ANALYSIS",
 	})
@@ -550,7 +556,7 @@ func DefaultRouter() *Router {
 		APIKey:         apiKey,
 		BaseURL:        baseURL,
 		Model:          criticalModel,
-		FallbackModels: defaultOpenRouterFallbackModels(baseURL),
+		FallbackModels: defaultOpenRouterFallbackModels(baseURL, criticalModel),
 		MaxConcurrency: criticalConcurrency,
 		EnvPrefix:      "LLM_CRITICAL",
 	})
@@ -558,23 +564,26 @@ func DefaultRouter() *Router {
 	return NewRouter(speed, analysis, critical)
 }
 
-func defaultOpenRouterFallbackModels(baseURL string) []string {
+func defaultOpenRouterFallbackModels(baseURL, primaryModel string) []string {
 	if isLocalLLM(baseURL) {
 		return nil
 	}
-	return []string{
-		"liquid/lfm-2.5-1.2b-thinking:free",
-	}
+	return excludeModel([]string{
+		DefaultCloudCriticalModel,
+		"minimax/minimax-m3",
+		"deepseek/deepseek-v4-pro",
+		"z-ai/glm-5.1",
+	}, primaryModel)
 }
 
-func fallbackModelsFromEnv(prefix string, configured []string) []string {
+func fallbackModelsFromEnv(prefix string, configured []string, primaryModel string) []string {
 	models := make([]string, 0, len(configured)+4)
 	models = append(models, configured...)
 	if prefix = strings.TrimSpace(prefix); prefix != "" {
 		models = append(models, readCSVEnv(prefix+"_MODEL_FALLBACKS")...)
 	}
 	models = append(models, readCSVEnv("LLM_MODEL_FALLBACKS")...)
-	return dedupeModels(models)
+	return excludeModel(dedupeModels(models), primaryModel)
 }
 
 func dedupeModels(models []string) []string {
@@ -590,6 +599,21 @@ func dedupeModels(models []string) []string {
 			continue
 		}
 		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	return out
+}
+
+func excludeModel(models []string, excluded string) []string {
+	excluded = strings.ToLower(strings.TrimSpace(excluded))
+	if excluded == "" {
+		return models
+	}
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		if strings.ToLower(strings.TrimSpace(model)) == excluded {
+			continue
+		}
 		out = append(out, model)
 	}
 	return out

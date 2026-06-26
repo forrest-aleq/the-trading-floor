@@ -53,6 +53,70 @@ func TestIsLocalLLM(t *testing.T) {
 	}
 }
 
+func TestDefaultRouterUsesTopOpenModelStackForOpenRouter(t *testing.T) {
+	for _, key := range []string{
+		"LLM_MODEL_SPEED",
+		"LLM_MODEL_ANALYSIS",
+		"LLM_MODEL_CRITICAL",
+		"LLM_MODEL_FALLBACKS",
+		"LLM_SPEED_MODEL_FALLBACKS",
+		"LLM_ANALYSIS_MODEL_FALLBACKS",
+		"LLM_CRITICAL_MODEL_FALLBACKS",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+
+	router := DefaultRouter()
+	speed, ok := router.speed.(*OpenRouterClient)
+	if !ok {
+		t.Fatalf("speed client = %T, want *OpenRouterClient", router.speed)
+	}
+	analysis, ok := router.analysis.(*OpenRouterClient)
+	if !ok {
+		t.Fatalf("analysis client = %T, want *OpenRouterClient", router.analysis)
+	}
+	critical, ok := router.critical.(*OpenRouterClient)
+	if !ok {
+		t.Fatalf("critical client = %T, want *OpenRouterClient", router.critical)
+	}
+
+	if speed.model != DefaultCloudSpeedModel {
+		t.Fatalf("speed model = %q, want %q", speed.model, DefaultCloudSpeedModel)
+	}
+	if analysis.model != DefaultCloudAnalysisModel {
+		t.Fatalf("analysis model = %q, want %q", analysis.model, DefaultCloudAnalysisModel)
+	}
+	if critical.model != DefaultCloudCriticalModel {
+		t.Fatalf("critical model = %q, want %q", critical.model, DefaultCloudCriticalModel)
+	}
+	for _, client := range []*OpenRouterClient{speed, analysis, critical} {
+		for _, model := range append([]string{client.model}, client.fallbackModels...) {
+			if strings.Contains(strings.ToLower(model), "qwen") {
+				t.Fatalf("cloud model stack should not default to qwen, got %q in %#v", model, client.fallbackModels)
+			}
+		}
+	}
+	if !containsModel(speed.fallbackModels, "minimax/minimax-m3") {
+		t.Fatalf("speed fallbacks missing minimax: %#v", speed.fallbackModels)
+	}
+	if !containsModel(critical.fallbackModels, "deepseek/deepseek-v4-pro") {
+		t.Fatalf("critical fallbacks missing deepseek: %#v", critical.fallbackModels)
+	}
+	if containsModel(critical.fallbackModels, DefaultCloudCriticalModel) {
+		t.Fatalf("critical fallbacks should not repeat primary model: %#v", critical.fallbackModels)
+	}
+}
+
+func containsModel(models []string, want string) bool {
+	for _, model := range models {
+		if model == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestOpenRouterClientRetriesLocal500s(t *testing.T) {
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

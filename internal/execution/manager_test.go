@@ -476,6 +476,57 @@ func TestSubmitSuppressesDuplicateWhileBrokerOrderWorking(t *testing.T) {
 	}
 }
 
+func TestSubmitExitTracksUnacknowledgedBrokerOrder(t *testing.T) {
+	journal := &testOrderJournal{}
+	broker := &testBroker{
+		err: &ibkr.UnacknowledgedOrderError{
+			OrderID: 1531,
+			Status:  "PendingSubmit",
+			Cause:   errors.New("broker acknowledgement timeout after 12s"),
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManagerWithJournal(broker, journal)
+
+	order := model.Order{
+		ID:         "exit-broker-recovered-bb",
+		DeskID:     "broker-recovery",
+		Instrument: model.Instrument{Symbol: "BB", SecType: "STK", Currency: "USD", Exchange: "NYSE", ConID: 131217639},
+		Direction:  model.Short,
+		Quantity:   946,
+		OrderType:  model.OrderMarket,
+	}
+
+	_, err := manager.SubmitExit(context.Background(), order)
+	if err == nil {
+		t.Fatal("expected pending fill error")
+	}
+	var pending *PendingFillError
+	if !errors.As(err, &pending) {
+		t.Fatalf("expected PendingFillError, got %T", err)
+	}
+	if pending.OrderID != 1531 || pending.Status != "PendingSubmit" {
+		t.Fatalf("unexpected pending error: %+v", pending)
+	}
+	snapshot, ok := manager.OrderStatus(order.ID)
+	if !ok || snapshot.State != OrderStateWorking {
+		t.Fatalf("expected unacknowledged exit to be tracked as working, ok=%v snapshot=%+v", ok, snapshot)
+	}
+	if snapshot.BrokerOrderID != 1531 || snapshot.BrokerStatus != "PendingSubmit" {
+		t.Fatalf("unexpected tracked broker state: %+v", snapshot)
+	}
+
+	if _, err := manager.SubmitExit(context.Background(), order); err == nil {
+		t.Fatal("expected duplicate exit submit to be suppressed")
+	}
+	if broker.calls.Load() != 1 {
+		t.Fatalf("expected one broker call for duplicate exit, got %d", broker.calls.Load())
+	}
+	if _, ok := journal.records[order.ID]; !ok {
+		t.Fatal("expected unacknowledged exit to be persisted as a working order")
+	}
+}
+
 func TestRefreshWorkingOrdersPromotesFill(t *testing.T) {
 	broker := &testBroker{
 		err: &ibkr.PendingOrderError{

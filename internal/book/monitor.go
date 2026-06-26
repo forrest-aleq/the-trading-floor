@@ -25,11 +25,18 @@ type Monitor struct {
 	staleMarkMaxAge        time.Duration
 	emergencyLossPct       float64
 	optionEmergencyLossPct float64
+	exitRetryCooldown      time.Duration
 
 	// markHealth tracks per-position mark state so alerts fire on the
 	// transition into ill health, not on every 10-second cycle. Accessed
 	// only from RunOnce, which is single-threaded.
-	markHealth map[string]string
+	markHealth    map[string]string
+	closeAttempts map[string]closeAttempt
+}
+
+type closeAttempt struct {
+	reason      string
+	attemptedAt time.Time
 }
 
 func NewMonitor(book *Book, thesisLookup ThesisLookup, onClose func(*model.Position, float64, string)) *Monitor {
@@ -43,7 +50,9 @@ func NewMonitor(book *Book, thesisLookup ThesisLookup, onClose func(*model.Posit
 		staleMarkMaxAge:        2 * time.Minute,
 		emergencyLossPct:       0.05,
 		optionEmergencyLossPct: 0.50,
+		exitRetryCooldown:      5 * time.Minute,
 		markHealth:             make(map[string]string),
+		closeAttempts:          make(map[string]closeAttempt),
 	}
 }
 
@@ -69,6 +78,12 @@ func (m *Monitor) SetInterval(interval time.Duration) {
 		return
 	}
 	m.interval = interval
+}
+
+func (m *Monitor) SetExitRetryCooldown(cooldown time.Duration) {
+	if cooldown >= 0 {
+		m.exitRetryCooldown = cooldown
+	}
 }
 
 func (m *Monitor) SetLifecycleHandler(handler func(position *model.Position, alert model.LifecycleAlert)) {
@@ -162,6 +177,11 @@ func (m *Monitor) RunOnce() {
 			delete(m.markHealth, id)
 		}
 	}
+	for id := range m.closeAttempts {
+		if !seen[id] {
+			delete(m.closeAttempts, id)
+		}
+	}
 }
 
 func (m *Monitor) markHealthBecame(positionID, state string) bool {
@@ -196,6 +216,34 @@ func (m *Monitor) lookup(thesisID string) (*model.Thesis, bool) {
 }
 
 func (m *Monitor) requestClose(pos *model.Position, exitPrice float64, reason string) {
+	if pos == nil {
+		return
+	}
+	now := m.currentTime()
+	if m.exitRetryCooldown > 0 {
+		if attempt, ok := m.closeAttempts[pos.ID]; ok {
+			retryAt := attempt.attemptedAt.Add(m.exitRetryCooldown)
+			if now.Before(retryAt) {
+				m.log.Warn("position exit already attempted; suppressing duplicate close",
+					"symbol", pos.DisplaySymbol(),
+					"desk", pos.DeskID,
+					"reason", reason,
+					"previous_reason", attempt.reason,
+					"retry_at", retryAt,
+				)
+				return
+			}
+		}
+		m.closeAttempts[pos.ID] = closeAttempt{
+			reason:      reason,
+			attemptedAt: now,
+		}
+	} else {
+		if _, ok := m.closeAttempts[pos.ID]; ok {
+			delete(m.closeAttempts, pos.ID)
+		}
+	}
+
 	m.log.Warn("position exit triggered",
 		"symbol", pos.DisplaySymbol(),
 		"desk", pos.DeskID,

@@ -320,10 +320,35 @@ func (m *Manager) SubmitExit(ctx context.Context, order model.Order) (*model.Fil
 
 		fill, err := m.ibkr.PlaceOrder(ctx, order)
 		if err != nil {
+			var pending *ibkr.PendingOrderError
+			if errors.As(err, &pending) {
+				m.recordPendingOrder(order, pending)
+				return nil, &PendingFillError{
+					OrderID: pending.OrderID,
+					Status:  pending.Status,
+					Cause:   err,
+				}
+			}
+			var unack *ibkr.UnacknowledgedOrderError
+			if errors.As(err, &unack) && unack.OrderID > 0 {
+				m.recordPendingOrder(order, &ibkr.PendingOrderError{
+					OrderID: unack.OrderID,
+					Status:  unack.Status,
+					Reason:  err.Error(),
+				})
+				m.notifyBrokerOrderFailure(order, err)
+				return nil, &PendingFillError{
+					OrderID: unack.OrderID,
+					Status:  unack.Status,
+					Cause:   err,
+				}
+			}
 			m.log.Error("exit order failed",
 				"thesis_id", order.ThesisID,
 				"error", err,
 			)
+			m.notifyBrokerOrderFailure(order, err)
+			m.recordFailedOrder(order, err)
 			return nil, fmt.Errorf("place exit order: %w", err)
 		}
 

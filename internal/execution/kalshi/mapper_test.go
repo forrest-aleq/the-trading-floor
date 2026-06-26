@@ -257,6 +257,51 @@ func TestExecutorRejectsWhenAvailableBalanceTooSmallForContract(t *testing.T) {
 	}
 }
 
+func TestExecutorCanOpenOrderUsesCachedZeroCapacity(t *testing.T) {
+	t.Setenv("KALSHI_BALANCE_CACHE_TTL", "1h")
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	balanceCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/trade-api/v2/portfolio/balance" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		balanceCalls++
+		_, _ = w.Write([]byte(`{"balance":0,"portfolio_value":3304,"updated_ts":123}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:       server.URL + "/trade-api/v2",
+		KeyID:         "key-id",
+		PrivateKeyPEM: privateKeyPEM(privateKey),
+		MaxOrderCents: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(
+		client,
+		NewMapper(MapperConfig{MaxOrderCents: 1000, RiskPctEquity: 10, MinConviction: 0.65}),
+		ExecutionLive,
+		t.TempDir()+"/kalshi-live.jsonl",
+	)
+
+	canOpen, maxOrderCents := executor.CanOpenOrder(context.Background())
+	if canOpen || maxOrderCents != 0 {
+		t.Fatalf("expected zero capacity, got canOpen=%v max=%d", canOpen, maxOrderCents)
+	}
+	canOpen, maxOrderCents = executor.CanOpenOrder(context.Background())
+	if canOpen || maxOrderCents != 0 {
+		t.Fatalf("expected cached zero capacity, got canOpen=%v max=%d", canOpen, maxOrderCents)
+	}
+	if balanceCalls != 1 {
+		t.Fatalf("expected one balance call through cache, got %d", balanceCalls)
+	}
+}
+
 func TestMapThesisRejectsNonKalshiTicker(t *testing.T) {
 	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
 	_, err := mapper.MapThesis(&model.Thesis{

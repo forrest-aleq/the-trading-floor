@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,6 +52,17 @@ type Executor struct {
 	journalPath string
 	log         *slog.Logger
 	safety      *liveSafetyGuard
+	capacityMu  sync.Mutex
+	capacity    orderCapacityCache
+}
+
+type orderCapacityCache struct {
+	value         int64
+	maxOrderCents int64
+	minOrderCents int64
+	riskPct       float64
+	expiresAt     time.Time
+	valid         bool
 }
 
 type ExecutionResult struct {
@@ -155,6 +167,11 @@ func (e *Executor) AccountBalance(ctx context.Context) (*Balance, error) {
 
 func (e *Executor) EffectiveMaxOrderCents(ctx context.Context) int64 {
 	return e.effectiveMaxOrderCents(ctx)
+}
+
+func (e *Executor) CanOpenOrder(ctx context.Context) (bool, int64) {
+	maxOrderCents := e.effectiveMaxOrderCents(ctx)
+	return maxOrderCents > 0, maxOrderCents
 }
 
 func (e *Executor) SubmitThesis(ctx context.Context, thesis *model.Thesis) (*ExecutionResult, error) {
@@ -350,6 +367,10 @@ func (e *Executor) effectiveMaxOrderCents(ctx context.Context) int64 {
 	if riskPct <= 0 || e.client == nil || !e.client.hasCredentials() {
 		return maxOrderCents
 	}
+	minOrderCents := e.mapper.cfg.MinOrderCents
+	if cached, ok := e.cachedOrderCapacity(maxOrderCents, minOrderCents, riskPct, time.Now()); ok {
+		return cached
+	}
 
 	balance, err := e.client.GetBalance(ctx)
 	if err != nil {
@@ -366,7 +387,6 @@ func (e *Executor) effectiveMaxOrderCents(ctx context.Context) int64 {
 
 	dynamic := int64(math.Ceil(float64(equityCents) * riskPct / 100.0))
 	availableCap := availableBalanceOrderCapCents(balance.Balance)
-	minOrderCents := e.mapper.cfg.MinOrderCents
 	if minOrderCents > 0 && dynamic < minOrderCents && equityCents >= minOrderCents && availableCap >= minOrderCents {
 		dynamic = minOrderCents
 	}
@@ -377,9 +397,54 @@ func (e *Executor) effectiveMaxOrderCents(ctx context.Context) int64 {
 		dynamic = availableCap
 	}
 	if dynamic <= 0 {
+		e.storeOrderCapacity(0, maxOrderCents, minOrderCents, riskPct, time.Now())
 		return 0
 	}
+	e.storeOrderCapacity(dynamic, maxOrderCents, minOrderCents, riskPct, time.Now())
 	return dynamic
+}
+
+func (e *Executor) cachedOrderCapacity(maxOrderCents, minOrderCents int64, riskPct float64, now time.Time) (int64, bool) {
+	if e == nil {
+		return 0, false
+	}
+	e.capacityMu.Lock()
+	defer e.capacityMu.Unlock()
+	if !e.capacity.valid || now.After(e.capacity.expiresAt) {
+		return 0, false
+	}
+	if e.capacity.maxOrderCents != maxOrderCents || e.capacity.minOrderCents != minOrderCents || e.capacity.riskPct != riskPct {
+		return 0, false
+	}
+	return e.capacity.value, true
+}
+
+func (e *Executor) storeOrderCapacity(value, maxOrderCents, minOrderCents int64, riskPct float64, now time.Time) {
+	if e == nil {
+		return
+	}
+	e.capacityMu.Lock()
+	defer e.capacityMu.Unlock()
+	e.capacity = orderCapacityCache{
+		value:         value,
+		maxOrderCents: maxOrderCents,
+		minOrderCents: minOrderCents,
+		riskPct:       riskPct,
+		expiresAt:     now.Add(kalshiBalanceCacheTTL()),
+		valid:         true,
+	}
+}
+
+func kalshiBalanceCacheTTL() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("KALSHI_BALANCE_CACHE_TTL"))
+	if raw == "" {
+		return 15 * time.Second
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil || duration <= 0 {
+		return 15 * time.Second
+	}
+	return duration
 }
 
 func availableBalanceOrderCapCents(balanceCents int64) int64 {

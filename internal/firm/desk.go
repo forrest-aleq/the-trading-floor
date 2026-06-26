@@ -106,6 +106,7 @@ var (
 	deskCouncilTimeout                = readDeskDurationEnv("DESK_COUNCIL_TIMEOUT", 45*time.Second)
 	deskExecutionTimeout              = readDeskDurationEnv("DESK_EXECUTION_TIMEOUT", 30*time.Second)
 	deskSlowStageWarnAt               = readDeskDurationEnv("DESK_SLOW_STAGE_WARN_AT", 10*time.Second)
+	kalshiCapacityCheckTimeout        = readDeskDurationEnv("KALSHI_CAPACITY_CHECK_TIMEOUT", 750*time.Millisecond)
 	deskColleagueWeight               = readDeskFloatEnv("DESK_COLLEAGUE_TRUST_WEIGHT", 0.18)
 	deskSubTeamsEnabled               = readDeskBoolEnv("DESK_ENABLE_SUBTEAMS", true)
 	kalshiLiveAllowRestrictedAutonomy = readDeskBoolEnv("KALSHI_LIVE_ALLOW_RESTRICTED_AUTONOMY", false)
@@ -119,6 +120,7 @@ func ReloadRuntimeConfig() {
 	deskCouncilTimeout = readDeskDurationEnv("DESK_COUNCIL_TIMEOUT", 45*time.Second)
 	deskExecutionTimeout = readDeskDurationEnv("DESK_EXECUTION_TIMEOUT", 30*time.Second)
 	deskSlowStageWarnAt = readDeskDurationEnv("DESK_SLOW_STAGE_WARN_AT", 10*time.Second)
+	kalshiCapacityCheckTimeout = readDeskDurationEnv("KALSHI_CAPACITY_CHECK_TIMEOUT", 750*time.Millisecond)
 	deskColleagueWeight = readDeskFloatEnv("DESK_COLLEAGUE_TRUST_WEIGHT", 0.18)
 	deskSubTeamsEnabled = readDeskBoolEnv("DESK_ENABLE_SUBTEAMS", true)
 	kalshiLiveAllowRestrictedAutonomy = readDeskBoolEnv("KALSHI_LIVE_ALLOW_RESTRICTED_AUTONOMY", false)
@@ -188,6 +190,15 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		d.log.Warn("graph signal seen failed", "signal_id", sig.ID, "error", err)
 	}
 	sig = d.augmentSignalInstitutionalState(sig)
+	if paused, maxOrderCents := d.kalshiEntryWorkPaused(ctx); paused {
+		d.log.Info("kalshi new entry work paused; effective order risk is zero",
+			"signal_id", sig.ID,
+			"source", sig.Source,
+			"category", sig.Category,
+			"max_order_cents", maxOrderCents,
+		)
+		return
+	}
 	ctx = llm.WithUsageContext(ctx, llm.UsageContext{
 		DeskID:   d.ID,
 		Domain:   d.Domain,
@@ -607,6 +618,23 @@ func (d *Desk) currentEntryPolicy() EntryPolicy {
 
 func (d *Desk) handlesKalshiThesis() bool {
 	return d != nil && d.kalshi != nil && strings.EqualFold(strings.TrimSpace(d.Domain), "prediction_market")
+}
+
+func (d *Desk) kalshiEntryWorkPaused(ctx context.Context) (bool, int64) {
+	if d == nil || d.kalshi == nil {
+		return false, 0
+	}
+	if !d.isPredictionMarketDesk() || d.kalshi.IsDryRun() {
+		return false, 0
+	}
+	capacityCtx, cancel := context.WithTimeout(ctx, kalshiCapacityCheckTimeout)
+	defer cancel()
+	canOpen, maxOrderCents := d.kalshi.CanOpenOrder(capacityCtx)
+	return kalshiEntryWorkShouldPause(true, true, false, maxOrderCents, canOpen), maxOrderCents
+}
+
+func kalshiEntryWorkShouldPause(predictionDesk, hasExecutor, dryRun bool, maxOrderCents int64, canOpen bool) bool {
+	return predictionDesk && hasExecutor && !dryRun && !canOpen && maxOrderCents <= 0
 }
 
 func (d *Desk) isPredictionMarketDesk() bool {

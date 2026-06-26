@@ -819,7 +819,7 @@ func scannerSelectedModel() string {
 	if model := strings.TrimSpace(os.Getenv("LLM_MODEL_SPEED")); model != "" {
 		return model
 	}
-	return "openai/gpt-oss-120b"
+	return llm.DefaultCloudSpeedModel
 }
 
 func scannerFallbackModels(selectedModel string) []string {

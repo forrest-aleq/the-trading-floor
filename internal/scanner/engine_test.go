@@ -560,7 +560,7 @@ func TestEvaluateUsesFastModelFallbackAfterTimeout(t *testing.T) {
 	if got := len(client.requests); got != 2 {
 		t.Fatalf("expected primary scanner plus fast fallback, got %d requests", got)
 	}
-	if client.requests[0].Model != "openai/gpt-oss-120b" {
+	if client.requests[0].Model != llm.DefaultCloudSpeedModel {
 		t.Fatalf("unexpected primary model %q", client.requests[0].Model)
 	}
 	if client.requests[1].Model != "glm-4.7-flash:latest" {

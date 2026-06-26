@@ -92,10 +92,13 @@ type PortfolioState struct {
 	Cash          float64
 	GrossExposure float64
 	NetExposure   float64
-	DailyPnL      float64
-	WeeklyPnL     float64
-	MonthlyPnL    float64
-	OpenPositions int
+	DailyPnL float64
+	// Drawdown is measured against peak NAV. CurrentDrawdownPct recovers as
+	// NAV recovers; MaxDrawdownPct is the high-water drawdown and never
+	// decreases within a run, so kill-switch decisions latch.
+	CurrentDrawdownPct float64
+	MaxDrawdownPct     float64
+	OpenPositions      int
 	DeskPositions map[string]int     // desk_id → open position count
 	DeskDailyPnL  map[string]float64 // desk_id → daily P&L
 	DeskCapital   map[string]float64 // desk_id → allocated capital
@@ -192,13 +195,24 @@ func (g *Gate) Check(order model.Order, thesis *model.Thesis, portfolio Portfoli
 		})
 	}
 
-	// 6. Kill switch check — portfolio-level drawdown
-	monthlyLossPct := (-portfolio.MonthlyPnL / g.limits.TotalCapital) * 100
-	if monthlyLossPct >= g.limits.KillSwitchDrawdownPct {
+	// 6. Kill switch — high-water drawdown from peak NAV. Latched: once the
+	// run has ever breached the threshold, new entries stay blocked even if
+	// NAV recovers, until a human restarts or resets.
+	if portfolio.MaxDrawdownPct >= g.limits.KillSwitchDrawdownPct {
 		violations = append(violations, model.Violation{
 			Rule:    "KILL_SWITCH",
 			Limit:   fmt.Sprintf("%.0f%%", g.limits.KillSwitchDrawdownPct),
-			Current: fmt.Sprintf("%.1f%%", monthlyLossPct),
+			Current: fmt.Sprintf("%.1f%%", portfolio.MaxDrawdownPct),
+		})
+	}
+
+	// 6b. Drawdown brake — stop adding risk while NAV is off its peak.
+	// Recovers automatically as NAV recovers; exits are never blocked.
+	if g.limits.MaxDrawdownPct > 0 && portfolio.CurrentDrawdownPct >= g.limits.MaxDrawdownPct {
+		violations = append(violations, model.Violation{
+			Rule:    "max_drawdown",
+			Limit:   fmt.Sprintf("%.0f%%", g.limits.MaxDrawdownPct),
+			Current: fmt.Sprintf("%.1f%%", portfolio.CurrentDrawdownPct),
 		})
 	}
 

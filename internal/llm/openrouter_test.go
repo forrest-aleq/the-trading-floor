@@ -85,6 +85,48 @@ func TestOpenRouterClientRetriesLocal500s(t *testing.T) {
 	}
 }
 
+func TestOpenRouterClientFallsBackWhenPrimaryModelUnavailable(t *testing.T) {
+	var requested []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		requested = append(requested, body["model"].(string))
+		if len(requested) == 1 {
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"error":{"message":"Insufficient credits","code":402}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"ok\":true}"}}],"model":"openai/gpt-oss-120b:free","usage":{"prompt_tokens":2,"completion_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{
+		BaseURL:        server.URL,
+		Model:          "paid/model",
+		FallbackModels: []string{"openai/gpt-oss-120b:free"},
+	})
+
+	resp, err := client.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "return JSON"}},
+		JSONMode: true,
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	if resp.Content != `{"ok":true}` {
+		t.Fatalf("unexpected response content %q", resp.Content)
+	}
+	if len(requested) != 2 {
+		t.Fatalf("expected 2 model attempts, got %d", len(requested))
+	}
+	if requested[0] != "paid/model" || requested[1] != "openai/gpt-oss-120b:free" {
+		t.Fatalf("unexpected requested models %#v", requested)
+	}
+}
+
 func TestOpenRouterClientPreservesReasoningFromLocalProviders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -105,6 +147,30 @@ func TestOpenRouterClientPreservesReasoningFromLocalProviders(t *testing.T) {
 	}
 	if got := resp.Content; got != "<think>\nbullet one\nbullet two\n</think>\n\nFINAL_DECISION\ntradeable: false\nscore: 10\ninstruments: none\ndirection: none\nurgency: 0.0\ncategory: corporate\nreasoning: reject\nEND_FINAL_DECISION" {
 		t.Fatalf("unexpected normalized content %q", got)
+	}
+}
+
+func TestOpenRouterClientJSONModeUsesFinalContentWithoutReasoning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"ok\":true}","reasoning":"I will now produce JSON."}}],"model":"ollama","usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{
+		BaseURL: server.URL,
+		Model:   "qwen3.5:9b",
+	})
+
+	resp, err := client.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "return JSON"}},
+		JSONMode: true,
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	if got := resp.Content; got != `{"ok":true}` {
+		t.Fatalf("unexpected JSON-mode content %q", got)
 	}
 }
 
@@ -307,6 +373,39 @@ func TestOpenRouterClientAddsProviderRouting(t *testing.T) {
 	}
 	if got := provider["require_parameters"]; got != true {
 		t.Fatalf("expected require_parameters=true, got %#v", got)
+	}
+}
+
+func TestOpenRouterClientOmitsProviderRoutingForLocalLLM(t *testing.T) {
+	t.Setenv("LLM_SPEED_PROVIDER_ALLOW_FALLBACKS", "true")
+	t.Setenv("LLM_SPEED_PROVIDER_REQUIRE_PARAMETERS", "true")
+
+	var body map[string]any
+	client := NewOpenRouterClient(OpenRouterConfig{
+		APIKey:    "test-key",
+		BaseURL:   "http://127.0.0.1:11434/v1",
+		Model:     "qwen3.5:9b",
+		EnvPrefix: "LLM_SPEED",
+	})
+	client.http = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"OK"}}],"model":"qwen3.5:9b","usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	_, err := client.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "ping"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	if _, ok := body["provider"]; ok {
+		t.Fatalf("expected no provider object for local LLM, got %#v", body["provider"])
 	}
 }
 

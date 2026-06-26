@@ -2,9 +2,11 @@ package ibkr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +24,9 @@ type Client struct {
 	conn          connectionAPI
 	log           *slog.Logger
 	reconnectOnce sync.Once
+	pnlMu         sync.RWMutex
+	pnlByKey      map[string]AccountPnL
+	pnlSubs       map[string]struct{}
 }
 
 type connectionAPI interface {
@@ -60,6 +65,20 @@ type AccountSummary struct {
 	Cash           float64
 	UnrealizedPnL  float64
 	RealizedPnL    float64
+	DailyPnL       float64
+	DailyPnLReady  bool
+	PnLSource      string
+	PnLAccount     string
+	PnLError       string
+}
+
+type AccountPnL struct {
+	Account       string
+	ModelCode     string
+	DailyPnL      float64
+	UnrealizedPnL float64
+	RealizedPnL   float64
+	UpdatedAt     time.Time
 }
 
 type HistoricalBar struct {
@@ -70,10 +89,72 @@ type HistoricalBar struct {
 	Close float64
 }
 
+var ErrOrderNotFound = errors.New("order not found")
+
+const defaultOrderAckTimeout = 12 * time.Second
+
+func init() {
+	configureIBKRMessageEncoding()
+}
+
+func configureIBKRMessageEncoding() {
+	if readBoolEnv("IBKR_USE_PROTOBUF_ORDER_MESSAGES", false) {
+		return
+	}
+	// TWS/Gateway server versions >= 203 advertise protobuf order messages, but
+	// the scmhub v0.10.x protobuf place-order path can leave orders ApiPending
+	// without a broker acknowledgement. Keep account/market-data protobuf paths,
+	// while forcing the order lifecycle through the older field encoder.
+	delete(ibapi.PROTOBUF_MSG_IDS, ibapi.PLACE_ORDER)
+	delete(ibapi.PROTOBUF_MSG_IDS, ibapi.CANCEL_ORDER)
+	delete(ibapi.PROTOBUF_MSG_IDS, ibapi.REQ_GLOBAL_CANCEL)
+}
+
 type PendingOrderError struct {
 	OrderID int64
 	Status  string
 	Reason  string
+}
+
+type UnacknowledgedOrderError struct {
+	OrderID        int64
+	Status         string
+	LastLogCode    int64
+	LastLogMessage string
+	Cause          error
+}
+
+func (e *UnacknowledgedOrderError) Error() string {
+	if e == nil {
+		return ""
+	}
+	reason := "order not acknowledged by broker"
+	if e.Status != "" {
+		reason += "; last status=" + e.Status
+	}
+	if e.OrderID > 0 {
+		reason += fmt.Sprintf("; broker_order_id=%d", e.OrderID)
+	}
+	if e.LastLogCode != 0 || e.LastLogMessage != "" {
+		reason += fmt.Sprintf("; last_broker_log_code=%d", e.LastLogCode)
+		if e.LastLogMessage != "" {
+			reason += "; last_broker_log=" + e.LastLogMessage
+		}
+	}
+	if strings.EqualFold(e.Status, string(ibsync.ApiPending)) {
+		reason += "; hint=check TWS API order precautions and Bypass Order Precautions for API Orders"
+	}
+	if e.Cause != nil {
+		reason += ": " + e.Cause.Error()
+	}
+	return reason
+}
+
+func (e *UnacknowledgedOrderError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
 }
 
 type OrderLookup struct {
@@ -87,6 +168,34 @@ type OrderLookup struct {
 	Active            bool
 	Done              bool
 	Fill              *model.Fill
+}
+
+type OpenOrderSnapshot struct {
+	OrderID           int64
+	PermID            int64
+	ClientID          int64
+	Symbol            string
+	LocalSymbol       string
+	SecType           string
+	Exchange          string
+	PrimaryExchange   string
+	Currency          string
+	Action            string
+	OrderType         string
+	TotalQuantity     float64
+	LmtPrice          float64
+	AuxPrice          float64
+	TIF               string
+	OutsideRTH        bool
+	Transmit          bool
+	AlgoStrategy      string
+	Status            string
+	FilledQuantity    float64
+	RemainingQuantity float64
+	AvgFillPrice      float64
+	LastFillPrice     float64
+	WhyHeld           string
+	MktCapPrice       float64
 }
 
 func (e *PendingOrderError) Error() string {
@@ -140,6 +249,8 @@ func (c *Client) Close() {
 }
 
 func BuildContract(inst model.Instrument) *ibsync.Contract {
+	originalSymbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	inst = normalizeIBKRInstrument(inst)
 	contract := &ibsync.Contract{
 		ConID:    inst.ConID,
 		Symbol:   inst.Symbol,
@@ -158,6 +269,11 @@ func BuildContract(inst model.Instrument) *ibsync.Contract {
 	if contract.SecType == "" {
 		contract.SecType = "STK"
 	}
+	if _, suffix, ok := splitListingSuffix(originalSymbol); ok {
+		if hint, ok := listingSuffixHints[suffix]; ok {
+			contract.PrimaryExchange = hint.primaryExchange
+		}
+	}
 	if inst.Expiry != "" {
 		contract.LastTradeDateOrContractMonth = inst.Expiry
 	}
@@ -165,6 +281,71 @@ func BuildContract(inst model.Instrument) *ibsync.Contract {
 		contract.Multiplier = inst.Multiplier
 	}
 	return contract
+}
+
+type listingHint struct {
+	currency        string
+	exchange        string
+	primaryExchange string
+}
+
+var listingSuffixHints = map[string]listingHint{
+	"AS": {currency: "EUR", exchange: "SMART", primaryExchange: "AEB"},
+	"AX": {currency: "AUD", exchange: "SMART", primaryExchange: "ASX"},
+	"DE": {currency: "EUR", exchange: "SMART", primaryExchange: "IBIS"},
+	"HK": {currency: "HKD", exchange: "SMART", primaryExchange: "SEHK"},
+	"KS": {currency: "KRW", exchange: "SMART", primaryExchange: "KSE"},
+	"KQ": {currency: "KRW", exchange: "SMART", primaryExchange: "KOSDAQ"},
+	"L":  {currency: "GBP", exchange: "SMART", primaryExchange: "LSE"},
+	"LN": {currency: "GBP", exchange: "SMART", primaryExchange: "LSE"},
+	"MI": {currency: "EUR", exchange: "SMART", primaryExchange: "BVME"},
+	"PA": {currency: "EUR", exchange: "SMART", primaryExchange: "SBF"},
+	"SW": {currency: "CHF", exchange: "SMART", primaryExchange: "EBS"},
+	"T":  {currency: "JPY", exchange: "SMART", primaryExchange: "TSEJ"},
+	"TO": {currency: "CAD", exchange: "SMART", primaryExchange: "TSE"},
+	"V":  {currency: "CAD", exchange: "SMART", primaryExchange: "VENTURE"},
+}
+
+func normalizeIBKRInstrument(inst model.Instrument) model.Instrument {
+	secType := strings.ToUpper(strings.TrimSpace(inst.SecType))
+	if secType != "" && secType != "STK" && secType != "ETF" {
+		return inst
+	}
+	if secType == "ETF" {
+		inst.SecType = "STK"
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	base, suffix, ok := splitListingSuffix(symbol)
+	if !ok {
+		inst.Symbol = symbol
+		return inst
+	}
+	hint, ok := listingSuffixHints[suffix]
+	if !ok {
+		inst.Symbol = symbol
+		return inst
+	}
+	inst.Symbol = base
+	if strings.TrimSpace(inst.Currency) == "" || strings.EqualFold(inst.Currency, "USD") {
+		inst.Currency = hint.currency
+	}
+	if strings.TrimSpace(inst.Exchange) == "" || strings.EqualFold(inst.Exchange, "SMART") {
+		inst.Exchange = hint.exchange
+	}
+	return inst
+}
+
+func splitListingSuffix(symbol string) (base string, suffix string, ok bool) {
+	idx := strings.LastIndex(symbol, ".")
+	if idx <= 0 || idx == len(symbol)-1 {
+		return "", "", false
+	}
+	base = strings.TrimSpace(symbol[:idx])
+	suffix = strings.TrimSpace(symbol[idx+1:])
+	if base == "" || suffix == "" {
+		return "", "", false
+	}
+	return base, suffix, true
 }
 
 func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill, error) {
@@ -185,16 +366,44 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 		return nil, err
 	}
 
+	if err := validateBrokerLotSize(order, contract); err != nil {
+		return nil, err
+	}
+
 	ibOrder, err := buildOrder(order)
 	if err != nil {
 		return nil, err
 	}
+	if account := resolveOrderAccount(ib.ManagedAccounts()); account != "" {
+		ibOrder.Account = account
+	}
+	if c.IsPaper() || readBoolEnv("IBKR_ALLOW_OUTSIDE_RTH", false) {
+		ibOrder.OutsideRTH = true
+	}
+	status := c.conn.Status()
+	ibOrder.ClientID = int64(status.ClientID)
+	ibOrder.OrderRef = orderReference(order.ID)
 
 	c.log.Info("placing order",
 		"symbol", order.DisplaySymbol(),
 		"direction", order.Direction,
 		"quantity", order.Quantity,
 		"type", order.OrderType,
+		"limit_price", order.LimitPrice,
+		"stop_price", order.StopPrice,
+		"tif", ibOrder.TIF,
+		"outside_rth", ibOrder.OutsideRTH,
+		"transmit", ibOrder.Transmit,
+		"account_set", ibOrder.Account != "",
+		"ib_order_type", ibOrder.OrderType,
+		"algo_strategy", ibOrder.AlgoStrategy,
+		"client_id", ibOrder.ClientID,
+		"order_ref", ibOrder.OrderRef,
+		"protobuf_order_messages", ibkrOrderLifecycleUsesProtobuf(),
+		"con_id", contract.ConID,
+		"exchange", contract.Exchange,
+		"primary_exchange", contract.PrimaryExchange,
+		"currency", contract.Currency,
 		"structure", order.Structure,
 		"paper", c.IsPaper(),
 	)
@@ -203,29 +412,97 @@ func (c *Client) PlaceOrder(ctx context.Context, order model.Order) (*model.Fill
 	if trade == nil {
 		return nil, fmt.Errorf("place order returned nil trade")
 	}
+	c.log.Info("broker order id assigned",
+		"symbol", order.DisplaySymbol(),
+		"broker_order_id", trade.Order.OrderID,
+		"client_id", ibOrder.ClientID,
+		"order_ref", ibOrder.OrderRef,
+	)
 
 	waitCtx, cancel := withDefaultTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	select {
-	case <-waitCtx.Done():
-		if pending := pendingOrderError(trade, waitCtx.Err()); pending != nil {
-			c.cancelPaperTrade(trade)
+	ackTimeout := readDurationEnv("IBKR_ORDER_ACK_TIMEOUT", defaultOrderAckTimeout)
+	ackTimer := time.NewTimer(ackTimeout)
+	defer ackTimer.Stop()
+
+	ackCh := trade.Ack()
+	doneCh := trade.Done()
+	pollInterval := readDurationEnv("IBKR_ORDER_ACK_POLL_INTERVAL", 250*time.Millisecond)
+	if pollInterval <= 0 {
+		pollInterval = 250 * time.Millisecond
+	}
+	ackPoll := time.NewTicker(pollInterval)
+	defer ackPoll.Stop()
+
+	for {
+		if err := terminalBrokerOrderError(trade); err != nil {
+			return nil, err
+		}
+		if trade.OrderStatus.IsDone() {
+			break
+		}
+		if pending := pendingOrderError(trade, nil); pending != nil {
 			return nil, pending
 		}
-		return nil, waitCtx.Err()
-	case <-trade.Done():
+
+		select {
+		case <-ackCh:
+			ackCh = nil
+		case <-ackPoll.C:
+			if _, refreshErr := c.refreshOrderAcknowledgement(ctx, trade); refreshErr != nil {
+				c.log.Warn("broker order acknowledgement refresh failed",
+					"symbol", order.DisplaySymbol(),
+					"broker_order_id", trade.Order.OrderID,
+					"error", refreshErr,
+				)
+			}
+		case <-ackTimer.C:
+			return nil, unacknowledgedBrokerOrderError(trade, fmt.Errorf("broker acknowledgement timeout after %s", ackTimeout))
+		case <-waitCtx.Done():
+			if err := terminalBrokerOrderError(trade); err != nil {
+				return nil, err
+			}
+			if pending := pendingOrderError(trade, waitCtx.Err()); pending != nil {
+				if readBoolEnv("IBKR_CANCEL_PENDING_ON_TIMEOUT", false) {
+					c.cancelPaperTrade(trade)
+				}
+				return nil, pending
+			}
+			return nil, unacknowledgedBrokerOrderError(trade, waitCtx.Err())
+		case <-doneCh:
+			doneCh = nil
+		}
 	}
 
+	if err := terminalBrokerOrderError(trade); err != nil {
+		return nil, err
+	}
 	if !trade.OrderStatus.IsDone() {
 		if pending := pendingOrderError(trade, fmt.Errorf("order did not complete")); pending != nil {
-			c.cancelPaperTrade(trade)
+			if readBoolEnv("IBKR_CANCEL_PENDING_ON_TIMEOUT", false) {
+				c.cancelPaperTrade(trade)
+			}
 			return nil, pending
 		}
-		return nil, fmt.Errorf("order did not complete")
+		return nil, unacknowledgedBrokerOrderError(trade, fmt.Errorf("order did not complete"))
 	}
 
 	return materializeFill(order, trade, contract, resolvedLegs)
+}
+
+func (c *Client) refreshOrderAcknowledgement(ctx context.Context, trade *ibsync.Trade) (bool, error) {
+	if trade == nil || trade.Order == nil {
+		return false, nil
+	}
+	timeout := readDurationEnv("IBKR_OPEN_ORDER_REFRESH_TIMEOUT", 5*time.Second)
+	refreshCtx, cancel := withDefaultTimeout(ctx, timeout)
+	defer cancel()
+	if _, err := c.OpenOrders(refreshCtx, false); err != nil {
+		return false, err
+	}
+	status := strings.TrimSpace(string(trade.OrderStatus.Status))
+	return status != "" && !strings.EqualFold(status, string(ibsync.PendingSubmit)), nil
 }
 
 func materializeFill(order model.Order, trade *ibsync.Trade, contract *ibsync.Contract, resolvedLegs []model.TradeLeg) (*model.Fill, error) {
@@ -349,7 +626,7 @@ func pendingOrderError(trade *ibsync.Trade, cause error) *PendingOrderError {
 	if !isPendingTradeStatus(status) {
 		return nil
 	}
-	reason := "order accepted but not filled before execution timeout"
+	reason := "order accepted by broker and fill pending"
 	if cause != nil {
 		reason += ": " + cause.Error()
 	}
@@ -360,9 +637,88 @@ func pendingOrderError(trade *ibsync.Trade, cause error) *PendingOrderError {
 	}
 }
 
+func unacknowledgedBrokerOrderError(trade *ibsync.Trade, cause error) error {
+	orderID := int64(0)
+	status := ""
+	lastLogCode := int64(0)
+	lastLogMessage := ""
+	if trade != nil {
+		status = strings.TrimSpace(string(trade.OrderStatus.Status))
+		if trade.Order != nil {
+			orderID = trade.Order.OrderID
+		}
+		if lastLog, ok := latestBrokerLogEntry(trade.Logs()); ok {
+			lastLogCode = lastLog.ErrorCode
+			lastLogMessage = strings.TrimSpace(lastLog.Message)
+		}
+	}
+	return &UnacknowledgedOrderError{
+		OrderID:        orderID,
+		Status:         status,
+		LastLogCode:    lastLogCode,
+		LastLogMessage: lastLogMessage,
+		Cause:          cause,
+	}
+}
+
+func terminalBrokerOrderError(trade *ibsync.Trade) error {
+	if trade == nil || trade.Order == nil {
+		return nil
+	}
+	if err := terminalBrokerLogError(trade.Order.OrderID, trade.Logs()); err != nil {
+		return err
+	}
+	status := strings.TrimSpace(string(trade.OrderStatus.Status))
+	switch strings.ToLower(status) {
+	case "inactive", "cancelled", "apicancelled":
+		return fmt.Errorf("broker rejected order %d: terminal status=%s", trade.Order.OrderID, status)
+	default:
+		return nil
+	}
+}
+
+func terminalBrokerLogError(orderID int64, logs []ibsync.TradeLogEntry) error {
+	for i := len(logs) - 1; i >= 0; i-- {
+		entry := logs[i]
+		if !isTerminalBrokerErrorCode(entry.ErrorCode) {
+			continue
+		}
+		message := strings.TrimSpace(entry.Message)
+		if message == "" {
+			message = "broker rejected order"
+		}
+		return fmt.Errorf("broker rejected order %d: %s (code=%d)", orderID, message, entry.ErrorCode)
+	}
+	return nil
+}
+
+func latestBrokerLogEntry(logs []ibsync.TradeLogEntry) (ibsync.TradeLogEntry, bool) {
+	for i := len(logs) - 1; i >= 0; i-- {
+		entry := logs[i]
+		if strings.TrimSpace(entry.Message) != "" || entry.ErrorCode != 0 {
+			return entry, true
+		}
+	}
+	return ibsync.TradeLogEntry{}, false
+}
+
+func isTerminalBrokerErrorCode(code int64) bool {
+	switch code {
+	case 110, 200, 201, 321, 388, 10052, 10243, 10268, 10318:
+		return true
+	default:
+		return false
+	}
+}
+
+func ibkrOrderLifecycleUsesProtobuf() bool {
+	_, ok := ibapi.PROTOBUF_MSG_IDS[ibapi.PLACE_ORDER]
+	return ok
+}
+
 func isPendingTradeStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "submitted", "presubmitted", "pendingsubmit", "apipending", "apisubmitted", "pendingcancel":
+	case "apisubmitted", "presubmitted", "submitted", "pendingcancel":
 		return true
 	default:
 		return false
@@ -393,7 +749,7 @@ func (c *Client) CancelOrder(ctx context.Context, orderID int64) error {
 		}
 	}
 
-	return fmt.Errorf("order %d not found", orderID)
+	return fmt.Errorf("%w: %d", ErrOrderNotFound, orderID)
 }
 
 func (c *Client) GetOrderStatus(ctx context.Context, order model.Order, orderID int64) (*OrderLookup, error) {
@@ -419,7 +775,7 @@ func (c *Client) GetOrderStatus(ctx context.Context, order model.Order, orderID 
 			AvgFillPrice:      trade.OrderStatus.AvgFillPrice,
 			LastFillPrice:     trade.OrderStatus.LastFillPrice,
 			UpdatedAt:         time.Now().UTC(),
-			Active:            trade.IsActive() || trade.OrderStatus.IsActive(),
+			Active:            isPendingTradeStatus(string(trade.OrderStatus.Status)),
 			Done:              trade.IsDone() || trade.OrderStatus.IsDone(),
 		}
 		if lookup.Done {
@@ -431,7 +787,66 @@ func (c *Client) GetOrderStatus(ctx context.Context, order model.Order, orderID 
 		return lookup, nil
 	}
 
-	return nil, fmt.Errorf("order %d not found", orderID)
+	return nil, fmt.Errorf("%w: %d", ErrOrderNotFound, orderID)
+}
+
+func (c *Client) OpenOrders(ctx context.Context, allClients bool) ([]OpenOrderSnapshot, error) {
+	ib := c.conn.IB()
+	if ib == nil {
+		return nil, fmt.Errorf("not connected to IBKR")
+	}
+	if err := runBlockingIBCall(ctx, func() error {
+		if allClients {
+			return ib.ReqAllOpenOrders()
+		}
+		return ib.ReqOpenOrders()
+	}); err != nil {
+		return nil, fmt.Errorf("request open orders: %w", err)
+	}
+
+	trades := ib.OpenTrades()
+	snapshots := make([]OpenOrderSnapshot, 0, len(trades))
+	for _, trade := range trades {
+		if trade == nil || trade.Order == nil {
+			continue
+		}
+		order := trade.Order
+		status := trade.OrderStatus
+		snapshot := OpenOrderSnapshot{
+			OrderID:           order.OrderID,
+			PermID:            status.PermID,
+			ClientID:          status.ClientID,
+			Action:            order.Action,
+			OrderType:         order.OrderType,
+			TotalQuantity:     order.TotalQuantity.Float(),
+			LmtPrice:          order.LmtPrice,
+			AuxPrice:          order.AuxPrice,
+			TIF:               order.TIF,
+			OutsideRTH:        order.OutsideRTH,
+			Transmit:          order.Transmit,
+			AlgoStrategy:      order.AlgoStrategy,
+			Status:            strings.TrimSpace(string(status.Status)),
+			FilledQuantity:    status.Filled.Float(),
+			RemainingQuantity: status.Remaining.Float(),
+			AvgFillPrice:      status.AvgFillPrice,
+			LastFillPrice:     status.LastFillPrice,
+			WhyHeld:           status.WhyHeld,
+			MktCapPrice:       status.MktCapPrice,
+		}
+		if trade.Contract != nil {
+			snapshot.Symbol = trade.Contract.Symbol
+			snapshot.LocalSymbol = trade.Contract.LocalSymbol
+			snapshot.SecType = trade.Contract.SecType
+			snapshot.Exchange = trade.Contract.Exchange
+			snapshot.PrimaryExchange = trade.Contract.PrimaryExchange
+			snapshot.Currency = trade.Contract.Currency
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		return snapshots[i].OrderID < snapshots[j].OrderID
+	})
+	return snapshots, nil
 }
 
 func (c *Client) GetPositions(ctx context.Context) ([]IBKRPosition, error) {
@@ -460,13 +875,55 @@ func (c *Client) GetPositions(ctx context.Context) ([]IBKRPosition, error) {
 }
 
 func (c *Client) GetAccountSummary(ctx context.Context) (*AccountSummary, error) {
+	if !readBoolEnv("IBKR_ACCOUNT_SUMMARY_SYNC", false) {
+		return nil, nil
+	}
+
 	ib := c.conn.IB()
 	if ib == nil {
 		return nil, fmt.Errorf("not connected to IBKR")
 	}
 
-	summary := &AccountSummary{}
-	for _, item := range ib.AccountSummary() {
+	// ibsync.AccountSummary() performs a blocking request when no account
+	// summary has been cached yet. Bound it so broker reconciliation can mark
+	// account sync stale instead of wedging the runtime.
+	timeout := readDurationEnv("IBKR_ACCOUNT_SUMMARY_TIMEOUT", 8*time.Second)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	resultCh := make(chan ibsync.AccountSummary, 1)
+	go func() {
+		resultCh <- ib.AccountSummary()
+	}()
+
+	var items ibsync.AccountSummary
+	select {
+	case <-waitCtx.Done():
+		return nil, fmt.Errorf("account summary timed out after %s: %w", timeout, waitCtx.Err())
+	case items = <-resultCh:
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("empty account summary")
+	}
+
+	accountCandidates := make([]string, 0, 2)
+	for _, item := range items {
+		if account := strings.TrimSpace(item.Account); account != "" && !strings.EqualFold(account, "all") {
+			accountCandidates = append(accountCandidates, account)
+		}
+	}
+	selectedAccount := resolveBrokerDataAccount(ib.ManagedAccounts(), accountCandidates)
+	if selectedAccount == "" && multipleUniqueAccounts(accountCandidates) {
+		return nil, fmt.Errorf("account summary ambiguous across multiple accounts; set IBKR_ACCOUNT or IBKR_PNL_ACCOUNT")
+	}
+
+	summary := &AccountSummary{PnLAccount: selectedAccount}
+	for _, item := range items {
+		if selectedAccount != "" {
+			account := strings.TrimSpace(item.Account)
+			if account != "" && !strings.EqualFold(account, selectedAccount) {
+				continue
+			}
+		}
 		switch item.Tag {
 		case "NetLiquidation":
 			summary.NetLiquidation = parseFloat(item.Value)
@@ -480,7 +937,166 @@ func (c *Client) GetAccountSummary(ctx context.Context) (*AccountSummary, error)
 			summary.RealizedPnL = parseFloat(item.Value)
 		}
 	}
+	if readBoolEnv("IBKR_ACCOUNT_PNL_SYNC", true) {
+		if summary.PnLAccount == "" {
+			summary.PnLError = "account pnl unavailable: set IBKR_ACCOUNT when multiple accounts are visible"
+		} else if pnl, err := c.GetAccountPnL(ctx, summary.PnLAccount); err != nil {
+			summary.PnLError = err.Error()
+		} else {
+			summary.DailyPnL = pnl.DailyPnL
+			summary.UnrealizedPnL = pnl.UnrealizedPnL
+			summary.RealizedPnL = pnl.RealizedPnL
+			summary.DailyPnLReady = true
+			summary.PnLSource = "ibkr_req_pnl"
+		}
+	}
 	return summary, nil
+}
+
+func (c *Client) GetAccountPnL(ctx context.Context, account string) (*AccountPnL, error) {
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return nil, fmt.Errorf("account pnl unavailable: account is required")
+	}
+	ib := c.conn.IB()
+	if ib == nil {
+		return nil, fmt.Errorf("not connected to IBKR")
+	}
+	modelCode := strings.TrimSpace(os.Getenv("IBKR_PNL_MODEL_CODE"))
+	key := pnlSubscriptionKey(account, modelCode)
+	if pnl, ok := c.cachedAccountPnL(key); ok {
+		return &pnl, nil
+	}
+
+	c.ensureAccountPnLSubscription(ib, account, modelCode, key)
+
+	timeout := readDurationEnv("IBKR_PNL_SYNC_TIMEOUT", 5*time.Second)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			return nil, fmt.Errorf("account pnl timed out after %s for account %s: %w", timeout, account, waitCtx.Err())
+		case <-ticker.C:
+			if pnl, ok := c.cachedAccountPnL(key); ok {
+				return &pnl, nil
+			}
+		}
+	}
+}
+
+func (c *Client) cachedAccountPnL(key string) (AccountPnL, bool) {
+	c.pnlMu.RLock()
+	defer c.pnlMu.RUnlock()
+	pnl, ok := c.pnlByKey[key]
+	return pnl, ok
+}
+
+func (c *Client) ensureAccountPnLSubscription(ib *ibsync.IB, account string, modelCode string, key string) {
+	c.pnlMu.Lock()
+	if c.pnlByKey == nil {
+		c.pnlByKey = make(map[string]AccountPnL)
+	}
+	if c.pnlSubs == nil {
+		c.pnlSubs = make(map[string]struct{})
+	}
+	if _, exists := c.pnlSubs[key]; exists {
+		c.pnlMu.Unlock()
+		return
+	}
+	c.pnlSubs[key] = struct{}{}
+	c.pnlMu.Unlock()
+
+	ch := ib.PnlChan(account, modelCode)
+	ib.ReqPnL(account, modelCode)
+	go c.consumeAccountPnL(key, ch)
+}
+
+func (c *Client) consumeAccountPnL(key string, ch <-chan ibsync.Pnl) {
+	defer func() {
+		c.pnlMu.Lock()
+		delete(c.pnlSubs, key)
+		c.pnlMu.Unlock()
+	}()
+	for pnl := range ch {
+		if !usableIBFloat(pnl.DailyPNL) {
+			continue
+		}
+		c.pnlMu.Lock()
+		c.pnlByKey[key] = AccountPnL{
+			Account:       pnl.Account,
+			ModelCode:     pnl.ModelCode,
+			DailyPnL:      pnl.DailyPNL,
+			UnrealizedPnL: finiteOrZero(pnl.UnrealizedPnl),
+			RealizedPnL:   finiteOrZero(pnl.RealizedPNL),
+			UpdatedAt:     time.Now(),
+		}
+		c.pnlMu.Unlock()
+	}
+}
+
+func pnlSubscriptionKey(account string, modelCode string) string {
+	return strings.TrimSpace(account) + "\x00" + strings.TrimSpace(modelCode)
+}
+
+func usableIBFloat(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && math.Abs(value) < math.MaxFloat64/4
+}
+
+func finiteOrZero(value float64) float64 {
+	if !usableIBFloat(value) {
+		return 0
+	}
+	return value
+}
+
+func resolveBrokerDataAccount(managedAccounts []string, accountSummaryAccounts []string) string {
+	if account := strings.TrimSpace(os.Getenv("IBKR_PNL_ACCOUNT")); account != "" {
+		return account
+	}
+	uniqueSummaryAccount := singleUniqueAccount(accountSummaryAccounts)
+	if uniqueSummaryAccount != "" {
+		if envAccount := strings.TrimSpace(os.Getenv("IBKR_ACCOUNT")); envAccount != "" {
+			return envAccount
+		}
+		return uniqueSummaryAccount
+	}
+	return resolveOrderAccount(managedAccounts)
+}
+
+func singleUniqueAccount(accounts []string) string {
+	seen := ""
+	for _, account := range accounts {
+		account = strings.TrimSpace(account)
+		if account == "" {
+			continue
+		}
+		if seen != "" && seen != account {
+			return ""
+		}
+		seen = account
+	}
+	return seen
+}
+
+func multipleUniqueAccounts(accounts []string) bool {
+	first := ""
+	for _, account := range accounts {
+		account = strings.TrimSpace(account)
+		if account == "" {
+			continue
+		}
+		if first == "" {
+			first = account
+			continue
+		}
+		if account != first {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) ReqMarketData(ctx context.Context, inst model.Instrument) (*MarketData, error) {
@@ -586,6 +1202,9 @@ func (c *Client) HistoricalBars(ctx context.Context, inst model.Instrument, end 
 }
 
 func (c *Client) qualifyContract(ctx context.Context, inst model.Instrument) (*ibsync.Contract, error) {
+	if inst.IsKalshi() {
+		return nil, fmt.Errorf("refusing prediction-market instrument %q for IBKR execution", inst.Symbol)
+	}
 	ib := c.conn.IB()
 	if ib == nil {
 		return nil, fmt.Errorf("not connected to IBKR")
@@ -705,15 +1324,58 @@ func buildOrder(order model.Order) (*ibapi.Order, error) {
 	if order.TimeInForce != "" {
 		ibOrder.TIF = order.TimeInForce
 	}
+	ibOrder.Transmit = true
 
 	switch order.OrderType {
 	case model.OrderAdaptive:
-		ibOrder.AlgoStrategy = "Adaptive"
+		ibapi.FillAdaptiveParams(ibOrder, "Urgent")
 	case model.OrderTWAP:
 		ibOrder.AlgoStrategy = "Twap"
 	}
 
 	return ibOrder, nil
+}
+
+func resolveOrderAccount(managedAccounts []string) string {
+	if account := strings.TrimSpace(os.Getenv("IBKR_ACCOUNT")); account != "" {
+		return account
+	}
+	account := ""
+	for _, candidate := range managedAccounts {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if account != "" {
+			return ""
+		}
+		account = candidate
+	}
+	return account
+}
+
+func orderReference(orderID string) string {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return ""
+	}
+	const maxLen = 32
+	var b strings.Builder
+	b.Grow(maxLen)
+	for i := 0; i < len(orderID) && b.Len() < maxLen; i++ {
+		ch := orderID[i]
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			b.WriteByte(ch)
+		case ch >= 'A' && ch <= 'Z':
+			b.WriteByte(ch)
+		case ch >= '0' && ch <= '9':
+			b.WriteByte(ch)
+		case ch == '-' || ch == '_':
+			b.WriteByte(ch)
+		}
+	}
+	return b.String()
 }
 
 func actionFromDirection(direction model.TradeDirection) string {
@@ -760,11 +1422,59 @@ func weightedAveragePrice(currentAvg, newPrice, currentQty, newQty float64) floa
 }
 
 func normalizeQuantity(quantity float64, secType string) float64 {
-	switch secType {
-	case "OPT", "FUT":
+	switch strings.ToUpper(strings.TrimSpace(secType)) {
+	case "", "STK", "ETF":
+		if quantity < 1 {
+			return 0
+		}
+		return math.Floor(quantity)
+	case "OPT", "FUT", "FOP":
 		return math.Round(quantity)
 	default:
 		return quantity
+	}
+}
+
+func validateBrokerLotSize(order model.Order, contract *ibsync.Contract) error {
+	if order.IsMultiLeg() || contract == nil {
+		return nil
+	}
+	secType := strings.ToUpper(strings.TrimSpace(contract.SecType))
+	if secType == "" {
+		secType = strings.ToUpper(strings.TrimSpace(order.Instrument.SecType))
+	}
+	if secType != "" && secType != "STK" && secType != "ETF" {
+		return nil
+	}
+
+	lotSize := minimumStockLotSize(order.Instrument, contract)
+	if lotSize <= 1 {
+		return nil
+	}
+	quantity := normalizeQuantity(order.Quantity, secType)
+	lotSizeFloat := float64(lotSize)
+	if quantity < lotSizeFloat {
+		return fmt.Errorf("broker minimum lot size for %s is %d shares; requested %.4f", order.DisplaySymbol(), lotSize, order.Quantity)
+	}
+	if math.Mod(quantity, lotSizeFloat) != 0 {
+		return fmt.Errorf("broker lot size for %s is %d shares; requested %.4f", order.DisplaySymbol(), lotSize, order.Quantity)
+	}
+	return nil
+}
+
+func minimumStockLotSize(inst model.Instrument, contract *ibsync.Contract) int64 {
+	if contract == nil {
+		return 1
+	}
+	primary := strings.ToUpper(strings.TrimSpace(contract.PrimaryExchange))
+	exchange := strings.ToUpper(strings.TrimSpace(contract.Exchange))
+	currency := strings.ToUpper(strings.TrimSpace(contract.Currency))
+	symbol := strings.ToUpper(strings.TrimSpace(inst.Symbol))
+	switch {
+	case primary == "TSEJ" || exchange == "TSEJ" || (currency == "JPY" && strings.HasSuffix(symbol, ".T")):
+		return 100
+	default:
+		return 1
 	}
 }
 

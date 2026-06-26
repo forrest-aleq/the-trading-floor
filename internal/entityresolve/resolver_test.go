@@ -25,3 +25,22 @@ func TestResolveFallsBackToEntityID(t *testing.T) {
 		t.Fatalf("unexpected fallback confidence: %.2f", resolved.Confidence)
 	}
 }
+
+func TestResolveKnownTradingAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  string
+		want string
+	}{
+		{name: "Ferrari", typ: "company", want: "company:RACE"},
+		{name: "Micron Technology", typ: "company", want: "company:MU"},
+		{name: "South Korea", typ: "etf", want: "etf:EWY"},
+	}
+
+	for _, tt := range tests {
+		resolved := Resolve(signal.Entity{Name: tt.name, Type: tt.typ}, "en")
+		if resolved.CanonicalID != tt.want {
+			t.Fatalf("Resolve(%q) = %s, want %s", tt.name, resolved.CanonicalID, tt.want)
+		}
+	}
+}

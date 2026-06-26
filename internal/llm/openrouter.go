@@ -17,18 +17,20 @@ import (
 // OpenRouter client — OpenAI-compatible API that routes to any model.
 // Also works with Claude Foundry by changing the base URL.
 type OpenRouterClient struct {
-	apiKey   string
-	baseURL  string
-	model    string
-	provider *orProviderRouting
-	http     *http.Client
-	limiter  chan struct{}
+	apiKey         string
+	baseURL        string
+	model          string
+	fallbackModels []string
+	provider       *orProviderRouting
+	http           *http.Client
+	limiter        chan struct{}
 }
 
 type OpenRouterConfig struct {
 	APIKey         string // OPENROUTER_API_KEY or ANTHROPIC_API_KEY
 	BaseURL        string // https://openrouter.ai/api/v1 or foundry URL
 	Model          string // e.g. "deepseek/deepseek-v4-flash", "qwen/qwen3.6-35b-a3b"
+	FallbackModels []string
 	MaxConcurrency int
 	Provider       *ProviderRouting
 	EnvPrefix      string
@@ -53,19 +55,23 @@ func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
 		cfg.BaseURL = "https://openrouter.ai/api/v1"
 	}
 
-	provider := cfg.Provider
-	if provider == nil && cfg.EnvPrefix != "" {
-		provider = providerRoutingFromEnv(cfg.EnvPrefix)
-	}
-	if provider == nil {
-		provider = providerRoutingFromEnv("LLM")
+	var provider *ProviderRouting
+	if !isLocalLLM(cfg.BaseURL) {
+		provider = cfg.Provider
+		if provider == nil && cfg.EnvPrefix != "" {
+			provider = providerRoutingFromEnv(cfg.EnvPrefix)
+		}
+		if provider == nil {
+			provider = providerRoutingFromEnv("LLM")
+		}
 	}
 
 	return &OpenRouterClient{
-		apiKey:   cfg.APIKey,
-		baseURL:  cfg.BaseURL,
-		model:    cfg.Model,
-		provider: provider.toOpenRouter(),
+		apiKey:         cfg.APIKey,
+		baseURL:        cfg.BaseURL,
+		model:          cfg.Model,
+		fallbackModels: fallbackModelsFromEnv(cfg.EnvPrefix, cfg.FallbackModels),
+		provider:       provider.toOpenRouter(),
 		http: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -130,11 +136,33 @@ type orResponse struct {
 }
 
 func (c *OpenRouterClient) Complete(ctx context.Context, req Request) (*Response, error) {
-	model := c.model
-	if req.Model != "" {
-		model = req.Model
+	candidates := c.modelCandidates(req.Model)
+	var lastErr error
+	tried := make([]string, 0, len(candidates))
+	for _, model := range candidates {
+		attemptReq := req
+		attemptReq.Model = model
+		started := time.Now()
+		result, err := c.completeWithModel(ctx, attemptReq, model)
+		elapsed := time.Since(started)
+		tried = append(tried, model)
+		if err == nil {
+			recordTokenUsage(ctx, attemptReq, result, elapsed)
+			return result, nil
+		}
+		recordTokenFailure(ctx, attemptReq, model, err, elapsed)
+		lastErr = err
+		if !shouldTryModelFallback(ctx, err) {
+			break
+		}
 	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no model candidates configured")
+	}
+	return nil, fmt.Errorf("llm model candidates failed (%s): %w", strings.Join(tried, ", "), lastErr)
+}
 
+func (c *OpenRouterClient) completeWithModel(ctx context.Context, req Request, model string) (*Response, error) {
 	messages := make([]orMessage, len(req.Messages))
 	for i, m := range req.Messages {
 		messages[i] = orMessage{Role: string(m.Role), Content: m.Content}
@@ -187,14 +215,28 @@ func (c *OpenRouterClient) Complete(ctx context.Context, req Request) (*Response
 		return nil, fmt.Errorf("no choices in response")
 	}
 
-	content := normalizeChoiceContent(orResp.Choices[0].Message.Content, orResp.Choices[0].Message.Reasoning)
+	content := responseContent(orResp.Choices[0].Message.Content, orResp.Choices[0].Message.Reasoning, req.JSONMode)
 
-	return &Response{
+	result := &Response{
 		Content:      content,
 		Model:        orResp.Model,
 		InputTokens:  orResp.Usage.PromptTokens,
 		OutputTokens: orResp.Usage.CompletionTokens,
-	}, nil
+	}
+	return result, nil
+}
+
+func (c *OpenRouterClient) modelCandidates(override string) []string {
+	primary := strings.TrimSpace(override)
+	if primary == "" {
+		primary = strings.TrimSpace(c.model)
+	}
+	raw := make([]string, 0, 1+len(c.fallbackModels))
+	if primary != "" {
+		raw = append(raw, primary)
+	}
+	raw = append(raw, c.fallbackModels...)
+	return dedupeModels(raw)
 }
 
 func (c *OpenRouterClient) doChatCompletion(ctx context.Context, body []byte) ([]byte, error) {
@@ -404,6 +446,18 @@ func shouldRetryLocalLLM(baseURL string, statusCode, attempt, attempts int) bool
 	}
 }
 
+func shouldTryModelFallback(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func retryDelay(attempt int) time.Duration {
 	switch attempt {
 	case 0:
@@ -427,6 +481,14 @@ func normalizeChoiceContent(content, reasoning string) string {
 	default:
 		return "<think>\n" + reasoning + "\n</think>\n\n" + content
 	}
+}
+
+func responseContent(content, reasoning string, jsonMode bool) string {
+	content = strings.TrimSpace(content)
+	if jsonMode && content != "" {
+		return content
+	}
+	return normalizeChoiceContent(content, reasoning)
 }
 
 // DefaultRouter creates a router using OpenRouter-compatible clients for all tiers.
@@ -470,6 +532,7 @@ func DefaultRouter() *Router {
 		APIKey:         apiKey,
 		BaseURL:        baseURL,
 		Model:          speedModel,
+		FallbackModels: defaultOpenRouterFallbackModels(baseURL),
 		MaxConcurrency: speedConcurrency,
 		EnvPrefix:      "LLM_SPEED",
 	})
@@ -478,6 +541,7 @@ func DefaultRouter() *Router {
 		APIKey:         apiKey,
 		BaseURL:        baseURL,
 		Model:          analysisModel,
+		FallbackModels: defaultOpenRouterFallbackModels(baseURL),
 		MaxConcurrency: analysisConcurrency,
 		EnvPrefix:      "LLM_ANALYSIS",
 	})
@@ -486,11 +550,49 @@ func DefaultRouter() *Router {
 		APIKey:         apiKey,
 		BaseURL:        baseURL,
 		Model:          criticalModel,
+		FallbackModels: defaultOpenRouterFallbackModels(baseURL),
 		MaxConcurrency: criticalConcurrency,
 		EnvPrefix:      "LLM_CRITICAL",
 	})
 
 	return NewRouter(speed, analysis, critical)
+}
+
+func defaultOpenRouterFallbackModels(baseURL string) []string {
+	if isLocalLLM(baseURL) {
+		return nil
+	}
+	return []string{
+		"liquid/lfm-2.5-1.2b-thinking:free",
+	}
+}
+
+func fallbackModelsFromEnv(prefix string, configured []string) []string {
+	models := make([]string, 0, len(configured)+4)
+	models = append(models, configured...)
+	if prefix = strings.TrimSpace(prefix); prefix != "" {
+		models = append(models, readCSVEnv(prefix+"_MODEL_FALLBACKS")...)
+	}
+	models = append(models, readCSVEnv("LLM_MODEL_FALLBACKS")...)
+	return dedupeModels(models)
+}
+
+func dedupeModels(models []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(models))
+	for _, raw := range models {
+		model := strings.TrimSpace(raw)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	return out
 }
 
 func readConcurrencyEnv(name string) int {

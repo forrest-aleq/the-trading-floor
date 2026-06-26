@@ -56,7 +56,7 @@ func TestCompileEntryLimitOrder(t *testing.T) {
 	}
 }
 
-func TestCompileEntryFallsBackToMarketOrder(t *testing.T) {
+func TestCompileEntryUsesAggressiveReferenceLimitWhenOnlyLastPriceIsAvailable(t *testing.T) {
 	compiler := NewCompiler()
 	thesis := &model.Thesis{
 		ID:           "thesis-2",
@@ -72,17 +72,133 @@ func TestCompileEntryFallsBackToMarketOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile entry: %v", err)
 	}
-	if order.OrderType != model.OrderMarket {
-		t.Fatalf("expected market order, got %s", order.OrderType)
+	if order.OrderType != model.OrderLimit {
+		t.Fatalf("expected limit order, got %s", order.OrderType)
+	}
+	if order.LimitPrice != 89.55 {
+		t.Fatalf("expected aggressive reference limit 89.55, got %.2f", order.LimitPrice)
 	}
 	if order.Notional <= 0 {
 		t.Fatalf("expected positive notional from market context, got %.2f", order.Notional)
 	}
 	if order.ExecutionIntent == nil {
-		t.Fatal("expected execution intent for market order")
+		t.Fatal("expected execution intent for reference-limit order")
 	}
 	if order.ExecutionIntent.DecisionPrice != 90 {
 		t.Fatalf("expected decision price 90, got %.2f", order.ExecutionIntent.DecisionPrice)
+	}
+}
+
+func TestCompileEntryUsesMarketOrderWhenNoReferencePriceExists(t *testing.T) {
+	compiler := NewCompiler()
+	thesis := &model.Thesis{
+		ID:           "thesis-no-price",
+		Instrument:   model.Instrument{Symbol: "TLT", SecType: "STK", Currency: "USD"},
+		Direction:    model.Long,
+		PositionSize: 5,
+	}
+
+	order, err := compiler.CompileEntry(EntryInput{DeskID: "desk-b", Thesis: thesis})
+	if err != nil {
+		t.Fatalf("compile entry: %v", err)
+	}
+	if order.OrderType != model.OrderMarket {
+		t.Fatalf("expected market order, got %s", order.OrderType)
+	}
+	if order.Notional != 0 {
+		t.Fatalf("expected zero notional without reference price, got %.2f", order.Notional)
+	}
+}
+
+func TestCompileEntryRejectsPredictionMarketInstrumentForBrokerExecution(t *testing.T) {
+	compiler := NewCompiler()
+	thesis := &model.Thesis{
+		ID:           "thesis-kalshi-leak",
+		Instrument:   model.Instrument{Symbol: "KXTHORNE", SecType: "STK", Currency: "USD"},
+		Direction:    model.Short,
+		EntryPrice:   0.42,
+		PositionSize: 1,
+	}
+
+	if _, err := compiler.CompileEntry(EntryInput{DeskID: "corp-earnings-a", Thesis: thesis}); err == nil {
+		t.Fatal("expected broker compiler to reject prediction-market instrument")
+	}
+}
+
+func TestCompileEntryRoundsExplicitStockLimitToTick(t *testing.T) {
+	compiler := NewCompiler()
+	thesis := &model.Thesis{
+		ID:           "thesis-rounded",
+		Instrument:   model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+		Direction:    model.Short,
+		EntryPrice:   276.2357,
+		PositionSize: 1,
+	}
+
+	order, err := compiler.CompileEntry(EntryInput{DeskID: "desk-rounded", Thesis: thesis})
+	if err != nil {
+		t.Fatalf("compile entry: %v", err)
+	}
+	if order.OrderType != model.OrderLimit {
+		t.Fatalf("expected limit order, got %s", order.OrderType)
+	}
+	if order.LimitPrice != 276.24 {
+		t.Fatalf("expected rounded stock limit 276.24, got %.4f", order.LimitPrice)
+	}
+}
+
+func TestCompileEntryReplacesImplausibleExplicitStockEntryWithFreshQuote(t *testing.T) {
+	compiler := NewCompiler()
+	thesis := &model.Thesis{
+		ID:           "thesis-bad-entry",
+		Instrument:   model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+		Direction:    model.Short,
+		EntryPrice:   0.50,
+		PositionSize: 1,
+		MarketContext: &model.MarketContext{
+			CurrentPrice:    200.00,
+			BidPrice:        199.90,
+			AskPrice:        200.10,
+			MidPrice:        200.00,
+			SpreadBps:       10,
+			QuoteAgeSeconds: 2,
+		},
+	}
+
+	order, err := compiler.CompileEntry(EntryInput{DeskID: "desk-bad-entry", Thesis: thesis})
+	if err != nil {
+		t.Fatalf("compile entry: %v", err)
+	}
+	if order.OrderType != model.OrderLimit {
+		t.Fatalf("expected limit order, got %s", order.OrderType)
+	}
+	if order.LimitPrice != 199.80 {
+		t.Fatalf("expected marketable bid-side limit 199.80, got %.2f", order.LimitPrice)
+	}
+}
+
+func TestCompileEntryReplacesImplausibleExplicitStockEntryWithReferenceLimit(t *testing.T) {
+	compiler := NewCompiler()
+	thesis := &model.Thesis{
+		ID:           "thesis-bad-entry-current",
+		Instrument:   model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+		Direction:    model.Short,
+		EntryPrice:   0.50,
+		PositionSize: 1,
+		MarketContext: &model.MarketContext{
+			CurrentPrice: 200.00,
+		},
+	}
+
+	order, err := compiler.CompileEntry(EntryInput{DeskID: "desk-bad-entry-current", Thesis: thesis})
+	if err != nil {
+		t.Fatalf("compile entry: %v", err)
+	}
+	if order.OrderType != model.OrderLimit {
+		t.Fatalf("expected limit order, got %s", order.OrderType)
+	}
+	if order.LimitPrice != 199.00 {
+		t.Fatalf("expected aggressive current-price limit 199.00, got %.2f", order.LimitPrice)
 	}
 }
 
@@ -150,12 +266,12 @@ func TestCompileEntryUsesAdaptiveForFreshTightSingleNameQuotes(t *testing.T) {
 	if order.OrderType != model.OrderAdaptive {
 		t.Fatalf("expected adaptive order, got %s", order.OrderType)
 	}
-	if order.LimitPrice != 500.03 {
-		t.Fatalf("expected aggressive ask cap 500.03, got %.2f", order.LimitPrice)
+	if order.LimitPrice != 500.28 {
+		t.Fatalf("expected aggressive ask cap 500.28, got %.2f", order.LimitPrice)
 	}
 }
 
-func TestCompileEntryUsesMidPriceForModerateSpreadQuotes(t *testing.T) {
+func TestCompileEntryUsesMarketableLimitForModerateSpreadQuotes(t *testing.T) {
 	compiler := NewCompiler()
 	thesis := &model.Thesis{
 		ID:           "thesis-mid",
@@ -176,15 +292,15 @@ func TestCompileEntryUsesMidPriceForModerateSpreadQuotes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile entry: %v", err)
 	}
-	if order.OrderType != model.OrderMidPrice {
-		t.Fatalf("expected midprice order, got %s", order.OrderType)
+	if order.OrderType != model.OrderLimit {
+		t.Fatalf("expected limit order, got %s", order.OrderType)
 	}
-	if order.LimitPrice != 400.20 {
-		t.Fatalf("expected protective cap 400.20, got %.2f", order.LimitPrice)
+	if order.LimitPrice != 400.40 {
+		t.Fatalf("expected protective cap 400.40, got %.2f", order.LimitPrice)
 	}
 }
 
-func TestCompileEntryUsesPassiveLimitWhenSpreadIsWide(t *testing.T) {
+func TestCompileEntryUsesMarketableLimitWhenSpreadIsWide(t *testing.T) {
 	compiler := NewCompiler()
 	thesis := &model.Thesis{
 		ID:           "thesis-passive",
@@ -206,14 +322,14 @@ func TestCompileEntryUsesPassiveLimitWhenSpreadIsWide(t *testing.T) {
 		t.Fatalf("compile entry: %v", err)
 	}
 	if order.OrderType != model.OrderLimit {
-		t.Fatalf("expected passive limit order, got %s", order.OrderType)
+		t.Fatalf("expected marketable limit order, got %s", order.OrderType)
 	}
-	if order.LimitPrice != 20.0 {
-		t.Fatalf("expected passive bid 20.0, got %.2f", order.LimitPrice)
+	if order.LimitPrice != 21.01 {
+		t.Fatalf("expected marketable ask cap 21.01, got %.2f", order.LimitPrice)
 	}
 }
 
-func TestCompileEntryUpgradesExplicitMidAnchorToMidPrice(t *testing.T) {
+func TestCompileEntryUpgradesExplicitMidAnchorToMarketableLimit(t *testing.T) {
 	compiler := NewCompiler()
 	thesis := &model.Thesis{
 		ID:           "thesis-explicit-mid",
@@ -235,11 +351,11 @@ func TestCompileEntryUpgradesExplicitMidAnchorToMidPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile entry: %v", err)
 	}
-	if order.OrderType != model.OrderMidPrice {
-		t.Fatalf("expected midprice order, got %s", order.OrderType)
+	if order.OrderType != model.OrderLimit {
+		t.Fatalf("expected limit order, got %s", order.OrderType)
 	}
-	if order.LimitPrice != 123.3 {
-		t.Fatalf("expected aggressive cap 123.3, got %.2f", order.LimitPrice)
+	if order.LimitPrice != 123.36 {
+		t.Fatalf("expected aggressive cap 123.36, got %.2f", order.LimitPrice)
 	}
 }
 

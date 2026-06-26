@@ -97,26 +97,29 @@ func TestCreateOrderUsesCurrentKalshiOrderEndpointAndSchema(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want POST", r.Method)
 		}
-		if r.URL.Path != "/trade-api/v2/portfolio/orders" {
+		if r.URL.Path != "/trade-api/v2/portfolio/events/orders" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload["side"] != "no" || payload["action"] != "buy" {
-			t.Fatalf("unexpected side/action payload: %+v", payload)
+		if payload["side"] != "ask" {
+			t.Fatalf("unexpected side payload: %+v", payload)
 		}
-		if payload["no_price_dollars"] != "0.1700" {
-			t.Fatalf("no_price_dollars = %v, want 0.1700", payload["no_price_dollars"])
+		if payload["price"] != "0.8300" {
+			t.Fatalf("price = %v, want 0.8300", payload["price"])
 		}
-		if _, ok := payload["price"]; ok {
-			t.Fatalf("legacy price field should not be sent: %+v", payload)
+		if _, ok := payload["action"]; ok {
+			t.Fatalf("legacy action field should not be sent: %+v", payload)
 		}
-		if payload["count"] != float64(1) {
-			t.Fatalf("count = %v, want 1", payload["count"])
+		if _, ok := payload["no_price_dollars"]; ok {
+			t.Fatalf("legacy no_price_dollars field should not be sent: %+v", payload)
 		}
-		_, _ = w.Write([]byte(`{"order":{"order_id":"ord-1","client_order_id":"client-123","ticker":"KXTEST-26DEC31-YES","side":"no","action":"buy","status":"resting","fill_count_fp":"0","remaining_count_fp":"1"}}`))
+		if payload["count"] != "1.00" {
+			t.Fatalf("count = %v, want 1.00", payload["count"])
+		}
+		_, _ = w.Write([]byte(`{"order_id":"ord-1","client_order_id":"client-123","fill_count":"0.00","remaining_count":"1.00"}`))
 	}))
 	defer server.Close()
 

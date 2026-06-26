@@ -235,8 +235,46 @@ func TestSnapshotPrefersBrokerAccountSummary(t *testing.T) {
 	if snapshot.Cash != 1001986 {
 		t.Fatalf("expected broker cash 1001986, got %.2f", snapshot.Cash)
 	}
-	if snapshot.DailyPnL != 15 {
-		t.Fatalf("expected broker daily pnl 15, got %.2f", snapshot.DailyPnL)
+	if snapshot.DailyPnLAvailable {
+		t.Fatal("expected broker daily P&L to remain unavailable without IBKR PnL subscription data")
+	}
+	if snapshot.DailyPnL != 0 {
+		t.Fatalf("expected no invented broker daily P&L, got %.2f", snapshot.DailyPnL)
+	}
+}
+
+func TestSnapshotUsesExplicitBrokerDailyPnL(t *testing.T) {
+	bk := NewBook(stubRuntimeSource{
+		summary: &ibkr.AccountSummary{
+			NetLiquidation: 1001986,
+			Cash:           1001986,
+			DailyPnL:       -1116,
+			DailyPnLReady:  true,
+			PnLSource:      "ibkr_req_pnl",
+		},
+	}, 1000)
+
+	bk.reconcile(context.Background())
+	snapshot := bk.Snapshot()
+	status := bk.BrokerSyncStatus()
+
+	if !snapshot.DailyPnLAvailable {
+		t.Fatal("expected broker daily P&L to be available from explicit PnL data")
+	}
+	if snapshot.DailyPnL != -1116 {
+		t.Fatalf("expected broker daily P&L -1116, got %.2f", snapshot.DailyPnL)
+	}
+	if snapshot.DailyPnLSource != "ibkr_req_pnl" {
+		t.Fatalf("expected broker daily P&L source ibkr_req_pnl, got %q", snapshot.DailyPnLSource)
+	}
+	if !status.DailyPnLAvailable {
+		t.Fatal("expected broker sync status to mark daily P&L available")
+	}
+	if status.DailyPnL != -1116 {
+		t.Fatalf("expected broker sync daily P&L -1116, got %.2f", status.DailyPnL)
+	}
+	if status.LastPnLSynced.IsZero() {
+		t.Fatal("expected LastPnLSynced to be recorded")
 	}
 }
 

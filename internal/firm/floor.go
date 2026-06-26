@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,42 +46,62 @@ type Floor struct {
 	taskQueue     chan deskTask
 	overflowQueue chan deskTask
 
-	workerCount      int
-	taskTimeout      time.Duration
-	enqueueTimeout   time.Duration
-	slowTaskWarnAt   time.Duration
-	overflowCapacity int
-	signalsProcessed atomic.Int64
-	tradesExecuted   atomic.Int64
-	tasksEnqueued    atomic.Int64
-	tasksStarted     atomic.Int64
-	tasksCompleted   atomic.Int64
-	tasksDropped     atomic.Int64
-	tasksOverflowed  atomic.Int64
-	tasksRecovered   atomic.Int64
-	tasksSkipped     atomic.Int64
-	activeTasks      atomic.Int64
+	predictionTaskQueue     chan deskTask
+	predictionOverflowQueue chan deskTask
+
+	workerCount                int
+	predictionWorkerCount      int
+	taskTimeout                time.Duration
+	enqueueTimeout             time.Duration
+	slowTaskWarnAt             time.Duration
+	overflowCapacity           int
+	predictionOverflowCapacity int
+	signalsProcessed           atomic.Int64
+	tradesExecuted             atomic.Int64
+	tasksEnqueued              atomic.Int64
+	tasksStarted               atomic.Int64
+	tasksCompleted             atomic.Int64
+	tasksDropped               atomic.Int64
+	tasksOverflowed            atomic.Int64
+	tasksRecovered             atomic.Int64
+	tasksSkipped               atomic.Int64
+	activeTasks                atomic.Int64
 }
 
 func NewFloor(wireMgr *wire.Manager, sessionID string) *Floor {
 	workerCount := readEnvInt("FLOOR_WORKERS", 4)
 	queueSize := readEnvInt("FLOOR_TASK_QUEUE_SIZE", 2048)
 	overflowSize := readEnvInt("FLOOR_TASK_OVERFLOW_SIZE", queueSize*2)
-	taskTimeout := readEnvDuration("FLOOR_TASK_TIMEOUT", 90*time.Second)
+	predictionWorkerCount := readEnvInt("FLOOR_PREDICTION_WORKERS", maxInt(1, workerCount/2))
+	predictionQueueSize := readEnvInt("FLOOR_PREDICTION_TASK_QUEUE_SIZE", queueSize)
+	predictionOverflowSize := readEnvInt("FLOOR_PREDICTION_TASK_OVERFLOW_SIZE", predictionQueueSize*2)
+	taskTimeout := readEnvDuration("FLOOR_TASK_TIMEOUT", defaultFloorTaskTimeout())
+	minTaskTimeout := minimumFloorTaskTimeout()
+	if taskTimeout < minTaskTimeout {
+		slog.Warn("floor task timeout below desk stage budget; clamping",
+			"configured", taskTimeout,
+			"minimum", minTaskTimeout,
+		)
+		taskTimeout = minTaskTimeout
+	}
 	enqueueTimeout := readEnvDuration("FLOOR_TASK_ENQUEUE_TIMEOUT", 250*time.Millisecond)
 	slowTaskWarnAt := readEnvDuration("FLOOR_SLOW_TASK_WARN_AT", 45*time.Second)
 
 	return &Floor{
-		log:              slog.Default().With("component", "floor", "session_id", sessionID),
-		wire:             wireMgr,
-		sessionID:        sessionID,
-		taskQueue:        make(chan deskTask, queueSize),
-		overflowQueue:    make(chan deskTask, overflowSize),
-		workerCount:      workerCount,
-		taskTimeout:      taskTimeout,
-		enqueueTimeout:   enqueueTimeout,
-		slowTaskWarnAt:   slowTaskWarnAt,
-		overflowCapacity: overflowSize,
+		log:                        slog.Default().With("component", "floor", "session_id", sessionID),
+		wire:                       wireMgr,
+		sessionID:                  sessionID,
+		taskQueue:                  make(chan deskTask, queueSize),
+		overflowQueue:              make(chan deskTask, overflowSize),
+		predictionTaskQueue:        make(chan deskTask, predictionQueueSize),
+		predictionOverflowQueue:    make(chan deskTask, predictionOverflowSize),
+		workerCount:                workerCount,
+		predictionWorkerCount:      predictionWorkerCount,
+		taskTimeout:                taskTimeout,
+		enqueueTimeout:             enqueueTimeout,
+		slowTaskWarnAt:             slowTaskWarnAt,
+		overflowCapacity:           overflowSize,
+		predictionOverflowCapacity: predictionOverflowSize,
 	}
 }
 
@@ -162,32 +183,46 @@ func (f *Floor) startWorkers(ctx context.Context) {
 		for i := 0; i < f.workerCount; i++ {
 			workerID := i + 1
 			observe.SafeGo(f.log, "desk worker panic", func() {
-				f.workerLoop(ctx, workerID)
-			}, "worker_id", workerID)
+				f.workerLoop(ctx, "default", workerID, f.taskQueue)
+			}, "pool", "default", "worker_id", workerID)
+		}
+		for i := 0; i < f.predictionWorkerCount; i++ {
+			workerID := i + 1
+			observe.SafeGo(f.log, "prediction desk worker panic", func() {
+				f.workerLoop(ctx, "prediction_market", workerID, f.predictionTaskQueue)
+			}, "pool", "prediction_market", "worker_id", workerID)
 		}
 		if cap(f.overflowQueue) > 0 {
 			observe.SafeGo(f.log, "overflow queue worker panic", func() {
-				f.overflowLoop(ctx)
+				f.overflowLoop(ctx, "default", f.overflowQueue, f.taskQueue)
 			}, "worker", "overflow")
+		}
+		if cap(f.predictionOverflowQueue) > 0 {
+			observe.SafeGo(f.log, "prediction overflow queue worker panic", func() {
+				f.overflowLoop(ctx, "prediction_market", f.predictionOverflowQueue, f.predictionTaskQueue)
+			}, "worker", "prediction_overflow")
 		}
 		f.log.Info("desk workers started",
 			"workers", f.workerCount,
+			"prediction_workers", f.predictionWorkerCount,
 			"task_timeout", f.taskTimeout,
 			"queue_capacity", cap(f.taskQueue),
+			"prediction_queue_capacity", cap(f.predictionTaskQueue),
 			"overflow_capacity", cap(f.overflowQueue),
+			"prediction_overflow_capacity", cap(f.predictionOverflowQueue),
 			"enqueue_timeout", f.enqueueTimeout,
 			"slow_task_warn_at", f.slowTaskWarnAt,
 		)
 	})
 }
 
-func (f *Floor) workerLoop(ctx context.Context, workerID int) {
-	log := f.log.With("worker_id", workerID)
+func (f *Floor) workerLoop(ctx context.Context, pool string, workerID int, tasks <-chan deskTask) {
+	log := f.log.With("pool", pool, "worker_id", workerID)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case task := <-f.taskQueue:
+		case task := <-tasks:
 			started := time.Now()
 			f.tasksStarted.Add(1)
 			f.activeTasks.Add(1)
@@ -235,18 +270,20 @@ func (f *Floor) workerLoop(ctx context.Context, workerID int) {
 	}
 }
 
-func (f *Floor) overflowLoop(ctx context.Context) {
+func (f *Floor) overflowLoop(ctx context.Context, pool string, overflow <-chan deskTask, target chan<- deskTask) {
+	log := f.log.With("pool", pool, "worker", "overflow")
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case task := <-f.overflowQueue:
+		case task := <-overflow:
 			select {
 			case <-ctx.Done():
 				return
-			case f.taskQueue <- task:
+			case target <- task:
 				f.tasksEnqueued.Add(1)
 				f.tasksRecovered.Add(1)
+				log.Debug("overflow task recovered", "desk_id", task.desk.ID, "signal_id", task.sig.ID)
 			}
 		}
 	}
@@ -307,8 +344,12 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 			"overflowed", overflowed,
 			"skipped", skipped,
 			"dropped", dropped,
-			"queue_depth", len(f.taskQueue),
-			"overflow_depth", len(f.overflowQueue),
+			"queue_depth", f.totalTaskQueueDepth(),
+			"default_queue_depth", len(f.taskQueue),
+			"prediction_queue_depth", len(f.predictionTaskQueue),
+			"overflow_depth", f.totalOverflowDepth(),
+			"default_overflow_depth", len(f.overflowQueue),
+			"prediction_overflow_depth", len(f.predictionOverflowQueue),
 			"candidate_domains", relevantDomains,
 		)
 		return
@@ -322,8 +363,12 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 			"routed", routed,
 			"overflowed", overflowed,
 			"skipped", skipped,
-			"queue_depth", len(f.taskQueue),
-			"overflow_depth", len(f.overflowQueue),
+			"queue_depth", f.totalTaskQueueDepth(),
+			"default_queue_depth", len(f.taskQueue),
+			"prediction_queue_depth", len(f.predictionTaskQueue),
+			"overflow_depth", f.totalOverflowDepth(),
+			"default_overflow_depth", len(f.overflowQueue),
+			"prediction_overflow_depth", len(f.predictionOverflowQueue),
 			"candidate_domains", relevantDomains,
 		)
 		return
@@ -335,13 +380,18 @@ func (f *Floor) fanOut(ctx context.Context, sig signal.Signal) {
 		"category", sig.Category,
 		"routed", routed,
 		"skipped", skipped,
-		"queue_depth", len(f.taskQueue),
-		"overflow_depth", len(f.overflowQueue),
+		"queue_depth", f.totalTaskQueueDepth(),
+		"default_queue_depth", len(f.taskQueue),
+		"prediction_queue_depth", len(f.predictionTaskQueue),
+		"overflow_depth", f.totalOverflowDepth(),
+		"default_overflow_depth", len(f.overflowQueue),
+		"prediction_overflow_depth", len(f.predictionOverflowQueue),
 		"candidate_domains", relevantDomains,
 	)
 }
 
 func (f *Floor) enqueueTask(ctx context.Context, task deskTask) enqueueOutcome {
+	queue, overflow := f.taskQueues(task)
 	timer := time.NewTimer(f.enqueueTimeout)
 	defer timer.Stop()
 
@@ -349,16 +399,16 @@ func (f *Floor) enqueueTask(ctx context.Context, task deskTask) enqueueOutcome {
 	case <-ctx.Done():
 		f.tasksDropped.Add(1)
 		return enqueueOutcomeDropped
-	case f.taskQueue <- task:
+	case queue <- task:
 		f.tasksEnqueued.Add(1)
 		return enqueueOutcomeQueued
 	case <-timer.C:
-		if cap(f.overflowQueue) > 0 {
+		if cap(overflow) > 0 {
 			select {
 			case <-ctx.Done():
 				f.tasksDropped.Add(1)
 				return enqueueOutcomeDropped
-			case f.overflowQueue <- task:
+			case overflow <- task:
 				f.tasksOverflowed.Add(1)
 				return enqueueOutcomeOverflowed
 			default:
@@ -367,6 +417,13 @@ func (f *Floor) enqueueTask(ctx context.Context, task deskTask) enqueueOutcome {
 		f.tasksDropped.Add(1)
 		return enqueueOutcomeDropped
 	}
+}
+
+func (f *Floor) taskQueues(task deskTask) (chan deskTask, chan deskTask) {
+	if f != nil && task.desk != nil && strings.EqualFold(strings.TrimSpace(task.desk.Domain), "prediction_market") {
+		return f.predictionTaskQueue, f.predictionOverflowQueue
+	}
+	return f.taskQueue, f.overflowQueue
 }
 
 func (f *Floor) persistSignal(ctx context.Context, sig signal.Signal) {
@@ -408,24 +465,48 @@ func (f *Floor) persistSignal(ctx context.Context, sig signal.Signal) {
 func (f *Floor) Stats() FloorStats {
 	wireStats := f.wire.Stats()
 	return FloorStats{
-		Desks:            len(f.desks),
-		Workers:          f.workerCount,
-		SignalsProcessed: f.signalsProcessed.Load(),
-		TradesExecuted:   f.tradesExecuted.Load(),
-		TasksEnqueued:    f.tasksEnqueued.Load(),
-		TasksStarted:     f.tasksStarted.Load(),
-		TasksCompleted:   f.tasksCompleted.Load(),
-		TasksDropped:     f.tasksDropped.Load(),
-		TasksOverflowed:  f.tasksOverflowed.Load(),
-		TasksRecovered:   f.tasksRecovered.Load(),
-		TasksSkipped:     f.tasksSkipped.Load(),
-		ActiveTasks:      f.activeTasks.Load(),
-		TaskQueueDepth:   len(f.taskQueue),
-		TaskQueueCap:     cap(f.taskQueue),
-		OverflowDepth:    len(f.overflowQueue),
-		OverflowCap:      cap(f.overflowQueue),
-		WireStats:        wireStats,
+		Desks:                    len(f.desks),
+		Workers:                  f.workerCount + f.predictionWorkerCount,
+		DefaultWorkers:           f.workerCount,
+		PredictionWorkers:        f.predictionWorkerCount,
+		SignalsProcessed:         f.signalsProcessed.Load(),
+		TradesExecuted:           f.tradesExecuted.Load(),
+		TasksEnqueued:            f.tasksEnqueued.Load(),
+		TasksStarted:             f.tasksStarted.Load(),
+		TasksCompleted:           f.tasksCompleted.Load(),
+		TasksDropped:             f.tasksDropped.Load(),
+		TasksOverflowed:          f.tasksOverflowed.Load(),
+		TasksRecovered:           f.tasksRecovered.Load(),
+		TasksSkipped:             f.tasksSkipped.Load(),
+		ActiveTasks:              f.activeTasks.Load(),
+		TaskQueueDepth:           f.totalTaskQueueDepth(),
+		TaskQueueCap:             cap(f.taskQueue) + cap(f.predictionTaskQueue),
+		DefaultTaskQueueDepth:    len(f.taskQueue),
+		DefaultTaskQueueCap:      cap(f.taskQueue),
+		PredictionTaskQueueDepth: len(f.predictionTaskQueue),
+		PredictionTaskQueueCap:   cap(f.predictionTaskQueue),
+		OverflowDepth:            f.totalOverflowDepth(),
+		OverflowCap:              cap(f.overflowQueue) + cap(f.predictionOverflowQueue),
+		DefaultOverflowDepth:     len(f.overflowQueue),
+		DefaultOverflowCap:       cap(f.overflowQueue),
+		PredictionOverflowDepth:  len(f.predictionOverflowQueue),
+		PredictionOverflowCap:    cap(f.predictionOverflowQueue),
+		WireStats:                wireStats,
 	}
+}
+
+func (f *Floor) totalTaskQueueDepth() int {
+	if f == nil {
+		return 0
+	}
+	return len(f.taskQueue) + len(f.predictionTaskQueue)
+}
+
+func (f *Floor) totalOverflowDepth() int {
+	if f == nil {
+		return 0
+	}
+	return len(f.overflowQueue) + len(f.predictionOverflowQueue)
 }
 
 func (f *Floor) RecordTrade() {
@@ -433,23 +514,53 @@ func (f *Floor) RecordTrade() {
 }
 
 type FloorStats struct {
-	Desks            int
-	Workers          int
-	SignalsProcessed int64
-	TradesExecuted   int64
-	TasksEnqueued    int64
-	TasksStarted     int64
-	TasksCompleted   int64
-	TasksDropped     int64
-	TasksOverflowed  int64
-	TasksRecovered   int64
-	TasksSkipped     int64
-	ActiveTasks      int64
-	TaskQueueDepth   int
-	TaskQueueCap     int
-	OverflowDepth    int
-	OverflowCap      int
-	WireStats        wire.WireStats
+	Desks                    int
+	Workers                  int
+	DefaultWorkers           int
+	PredictionWorkers        int
+	SignalsProcessed         int64
+	TradesExecuted           int64
+	TasksEnqueued            int64
+	TasksStarted             int64
+	TasksCompleted           int64
+	TasksDropped             int64
+	TasksOverflowed          int64
+	TasksRecovered           int64
+	TasksSkipped             int64
+	ActiveTasks              int64
+	TaskQueueDepth           int
+	TaskQueueCap             int
+	DefaultTaskQueueDepth    int
+	DefaultTaskQueueCap      int
+	PredictionTaskQueueDepth int
+	PredictionTaskQueueCap   int
+	OverflowDepth            int
+	OverflowCap              int
+	DefaultOverflowDepth     int
+	DefaultOverflowCap       int
+	PredictionOverflowDepth  int
+	PredictionOverflowCap    int
+	WireStats                wire.WireStats
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func defaultFloorTaskTimeout() time.Duration {
+	return minimumFloorTaskTimeout()
+}
+
+func minimumFloorTaskTimeout() time.Duration {
+	return deskScannerTimeout +
+		deskResearchTimeout +
+		deskProsecutionTimout +
+		deskCouncilTimeout +
+		deskExecutionTimeout +
+		15*time.Second
 }
 
 func readEnvInt(name string, fallback int) int {

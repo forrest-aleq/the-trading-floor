@@ -24,6 +24,7 @@ cd "$REPO_ROOT"
 go build -o "$PROGRAM_PATH" ./cmd/floor
 cp "$REPO_ROOT"/store/migrations/*.sql "$RUNTIME_MIGRATIONS_DIR"/
 cp "$REPO_ROOT"/deploy/packs/trading-v1/*.json "$RUNTIME_PACKS_DIR"/
+cp "$REPO_ROOT"/deploy/packs/trading-v1/*.txt "$RUNTIME_PACKS_DIR"/
 
 if [[ -f "$REPO_ROOT/.env" ]]; then
   cp "$REPO_ROOT/.env" "$RUNTIME_ENV"

@@ -2,6 +2,7 @@ package book
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -20,16 +21,46 @@ type Monitor struct {
 	onLifecycle  func(position *model.Position, alert model.LifecycleAlert)
 	interval     time.Duration
 	now          func() time.Time
+
+	staleMarkMaxAge        time.Duration
+	emergencyLossPct       float64
+	optionEmergencyLossPct float64
+
+	// markHealth tracks per-position mark state so alerts fire on the
+	// transition into ill health, not on every 10-second cycle. Accessed
+	// only from RunOnce, which is single-threaded.
+	markHealth map[string]string
 }
 
 func NewMonitor(book *Book, thesisLookup ThesisLookup, onClose func(*model.Position, float64, string)) *Monitor {
 	return &Monitor{
-		log:          slog.Default().With("component", "monitor"),
-		book:         book,
-		thesisLookup: thesisLookup,
-		onClose:      onClose,
-		interval:     10 * time.Second,
-		now:          time.Now,
+		log:                    slog.Default().With("component", "monitor"),
+		book:                   book,
+		thesisLookup:           thesisLookup,
+		onClose:                onClose,
+		interval:               10 * time.Second,
+		now:                    time.Now,
+		staleMarkMaxAge:        2 * time.Minute,
+		emergencyLossPct:       0.05,
+		optionEmergencyLossPct: 0.50,
+		markHealth:             make(map[string]string),
+	}
+}
+
+// SetStaleMarkMaxAge sets how old a position's mark may be before the monitor
+// raises a stale_mark alert. Zero disables the check.
+func (m *Monitor) SetStaleMarkMaxAge(age time.Duration) {
+	if age >= 0 {
+		m.staleMarkMaxAge = age
+	}
+}
+
+func (m *Monitor) SetEmergencyLossThresholds(stockPct, optionPct float64) {
+	if stockPct > 0 {
+		m.emergencyLossPct = stockPct
+	}
+	if optionPct > 0 {
+		m.optionEmergencyLossPct = optionPct
 	}
 }
 
@@ -61,9 +92,31 @@ func (m *Monitor) Run(ctx context.Context) {
 func (m *Monitor) RunOnce() {
 	positions := m.book.GetOpenPositions()
 	now := m.currentTime()
+	seen := make(map[string]bool, len(positions))
 	for _, pos := range positions {
+		seen[pos.ID] = true
 		if pos.CurrentPrice <= 0 {
+			if m.markHealthBecame(pos.ID, "missing_mark") {
+				m.raiseMarkAlert(pos, "missing_mark", "position has no usable mark; exit checks suspended")
+			}
 			continue
+		}
+		stale := false
+		if m.staleMarkMaxAge > 0 {
+			markedAt := pos.MarkedAt
+			if markedAt.IsZero() {
+				markedAt = pos.OpenedAt
+			}
+			if age := now.Sub(markedAt); age > m.staleMarkMaxAge {
+				stale = true
+				if m.markHealthBecame(pos.ID, "stale_mark") {
+					m.raiseMarkAlert(pos, "stale_mark",
+						fmt.Sprintf("mark is %s old; exit checks are running on a stale price", age.Round(time.Second)))
+				}
+			}
+		}
+		if !stale {
+			m.markHealthRecovered(pos)
 		}
 
 		thesis, _ := m.lookup(pos.ThesisID)
@@ -99,9 +152,32 @@ func (m *Monitor) RunOnce() {
 			}
 		}
 
-		if emergencyLossHit(pos) {
+		if m.emergencyLossHit(pos) {
 			m.requestClose(pos, pos.CurrentPrice, "emergency_loss_backstop")
 		}
+	}
+
+	for id := range m.markHealth {
+		if !seen[id] {
+			delete(m.markHealth, id)
+		}
+	}
+}
+
+func (m *Monitor) markHealthBecame(positionID, state string) bool {
+	prev := m.markHealth[positionID]
+	m.markHealth[positionID] = state
+	return prev != state
+}
+
+func (m *Monitor) markHealthRecovered(pos *model.Position) {
+	if prev, ok := m.markHealth[pos.ID]; ok && prev != "" {
+		m.log.Info("position mark recovered",
+			"symbol", pos.DisplaySymbol(),
+			"desk", pos.DeskID,
+			"previous_state", prev,
+		)
+		delete(m.markHealth, pos.ID)
 	}
 }
 
@@ -154,14 +230,50 @@ func shouldCloseOnTarget(pos *model.Position, thesis *model.Thesis) bool {
 	return pos.CurrentPrice <= thesis.TargetPrice
 }
 
-func emergencyLossHit(pos *model.Position) bool {
+func (m *Monitor) raiseMarkAlert(pos *model.Position, kind, message string) {
+	m.log.Warn("position mark health alert",
+		"symbol", pos.DisplaySymbol(),
+		"desk", pos.DeskID,
+		"kind", kind,
+		"message", message,
+	)
+	if m.onLifecycle != nil {
+		m.onLifecycle(pos, model.LifecycleAlert{
+			Kind:       kind,
+			Severity:   "critical",
+			Message:    message,
+			Instrument: pos.DisplaySymbol(),
+		})
+	}
+}
+
+func (m *Monitor) emergencyLossHit(pos *model.Position) bool {
+	if pos.EntryPrice <= 0 {
+		return false
+	}
 	lossPct := 0.0
 	if pos.Direction == model.Long {
 		lossPct = (pos.EntryPrice - pos.CurrentPrice) / pos.EntryPrice
 	} else {
 		lossPct = (pos.CurrentPrice - pos.EntryPrice) / pos.EntryPrice
 	}
-	return lossPct > 0.05
+	threshold := m.emergencyLossPct
+	if positionHoldsOptions(pos) {
+		// Option premiums routinely swing more than the equity backstop
+		// tolerates; a 5% premium move is noise, not an emergency.
+		threshold = m.optionEmergencyLossPct
+	}
+	return threshold > 0 && lossPct > threshold
+}
+
+func positionHoldsOptions(pos *model.Position) bool {
+	for _, inst := range pos.ExecutionInstruments() {
+		switch strings.ToUpper(inst.SecType) {
+		case "OPT", "FOP":
+			return true
+		}
+	}
+	return false
 }
 
 func detectLifecycleAlerts(pos *model.Position, now time.Time) []model.LifecycleAlert {

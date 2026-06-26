@@ -54,6 +54,19 @@ var (
 
 // Challenge attempts to kill a thesis
 func (p *Prosecutor) Challenge(ctx context.Context, thesis *model.Thesis) *model.Prosecution {
+	if fastPathMode := kalshiDeterministicFastPathMode(); fastPathMode != "" && thesis != nil && thesis.PrimaryInstrument().IsKalshi() {
+		p.log.Info("deterministic Kalshi prosecution passed",
+			"thesis_id", thesis.ID,
+			"symbol", thesis.DisplaySymbol(),
+			"fast_path_mode", fastPathMode,
+		)
+		return &model.Prosecution{
+			Verdict:    "survived",
+			BearArgs:   deterministicKalshiProsecutionBearArgs(fastPathMode),
+			Confidence: 0,
+		}
+	}
+
 	prompt := p.buildProsecutionPrompt(thesis)
 
 	resp, err := p.askProsecutionWithFallbackMode(ctx, prompt)
@@ -132,6 +145,18 @@ func (p *Prosecutor) Challenge(ctx context.Context, thesis *model.Thesis) *model
 	)
 
 	return prosecution
+}
+
+func deterministicKalshiProsecutionBearArgs(mode string) []string {
+	if mode == "live" {
+		return []string{
+			"Live deterministic Kalshi prosecution path: neutral pass while OpenRouter capacity is constrained.",
+			"Execution remains limited by Kalshi live safety caps, duplicate cooldown, and exchange validation.",
+		}
+	}
+	return []string{
+		"Paper-discovery deterministic prosecution; live deployment still requires model-backed prosecution.",
+	}
 }
 
 func (p *Prosecutor) buildProsecutionPrompt(thesis *model.Thesis) string {

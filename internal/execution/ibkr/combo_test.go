@@ -59,3 +59,37 @@ func TestBuildOrderSupportsVerticalSpreadLimitOrder(t *testing.T) {
 		t.Fatalf("expected DAY tif, got %q", ibOrder.TIF)
 	}
 }
+
+func TestBuildOrderSetsAdaptiveUrgentParams(t *testing.T) {
+	order := model.Order{
+		ID: "adaptive-1",
+		Instrument: model.Instrument{
+			Symbol:   "AAPL",
+			SecType:  "STK",
+			Exchange: "SMART",
+			Currency: "USD",
+		},
+		Direction:   model.Long,
+		Quantity:    1,
+		OrderType:   model.OrderAdaptive,
+		LimitPrice:  276.38,
+		TimeInForce: "DAY",
+	}
+
+	ibOrder, err := buildOrder(order)
+	if err != nil {
+		t.Fatalf("buildOrder returned error: %v", err)
+	}
+	if !ibOrder.Transmit {
+		t.Fatal("expected order transmit to be explicitly true")
+	}
+	if ibOrder.OrderType != string(model.OrderLimit) {
+		t.Fatalf("expected adaptive order to be sent as capped LMT, got %q", ibOrder.OrderType)
+	}
+	if ibOrder.AlgoStrategy != "Adaptive" {
+		t.Fatalf("expected Adaptive algo strategy, got %q", ibOrder.AlgoStrategy)
+	}
+	if len(ibOrder.AlgoParams) != 1 || ibOrder.AlgoParams[0].Tag != "adaptivePriority" || ibOrder.AlgoParams[0].Value != "Urgent" {
+		t.Fatalf("expected urgent adaptive params, got %+v", ibOrder.AlgoParams)
+	}
+}

@@ -231,12 +231,7 @@ func (f *SocialFeed) pollReddit(ctx context.Context, out chan<- signal.Signal, s
 		}
 		newCount++
 
-		// Extract ticker mentions ($AAPL style)
-		tickers := extractTickers(post.Title + " " + post.Selftext)
-		entities := make([]signal.Entity, 0, len(tickers))
-		for _, t := range tickers {
-			entities = append(entities, signal.Entity{Name: t, Type: "instrument"})
-		}
+		entities := entitiesFromText(post.Title + " " + post.Selftext)
 
 		urgency := socialUrgency(post.Score, post.NumComments)
 
@@ -247,7 +242,7 @@ func (f *SocialFeed) pollReddit(ctx context.Context, out chan<- signal.Signal, s
 			"score":        post.Score,
 			"num_comments": post.NumComments,
 			"upvote_ratio": post.UpvoteRatio,
-			"tickers":      tickers,
+			"tickers":      entitySymbols(entities),
 		})
 
 		timestamp := time.Now()

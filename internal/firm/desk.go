@@ -100,14 +100,16 @@ type DeskConfig struct {
 }
 
 var (
-	deskScannerTimeout    = readDeskDurationEnv("DESK_SCANNER_TIMEOUT", 20*time.Second)
-	deskResearchTimeout   = readDeskDurationEnv("DESK_RESEARCH_TIMEOUT", 45*time.Second)
-	deskProsecutionTimout = readDeskDurationEnv("DESK_PROSECUTION_TIMEOUT", 35*time.Second)
-	deskCouncilTimeout    = readDeskDurationEnv("DESK_COUNCIL_TIMEOUT", 45*time.Second)
-	deskExecutionTimeout  = readDeskDurationEnv("DESK_EXECUTION_TIMEOUT", 30*time.Second)
-	deskSlowStageWarnAt   = readDeskDurationEnv("DESK_SLOW_STAGE_WARN_AT", 10*time.Second)
-	deskColleagueWeight   = readDeskFloatEnv("DESK_COLLEAGUE_TRUST_WEIGHT", 0.18)
-	deskSubTeamsEnabled   = readDeskBoolEnv("DESK_ENABLE_SUBTEAMS", true)
+	deskScannerTimeout                = readDeskDurationEnv("DESK_SCANNER_TIMEOUT", 20*time.Second)
+	deskResearchTimeout               = readDeskDurationEnv("DESK_RESEARCH_TIMEOUT", 45*time.Second)
+	deskProsecutionTimout             = readDeskDurationEnv("DESK_PROSECUTION_TIMEOUT", 35*time.Second)
+	deskCouncilTimeout                = readDeskDurationEnv("DESK_COUNCIL_TIMEOUT", 45*time.Second)
+	deskExecutionTimeout              = readDeskDurationEnv("DESK_EXECUTION_TIMEOUT", 30*time.Second)
+	deskSlowStageWarnAt               = readDeskDurationEnv("DESK_SLOW_STAGE_WARN_AT", 10*time.Second)
+	deskColleagueWeight               = readDeskFloatEnv("DESK_COLLEAGUE_TRUST_WEIGHT", 0.18)
+	deskSubTeamsEnabled               = readDeskBoolEnv("DESK_ENABLE_SUBTEAMS", true)
+	kalshiLiveAllowRestrictedAutonomy = readDeskBoolEnv("KALSHI_LIVE_ALLOW_RESTRICTED_AUTONOMY", false)
+	ibkrPaperAllowRestrictedAutonomy  = readDeskBoolEnv("IBKR_PAPER_ALLOW_RESTRICTED_AUTONOMY", false)
 )
 
 func ReloadRuntimeConfig() {
@@ -119,6 +121,8 @@ func ReloadRuntimeConfig() {
 	deskSlowStageWarnAt = readDeskDurationEnv("DESK_SLOW_STAGE_WARN_AT", 10*time.Second)
 	deskColleagueWeight = readDeskFloatEnv("DESK_COLLEAGUE_TRUST_WEIGHT", 0.18)
 	deskSubTeamsEnabled = readDeskBoolEnv("DESK_ENABLE_SUBTEAMS", true)
+	kalshiLiveAllowRestrictedAutonomy = readDeskBoolEnv("KALSHI_LIVE_ALLOW_RESTRICTED_AUTONOMY", false)
+	ibkrPaperAllowRestrictedAutonomy = readDeskBoolEnv("IBKR_PAPER_ALLOW_RESTRICTED_AUTONOMY", false)
 }
 
 func NewDesk(cfg DeskConfig) *Desk {
@@ -184,6 +188,11 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		d.log.Warn("graph signal seen failed", "signal_id", sig.ID, "error", err)
 	}
 	sig = d.augmentSignalInstitutionalState(sig)
+	ctx = llm.WithUsageContext(ctx, llm.UsageContext{
+		DeskID:   d.ID,
+		Domain:   d.Domain,
+		SignalID: sig.ID,
+	})
 
 	span := trace.FromContext(ctx).WithStage("scanner")
 	ctx = trace.IntoContext(ctx, span)
@@ -191,6 +200,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	stageStart := time.Now()
 	scanCtx, scanCancel := context.WithTimeout(ctx, deskScannerTimeout)
+	scanCtx = llm.WithUsageContext(scanCtx, llm.UsageContext{Stage: "scanner"})
 	scanEval := d.scanner.EvaluateDetailed(scanCtx, sig, d.Domain)
 	scanCancel()
 	opp, ok := scanEval.Opportunity, scanEval.Accepted
@@ -237,6 +247,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	stageStart = time.Now()
 	researchCtx, researchCancel := context.WithTimeout(ctx, deskResearchTimeout)
+	researchCtx = llm.WithUsageContext(researchCtx, llm.UsageContext{Stage: "research"})
 	thesis, err := d.research.Investigate(researchCtx, opp, sig, d.ID)
 	researchCancel()
 	d.logStage("research", stageStart,
@@ -263,7 +274,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 		}
 	}
 
-	d.maybeSpawnSubTeam(ctx, thesis)
+	d.maybeSpawnSubTeam(llm.WithUsageContext(ctx, llm.UsageContext{Stage: "subteam", ThesisID: thesis.ID}), thesis)
 
 	// Engram lookup: boost conviction if we have a cached winning play for this pattern
 	if d.ABGroup == "A" && d.engrams != nil {
@@ -323,6 +334,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 	stageStart = time.Now()
 	prosecutionCtx, prosecutionCancel := context.WithTimeout(ctx, deskProsecutionTimout)
+	prosecutionCtx = llm.WithUsageContext(prosecutionCtx, llm.UsageContext{Stage: "prosecutor", ThesisID: thesis.ID})
 	prosecution := d.prosecutor.Challenge(prosecutionCtx, thesis)
 	prosecutionCancel()
 	d.logStage("prosecutor", stageStart,
@@ -361,6 +373,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 
 		stageStart = time.Now()
 		councilCtx, councilCancel := context.WithTimeout(ctx, deskCouncilTimeout)
+		councilCtx = llm.WithUsageContext(councilCtx, llm.UsageContext{Stage: "council", ThesisID: thesis.ID})
 		verdict := d.council.Debate(councilCtx, thesis)
 		councilCancel()
 		d.logStage("council", stageStart,
@@ -431,21 +444,23 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	})
 	if err != nil {
 		d.log.Warn("compile order failed", "thesis_id", thesis.ID, "error", err)
+		d.recordAntiPortfolio(ctx, thesis, "compile_order_failed")
 		return
 	}
 
 	snapshot := d.book.Snapshot()
 	portfolioState := risk.PortfolioState{
-		NAV:           snapshot.NAV,
-		Cash:          snapshot.Cash,
-		GrossExposure: snapshot.GrossExposure,
-		NetExposure:   snapshot.NetExposure,
-		DailyPnL:      snapshot.DailyPnL,
-		MonthlyPnL:    snapshot.MonthlyPnL,
-		OpenPositions: snapshot.OpenPositions,
-		DeskPositions: snapshot.DeskPositions,
-		DeskDailyPnL:  snapshot.DeskPnL,
-		DeskCapital:   snapshot.DeskCapital,
+		NAV:                snapshot.NAV,
+		Cash:               snapshot.Cash,
+		GrossExposure:      snapshot.GrossExposure,
+		NetExposure:        snapshot.NetExposure,
+		DailyPnL:           snapshot.DailyPnL,
+		CurrentDrawdownPct: snapshot.CurrentDrawdownPct,
+		MaxDrawdownPct:     snapshot.MaxDrawdown * 100,
+		OpenPositions:      snapshot.OpenPositions,
+		DeskPositions:      snapshot.DeskPositions,
+		DeskDailyPnL:       snapshot.DeskPnL,
+		DeskCapital:        snapshot.DeskCapital,
 	}
 
 	decision := d.riskGate.Check(*order, thesis, portfolioState)
@@ -466,7 +481,7 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	ctx = trace.IntoContext(ctx, span)
 
 	var pos *model.Position
-	if autonomy.Mode == model.Restricted {
+	if autonomy.Mode == model.Restricted && !d.allowRestrictedBrokerPaperExecution() {
 		pos = d.book.OpenShadowPosition(thesis)
 		thesis.Status = model.ThesisNursery
 		d.log.Info("thesis routed to shadow book",
@@ -477,6 +492,13 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 			"autonomy_mode", thesis.AutonomyMode,
 		)
 	} else {
+		if autonomy.Mode == model.Restricted && d.allowRestrictedBrokerPaperExecution() {
+			d.log.Warn("ibkr paper restricted autonomy override enabled",
+				"thesis_id", thesis.ID,
+				"symbol", thesis.DisplaySymbol(),
+				"autonomy_mode", thesis.AutonomyMode,
+			)
+		}
 		span = span.WithStage("execution")
 		ctx = trace.IntoContext(ctx, span)
 
@@ -547,6 +569,13 @@ func (d *Desk) Process(ctx context.Context, sig signal.Signal) {
 	)
 }
 
+func (d *Desk) allowRestrictedBrokerPaperExecution() bool {
+	return d != nil &&
+		ibkrPaperAllowRestrictedAutonomy &&
+		d.execution != nil &&
+		d.execution.IsPaper()
+}
+
 func (d *Desk) MarkPendingExecution(ctx context.Context, thesis *model.Thesis, pending *execution.PendingFillError) {
 	if d == nil || thesis == nil || pending == nil {
 		return
@@ -589,7 +618,7 @@ func (d *Desk) handleKalshiThesis(ctx context.Context, thesis *model.Thesis, aut
 		return
 	}
 
-	if autonomy.Mode == model.Restricted && !d.kalshi.IsDryRun() {
+	if autonomy.Mode == model.Restricted && !d.kalshi.IsDryRun() && !kalshiLiveAllowRestrictedAutonomy {
 		thesis.Status = model.ThesisNursery
 		d.rememberThesis(thesis)
 		d.persistThesis(ctx, thesis)
@@ -599,6 +628,13 @@ func (d *Desk) handleKalshiThesis(ctx context.Context, thesis *model.Thesis, aut
 			"autonomy_mode", thesis.AutonomyMode,
 		)
 		return
+	}
+	if autonomy.Mode == model.Restricted && !d.kalshi.IsDryRun() && kalshiLiveAllowRestrictedAutonomy {
+		d.log.Warn("kalshi restricted autonomy override enabled",
+			"thesis_id", thesis.ID,
+			"symbol", thesis.DisplaySymbol(),
+			"autonomy_mode", thesis.AutonomyMode,
+		)
 	}
 
 	executionCtx, cancel := context.WithTimeout(ctx, deskExecutionTimeout)
@@ -1193,6 +1229,10 @@ func (d *Desk) normalizePositionSize(thesis *model.Thesis) {
 	}
 	referencePrice := thesisReferencePrice(thesis)
 	if referencePrice <= 0 {
+		switch strings.ToUpper(strings.TrimSpace(thesis.PrimaryInstrument().SecType)) {
+		case "", "STK", "ETF", "OPT", "FUT", "FOP":
+			thesis.PositionSize = math.Max(1, math.Floor(thesis.PositionSize))
+		}
 		return
 	}
 
@@ -1208,7 +1248,9 @@ func (d *Desk) normalizePositionSize(thesis *model.Thesis) {
 	}
 
 	quantity := targetNotional / unitNotional
-	switch thesis.PrimaryInstrument().SecType {
+	switch strings.ToUpper(strings.TrimSpace(thesis.PrimaryInstrument().SecType)) {
+	case "", "STK", "ETF":
+		quantity = math.Max(1, math.Floor(quantity))
 	case "OPT", "FUT", "FOP":
 		quantity = math.Max(1, math.Floor(quantity))
 	}

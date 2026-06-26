@@ -189,13 +189,15 @@ func (e *Executor) SubmitThesis(ctx context.Context, thesis *model.Thesis) (*Exe
 			_ = e.record(result, err)
 			return result, err
 		}
-		if err := e.safety.reserve(mapped, result.RecordedAt); err != nil {
+		reservation, err := e.safety.reserve(mapped, result.RecordedAt)
+		if err != nil {
 			result.Error = err.Error()
 			_ = e.record(result, err)
 			return result, err
 		}
 		resp, err := e.client.CreateOrder(ctx, mapped.Request)
 		if err != nil {
+			e.safety.release(reservation)
 			result.Error = err.Error()
 			_ = e.record(result, err)
 			return result, err
@@ -286,7 +288,7 @@ func (m *Mapper) MapThesisWithMaxOrderCents(thesis *model.Thesis, maxOrderCents 
 	}
 
 	if maxOrderCents <= 0 {
-		maxOrderCents = parseDollarEnvCents("KALSHI_MAX_ORDER_DOLLARS", defaultMaxOrderDols)
+		return MappedOrder{}, fmt.Errorf("risk cap %s too small for one contract at %.4f", FormatCents(maxOrderCents), orderPrice)
 	}
 	count := kalshiOrderCount(maxOrderCents, side, orderPrice)
 	if count <= 0 {
@@ -299,7 +301,7 @@ func (m *Mapper) MapThesisWithMaxOrderCents(thesis *model.Thesis, maxOrderCents 
 		Side:                    side,
 		Action:                  "buy",
 		Count:                   count,
-		TimeInForce:             "fill_or_kill",
+		TimeInForce:             kalshiOrderTimeInForce(),
 		SelfTradePreventionType: "taker_at_cross",
 		CancelOrderOnPause:      true,
 	}
@@ -351,17 +353,35 @@ func (e *Executor) effectiveMaxOrderCents(ctx context.Context) int64 {
 	}
 
 	dynamic := int64(math.Ceil(float64(equityCents) * riskPct / 100.0))
+	availableCap := availableBalanceOrderCapCents(balance.Balance)
 	minOrderCents := e.mapper.cfg.MinOrderCents
-	if minOrderCents > 0 && dynamic < minOrderCents && equityCents >= minOrderCents {
+	if minOrderCents > 0 && dynamic < minOrderCents && equityCents >= minOrderCents && availableCap >= minOrderCents {
 		dynamic = minOrderCents
 	}
 	if maxOrderCents > 0 && dynamic > maxOrderCents {
 		dynamic = maxOrderCents
 	}
+	if availableCap >= 0 && dynamic > availableCap {
+		dynamic = availableCap
+	}
 	if dynamic <= 0 {
-		return maxOrderCents
+		return 0
 	}
 	return dynamic
+}
+
+func availableBalanceOrderCapCents(balanceCents int64) int64 {
+	if balanceCents <= 0 {
+		return 0
+	}
+	fraction := readFloatEnv("KALSHI_AVAILABLE_BALANCE_FRACTION", 1.0)
+	if fraction < 0 {
+		return 0
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+	return int64(math.Floor(float64(balanceCents) * fraction))
 }
 
 func kalshiEntryPrice(thesis *model.Thesis) float64 {
@@ -407,6 +427,19 @@ func kalshiOrderCount(maxOrderCents int64, side string, orderPrice float64) int6
 		return 0
 	}
 	return maxOrderCents / riskCents
+}
+
+func kalshiOrderTimeInForce() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KALSHI_ORDER_TIME_IN_FORCE"))) {
+	case "good_till_canceled", "gtc":
+		return "good_till_canceled"
+	case "immediate_or_cancel", "ioc":
+		return "immediate_or_cancel"
+	case "", "fill_or_kill", "fok":
+		return "fill_or_kill"
+	default:
+		return "fill_or_kill"
+	}
 }
 
 func kalshiClientOrderID(thesisID string) string {

@@ -42,6 +42,14 @@ func main() {
 		cmdMarkets(ctx, client, os.Args[2:])
 	case "orderbook":
 		cmdOrderbook(ctx, client, os.Args[2:])
+	case "orders":
+		cmdOrders(ctx, client, os.Args[2:])
+	case "cancel-order":
+		cmdCancelOrder(ctx, client, os.Args[2:])
+	case "positions":
+		cmdPositions(ctx, client, os.Args[2:])
+	case "resting-value":
+		cmdRestingValue(ctx, client, os.Args[2:])
 	case "validate-order":
 		cmdOrder(ctx, client, os.Args[2:], false)
 	case "order":
@@ -60,6 +68,10 @@ func usage() {
 	fmt.Println("  balance                   Show authenticated account balance")
 	fmt.Println("  markets [--status open]   List markets")
 	fmt.Println("  orderbook --ticker T      Show market orderbook")
+	fmt.Println("  orders [--status resting] Show authenticated account orders")
+	fmt.Println("  cancel-order --order-id O Cancel one authenticated account order")
+	fmt.Println("  positions                 Show authenticated account positions")
+	fmt.Println("  resting-value             Show total live dollars reserved by resting orders")
 	fmt.Println("  validate-order ...        Validate risk and payload only")
 	fmt.Println("  order ...                 Place a real order with explicit confirmation")
 	fmt.Println()
@@ -135,6 +147,135 @@ func cmdOrderbook(ctx context.Context, client *kalshi.Client, args []string) {
 	}
 	out, _ := json.MarshalIndent(book, "", "  ")
 	fmt.Println(string(out))
+}
+
+func cmdOrders(ctx context.Context, client *kalshi.Client, args []string) {
+	fs := flag.NewFlagSet("orders", flag.ExitOnError)
+	status := fs.String("status", "resting", "order status filter")
+	ticker := fs.String("ticker", "", "market ticker filter")
+	eventTicker := fs.String("event-ticker", "", "event ticker filter")
+	limit := fs.Int("limit", 50, "order result limit")
+	cursor := fs.String("cursor", "", "pagination cursor")
+	jsonOut := fs.Bool("json", false, "print raw JSON")
+	_ = fs.Parse(args)
+
+	resp, err := client.ListOrders(ctx, kalshi.OrderQuery{
+		Ticker:      *ticker,
+		EventTicker: *eventTicker,
+		Status:      *status,
+		Limit:       *limit,
+		Cursor:      *cursor,
+	})
+	if err != nil {
+		exitf("orders failed: %v", err)
+	}
+	if *jsonOut {
+		out, _ := json.MarshalIndent(resp, "", "  ")
+		fmt.Println(string(out))
+		return
+	}
+	for _, order := range resp.Orders {
+		fmt.Printf("%s\t%s\t%s\t%s/%s\tstatus=%s\tyes=%s\tno=%s\tfilled=%s\tremaining=%s\tcreated=%s\n",
+			emptyDash(order.OrderID),
+			emptyDash(order.ClientOrderID),
+			emptyDash(order.Ticker),
+			emptyDash(order.Action),
+			emptyDash(order.Side),
+			emptyDash(order.Status),
+			emptyDash(order.YesPriceDollars),
+			emptyDash(order.NoPriceDollars),
+			emptyDash(firstNonEmpty(order.FillCountFP, order.LegacyFillCount)),
+			emptyDash(firstNonEmpty(order.RemainingCountFP, order.LegacyRemainingCount)),
+			emptyDash(order.CreatedTime),
+		)
+	}
+	if len(resp.Orders) == 0 {
+		fmt.Println("No matching Kalshi orders.")
+	}
+	if resp.Cursor != "" {
+		fmt.Printf("cursor=%s\n", resp.Cursor)
+	}
+}
+
+func cmdCancelOrder(ctx context.Context, client *kalshi.Client, args []string) {
+	fs := flag.NewFlagSet("cancel-order", flag.ExitOnError)
+	orderID := fs.String("order-id", "", "Kalshi order id")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*orderID) == "" {
+		exitf("--order-id is required")
+	}
+
+	resp, err := client.CancelOrder(ctx, *orderID)
+	if err != nil {
+		exitf("cancel-order failed: %v", err)
+	}
+	out, _ := json.MarshalIndent(resp, "", "  ")
+	fmt.Println(string(out))
+}
+
+func cmdPositions(ctx context.Context, client *kalshi.Client, args []string) {
+	fs := flag.NewFlagSet("positions", flag.ExitOnError)
+	ticker := fs.String("ticker", "", "market ticker filter")
+	eventTicker := fs.String("event-ticker", "", "event ticker filter")
+	countFilter := fs.String("count-filter", "", "optional Kalshi count_filter")
+	limit := fs.Int("limit", 50, "position result limit")
+	cursor := fs.String("cursor", "", "pagination cursor")
+	jsonOut := fs.Bool("json", false, "print raw JSON")
+	_ = fs.Parse(args)
+
+	resp, err := client.GetPositions(ctx, kalshi.PositionQuery{
+		Ticker:      *ticker,
+		EventTicker: *eventTicker,
+		CountFilter: *countFilter,
+		Limit:       *limit,
+		Cursor:      *cursor,
+	})
+	if err != nil {
+		exitf("positions failed: %v", err)
+	}
+	if *jsonOut {
+		out, _ := json.MarshalIndent(resp, "", "  ")
+		fmt.Println(string(out))
+		return
+	}
+	for _, pos := range resp.MarketPositions {
+		fmt.Printf("%s\tposition=%s\texposure=%s\tresting_orders=%d\trealized_pnl=%s\tfees=%s\n",
+			emptyDash(pos.Ticker),
+			emptyDash(pos.PositionFP),
+			emptyDash(pos.MarketExposureDollars),
+			pos.RestingOrdersCount,
+			emptyDash(pos.RealizedPNLDollars),
+			emptyDash(pos.FeesPaidDollars),
+		)
+	}
+	if len(resp.MarketPositions) == 0 {
+		fmt.Println("No matching Kalshi market positions.")
+	}
+	if len(resp.EventPositions) > 0 {
+		fmt.Println("event_positions:")
+		for _, pos := range resp.EventPositions {
+			fmt.Printf("%s\texposure=%s\trealized_pnl=%s\tfees=%s\n",
+				emptyDash(pos.EventTicker),
+				emptyDash(pos.EventExposureDollars),
+				emptyDash(pos.RealizedPNLDollars),
+				emptyDash(pos.FeesPaidDollars),
+			)
+		}
+	}
+	if resp.Cursor != "" {
+		fmt.Printf("cursor=%s\n", resp.Cursor)
+	}
+}
+
+func cmdRestingValue(ctx context.Context, client *kalshi.Client, args []string) {
+	fs := flag.NewFlagSet("resting-value", flag.ExitOnError)
+	_ = fs.Parse(args)
+
+	value, err := client.GetTotalRestingOrderValue(ctx)
+	if err != nil {
+		exitf("resting-value failed: %v", err)
+	}
+	fmt.Printf("total_resting_order_value=%s\n", kalshi.FormatCents(value.TotalRestingOrderValue))
 }
 
 func cmdOrder(ctx context.Context, client *kalshi.Client, args []string, place bool) {
@@ -217,6 +358,15 @@ func emptyDash(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func exitf(format string, args ...any) {

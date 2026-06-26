@@ -124,13 +124,14 @@ func NewDesk(llmRouter *llm.Router, minConviction float64) *Desk {
 	if responseMode == "" {
 		responseMode = "json"
 	}
+	selectedModel := researchSelectedModel()
 	return &Desk{
 		log:            slog.Default().With("component", "research"),
 		llm:            llmRouter,
 		minConviction:  minConviction,
-		selectedModel:  researchSelectedModel(),
-		responseMode:   detectStructuredResponseMode(responseMode, researchSelectedModel()),
-		retryModel:     structuredRetryModel("RESEARCH_RETRY_MODEL", structuredCompilerModel("RESEARCH_COMPILER_MODEL"), researchSelectedModel()),
+		selectedModel:  selectedModel,
+		responseMode:   detectStructuredResponseMode(responseMode, selectedModel),
+		retryModel:     structuredRetryModel("RESEARCH_RETRY_MODEL", structuredCompilerModel("RESEARCH_COMPILER_MODEL"), selectedModel),
 		compilerModel:  structuredCompilerModel("RESEARCH_COMPILER_MODEL"),
 		systemPrompt:   policy.researchPrompt,
 		fastPrompt:     policy.researchFastPrompt,
@@ -177,12 +178,24 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 	if d.marketContext != nil {
 		marketCtx = d.marketContext.BuildOpportunityContext(opp, sig)
 	}
+	if investigation, ok := d.deterministicKalshiInvestigation(ctx, opp, sig, deskID, marketCtx); ok {
+		return investigation, nil
+	}
 	prompt := d.buildResearchPrompt(opp, sig, marketCtx, false)
 	compactPrompt := d.buildResearchPrompt(opp, sig, marketCtx, true)
 
 	resp, err := d.askResearchWithFallbackMode(ctx, prompt, compactPrompt)
 	if err != nil {
-		return Investigation{Reason: "llm_error"}, fmt.Errorf("research LLM error: %w", err)
+		if recovered, ok := recoverGroundedResearchJSON("", opp, sig, marketCtx, scannerGroundedResearchRecoveryEnabled()); ok {
+			d.log.Info("research recovered grounded thesis after LLM error",
+				"desk", deskID,
+				"symbol", firstOpportunitySymbol(opp),
+				"error", err,
+			)
+			resp = recovered
+		} else {
+			return Investigation{Reason: "llm_error"}, fmt.Errorf("research LLM error: %w", err)
+		}
 	}
 
 	cleaned, err := extractStructuredJSON(resp)
@@ -209,7 +222,7 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 		}
 	}
 	if err != nil {
-		if recovered, ok := recoverGroundedResearchJSON(resp, opp, sig, marketCtx); ok {
+		if recovered, ok := recoverGroundedResearchJSON(resp, opp, sig, marketCtx, scannerGroundedResearchRecoveryEnabled()); ok {
 			cleaned = recovered
 			err = nil
 			d.log.Info("research recovered grounded thesis from thought trace",
@@ -321,6 +334,91 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 	return investigation, nil
 }
 
+func (d *Desk) deterministicKalshiInvestigation(ctx context.Context, opp *model.Opportunity, sig signal.Signal, deskID string, marketCtx *model.MarketContext) (Investigation, bool) {
+	fastPathMode := kalshiDeterministicFastPathMode()
+	if fastPathMode == "" || !strings.EqualFold(strings.TrimSpace(sig.Source), "kalshi-market") {
+		return Investigation{}, false
+	}
+	inst, ok := kalshiOpportunityInstrument(opp)
+	if !ok {
+		return Investigation{}, false
+	}
+
+	entryPrice := kalshiSignalEntryPrice(sig, opp.Direction)
+	if entryPrice <= 0 {
+		entryPrice = fallbackResearchEntryPrice(marketCtx)
+	}
+
+	conviction := normalizeResearchConviction(0, opp)
+	for _, floor := range []float64{
+		d.minConviction,
+		readStructuredFloatEnv("KALSHI_MIN_CONVICTION", d.minConviction),
+	} {
+		if normalized := normalizeConviction(floor); conviction < normalized {
+			conviction = normalized
+		}
+	}
+	if conviction > 0.68 {
+		conviction = 0.68
+	}
+
+	thesis := &model.Thesis{
+		ID:            uuid.New().String(),
+		OpportunityID: opp.ID,
+		DeskID:        deskID,
+		Strategy:      "event",
+		Structure:     "single",
+		Instrument:    inst,
+		Direction:     opp.Direction,
+		Conviction:    conviction,
+		Health:        0.8,
+		Evidence: []model.Evidence{{
+			Source:   "signal",
+			Content:  deterministicKalshiEvidence(sig),
+			Weight:   1.0,
+			SignalID: firstSignalID(opp),
+		}},
+		CounterArgs:   deterministicKalshiCounterArgs(fastPathMode),
+		EntryPrice:    entryPrice,
+		TargetPrice:   0,
+		StopLoss:      0,
+		PositionSize:  normalizePositionSizePct(0),
+		TimeHorizon:   time.Duration(recoverTimeHorizonHours(opp)) * time.Hour,
+		KillRules:     []model.KillRule{},
+		Status:        model.ThesisEmbryo,
+		EvidenceMeta:  opp.EvidenceMeta.Clone(),
+		MarketContext: marketCtx,
+		SurpriseAssessment: &model.SurpriseAssessment{
+			Summary: deterministicKalshiSummary(fastPathMode),
+		},
+		CreatedAt: time.Now(),
+	}
+	d.HydrateThesisPricing(ctx, thesis)
+	if thesis.EntryPrice <= 0 {
+		thesis.EntryPrice = entryPrice
+	}
+
+	d.log.Info("deterministic Kalshi thesis formed",
+		"id", thesis.ID,
+		"desk", deskID,
+		"symbol", thesis.DisplaySymbol(),
+		"direction", thesis.Direction,
+		"conviction", thesis.Conviction,
+		"entry_price", thesis.EntryPrice,
+		"fast_path_mode", fastPathMode,
+	)
+
+	investigation := Investigation{
+		Thesis:     thesis,
+		Accepted:   thesis.Conviction >= d.minConviction,
+		Conviction: thesis.Conviction,
+	}
+	if !investigation.Accepted {
+		investigation.Reason = "conviction_below_threshold"
+	}
+	return investigation, true
+}
+
 func (d *Desk) HydrateThesisPricing(ctx context.Context, thesis *model.Thesis) {
 	if thesis == nil || d.marketContext == nil {
 		return
@@ -344,8 +442,8 @@ func (d *Desk) HydrateThesisPricing(ctx context.Context, thesis *model.Thesis) {
 func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactPrompt string) (string, error) {
 	if d.responseMode == structuredResponseModeThought {
 		thoughtPrompt := addTerminalJSONContract(d.thoughtPrefix + "\n\n" + d.systemPrompt)
-		primaryCtx, cancel := withStructuredBudgetFraction(ctx, researchThoughtTimeout, 0.5)
-		resp, err := d.llm.AskWithLimit(primaryCtx, llm.TierAnalysis, thoughtPrompt, prompt, researchMaxTokens, 0.2)
+		primaryCtx, cancel := withStructuredBudgetFraction(ctx, researchThoughtTimeout, 1.0)
+		resp, err := d.askPrimaryResearch(primaryCtx, thoughtPrompt, prompt, false)
 		cancel()
 		if err != nil {
 			if !hasStructuredBudget(ctx, minStructuredAttemptBudget) {
@@ -387,8 +485,8 @@ func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactP
 		return resp, nil
 	}
 
-	primaryCtx, cancel := withStructuredBudgetFraction(ctx, researchRequestTimeout, 0.5)
-	resp, err := d.llm.AskJSONWithLimit(primaryCtx, llm.TierAnalysis, d.systemPrompt, prompt, researchMaxTokens, 0.2)
+	primaryCtx, cancel := withStructuredBudgetFraction(ctx, researchRequestTimeout, 1.0)
+	resp, err := d.askPrimaryResearch(primaryCtx, d.systemPrompt, prompt, true)
 	cancel()
 	if err != nil {
 		if !hasStructuredBudget(ctx, minStructuredAttemptBudget) {
@@ -427,6 +525,25 @@ func (d *Desk) askResearchWithFallbackMode(ctx context.Context, prompt, compactP
 		return retryResp, nil
 	}
 	return resp, nil
+}
+
+func (d *Desk) askPrimaryResearch(ctx context.Context, system, prompt string, jsonMode bool) (string, error) {
+	req := llm.Request{
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: system},
+			{Role: llm.RoleUser, Content: prompt},
+		},
+		Model:       d.selectedModel,
+		Tier:        llm.TierAnalysis,
+		MaxTokens:   researchMaxTokens,
+		Temperature: 0.2,
+		JSONMode:    jsonMode,
+	}
+	resp, err := d.llm.Complete(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
 }
 
 func (d *Desk) retryStructuredJSON(ctx context.Context, prompt string) (string, error) {
@@ -998,6 +1115,116 @@ func kalshiOpportunityInstrument(opp *model.Opportunity) (model.Instrument, bool
 	return model.Instrument{}, false
 }
 
+type researchKalshiSnapshot struct {
+	Title            string `json:"title"`
+	Subtitle         string `json:"subtitle"`
+	YesBidDollars    string `json:"yes_bid_dollars"`
+	YesAskDollars    string `json:"yes_ask_dollars"`
+	NoBidDollars     string `json:"no_bid_dollars"`
+	NoAskDollars     string `json:"no_ask_dollars"`
+	LastPriceDollars string `json:"last_price_dollars"`
+}
+
+func paperDiscoveryKalshiFastPathEnabled() bool {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("RESEARCH_KALSHI_DETERMINISTIC")), "false") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("FLOOR_RUNTIME_MODE")), "paper_discovery") &&
+		!strings.EqualFold(strings.TrimSpace(os.Getenv("KALSHI_LIVE_TRADING")), "true")
+}
+
+func kalshiDeterministicFastPathMode() string {
+	if paperDiscoveryKalshiFastPathEnabled() {
+		return "paper_discovery"
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("RESEARCH_KALSHI_DETERMINISTIC")), "false") {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("KALSHI_LIVE_TRADING")), "true") {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("KALSHI_LIVE_DETERMINISTIC_FAST_PATH")), "true") {
+		return ""
+	}
+	return "live"
+}
+
+func deterministicKalshiCounterArgs(mode string) []string {
+	switch mode {
+	case "live":
+		return []string{
+			"Live deterministic Kalshi fast path: bypasses model-backed research while OpenRouter capacity is constrained.",
+			"Order remains subject to Kalshi live safety caps, duplicate cooldown, and execution validation.",
+		}
+	default:
+		return []string{
+			"Paper-discovery deterministic research path; requires later model-backed validation before live capital.",
+		}
+	}
+}
+
+func deterministicKalshiSummary(mode string) string {
+	if mode == "live" {
+		return "Live Kalshi deterministic fast path using scanner-selected ticker, side, and live market quote."
+	}
+	return "Paper-discovery Kalshi fast path using scanner-selected ticker, side, and live market quote."
+}
+
+func kalshiSignalEntryPrice(sig signal.Signal, direction model.TradeDirection) float64 {
+	var snap researchKalshiSnapshot
+	if len(sig.Raw) == 0 || json.Unmarshal(sig.Raw, &snap) != nil {
+		return 0
+	}
+	switch direction {
+	case model.Short:
+		return firstKalshiProbability(snap.NoAskDollars, snap.NoBidDollars)
+	default:
+		return firstKalshiProbability(snap.YesAskDollars, snap.LastPriceDollars, snap.YesBidDollars)
+	}
+}
+
+func firstKalshiProbability(values ...string) float64 {
+	for _, value := range values {
+		parsed, ok := parseKalshiProbability(value)
+		if ok {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func parseKalshiProbability(raw string) (float64, bool) {
+	raw = strings.TrimSpace(strings.TrimPrefix(raw, "$"))
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, false
+	}
+	return normalizeKalshiProbability(value)
+}
+
+func deterministicKalshiEvidence(sig signal.Signal) string {
+	var snap researchKalshiSnapshot
+	if len(sig.Raw) > 0 && json.Unmarshal(sig.Raw, &snap) == nil {
+		if title := strings.TrimSpace(firstNonEmptyString(snap.Title, snap.Subtitle)); title != "" {
+			return institutional.TruncateForPrompt(title, 220)
+		}
+	}
+	if text := strings.TrimSpace(firstNonEmptyString(sig.Translated, sig.OriginalText)); text != "" {
+		return institutional.TruncateForPrompt(text, 220)
+	}
+	return "Kalshi market discovery signal selected by deterministic scanner."
+}
+
+func firstSignalID(opp *model.Opportunity) string {
+	if opp == nil || len(opp.SignalIDs) == 0 {
+		return ""
+	}
+	return opp.SignalIDs[0]
+}
+
 func normalizeKalshiPayloadPrice(payload map[string]any, key string, marketCtx *model.MarketContext) {
 	if payload == nil || strings.TrimSpace(key) == "" {
 		return
@@ -1120,9 +1347,15 @@ func normalizePositionSizePct(value float64) float64 {
 	return value
 }
 
-func recoverGroundedResearchJSON(raw string, opp *model.Opportunity, sig signal.Signal, marketCtx *model.MarketContext) (string, bool) {
+func recoverGroundedResearchJSON(raw string, opp *model.Opportunity, sig signal.Signal, marketCtx *model.MarketContext, allowScannerOnly bool) (string, bool) {
 	raw = strings.TrimSpace(raw)
-	if raw == "" || !looksLikeGroundableThoughtTrace(raw) || opp == nil || len(opp.Instruments) == 0 {
+	if opp == nil || len(opp.Instruments) == 0 {
+		return "", false
+	}
+	if raw == "" && !allowScannerOnly {
+		return "", false
+	}
+	if raw != "" && !allowScannerOnly && !looksLikeGroundableThoughtTrace(raw) {
 		return "", false
 	}
 
@@ -1180,6 +1413,23 @@ func recoverGroundedResearchJSON(raw string, opp *model.Opportunity, sig signal.
 		return "", false
 	}
 	return string(cleaned), true
+}
+
+func scannerGroundedResearchRecoveryEnabled() bool {
+	if raw := strings.TrimSpace(os.Getenv("RESEARCH_GROUNDED_RECOVERY")); raw != "" {
+		return parseBoolLoose(raw)
+	}
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("FLOOR_RUNTIME_MODE")))
+	return mode == "paper" || mode == "discovery"
+}
+
+func parseBoolLoose(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y", "on", "enabled":
+		return true
+	default:
+		return false
+	}
 }
 
 func looksLikeGroundableThoughtTrace(raw string) bool {

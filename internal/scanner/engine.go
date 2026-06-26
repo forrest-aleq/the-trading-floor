@@ -102,6 +102,21 @@ func ReloadRuntimeConfig() {
 	kalshiMarketDiscoveryBuyCheaperSide = readBoolEnv("KALSHI_MARKET_DISCOVERY_BUY_CHEAPER_SIDE", true)
 }
 
+func ApplyPaperDiscoveryDefaults() {
+	if strings.TrimSpace(os.Getenv("KALSHI_MARKET_DISCOVERY_ENABLED")) == "" {
+		kalshiMarketDiscoveryEnabled = true
+	}
+	if strings.TrimSpace(os.Getenv("KALSHI_MARKET_DISCOVERY_SCORE")) == "" {
+		kalshiMarketDiscoveryScore = 52
+	}
+	if strings.TrimSpace(os.Getenv("KALSHI_MARKET_DISCOVERY_MAX_SPREAD")) == "" {
+		kalshiMarketDiscoveryMaxSpread = 0.20
+	}
+	if strings.TrimSpace(os.Getenv("KALSHI_MARKET_DISCOVERY_BUY_CHEAPER_SIDE")) == "" {
+		kalshiMarketDiscoveryBuyCheaperSide = true
+	}
+}
+
 func NewEngine(llmRouter *llm.Router, minScore float64) *Engine {
 	if minScore == 0 {
 		minScore = 70 // Default: aggressive filter — most signals should be rejected
@@ -924,6 +939,9 @@ func normalizeScannerInstrument(inst struct {
 	isPredictionMarket := strings.EqualFold(strings.TrimSpace(domain), "prediction_market")
 	isExplicitKalshi := strings.EqualFold(secType, model.SecTypeKalshi)
 	isKalshiTicker := model.IsKalshiTicker(symbol)
+	if isKalshiTicker && !isPredictionMarket {
+		return model.Instrument{}, false
+	}
 	if isExplicitKalshi && !isKalshiTicker {
 		return model.Instrument{}, false
 	}
@@ -934,7 +952,7 @@ func normalizeScannerInstrument(inst struct {
 		Currency: currency,
 		Exchange: "SMART",
 	}
-	if isKalshiTicker && (isPredictionMarket || isExplicitKalshi) {
+	if isKalshiTicker && isPredictionMarket {
 		return model.NormalizeKalshiInstrument(instrument), true
 	}
 	if isExplicitKalshi {

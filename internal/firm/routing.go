@@ -51,6 +51,10 @@ func RelevantDomainsForSignal(sig signal.Signal) []string {
 		set.add(targets...)
 		return set.values()
 	}
+	if isRawKalshiMarketInventory(sig) {
+		set.add("prediction_market")
+		return set.values()
+	}
 
 	set.add(sourceDomainsForSignal(sig)...)
 
@@ -62,6 +66,10 @@ func RelevantDomainsForSignal(sig signal.Signal) []string {
 	}
 
 	return set.values()
+}
+
+func isRawKalshiMarketInventory(sig signal.Signal) bool {
+	return strings.EqualFold(strings.TrimSpace(sig.Source), "kalshi-market")
 }
 
 func sourceDomainsForSignal(sig signal.Signal) []string {

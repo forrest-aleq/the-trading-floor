@@ -52,6 +52,7 @@ func TestConnect(t *testing.T) {
 
 func TestGetAccountSummary(t *testing.T) {
 	requireGateway(t)
+	t.Setenv("IBKR_ACCOUNT_SUMMARY_SYNC", "true")
 
 	client := newClient(98)
 	if err := client.Connect(context.Background()); err != nil {

@@ -125,11 +125,7 @@ func (f *NewsFeed) fetchAndSend(ctx context.Context, src RSSSource, out chan<- s
 		}
 
 		text := strings.TrimSpace(item.Title + " " + item.Description)
-		tickers := extractTickers(text)
-		entities := make([]signal.Entity, 0, len(tickers))
-		for _, ticker := range tickers {
-			entities = append(entities, signal.Entity{Name: ticker, Type: "instrument"})
-		}
+		entities := entitiesFromText(text)
 
 		content, _ := json.Marshal(map[string]string{
 			"title":       item.Title,

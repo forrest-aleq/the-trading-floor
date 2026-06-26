@@ -2,8 +2,10 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -22,6 +24,8 @@ const (
 	OrderStateFailed          OrderState = "failed"
 	OrderStateDryRun          OrderState = "dry_run"
 )
+
+const defaultUnacknowledgedBrokerOrderTTL = 45 * time.Second
 
 type ExecutionQuality struct {
 	DecisionPrice              float64 `json:"decision_price,omitempty"`
@@ -123,6 +127,11 @@ func (m *Manager) RefreshWorkingOrders(ctx context.Context) []OrderUpdate {
 				"broker_order_id", tracked.snapshot.BrokerOrderID,
 				"error", err,
 			)
+			if errors.Is(err, ibkr.ErrOrderNotFound) {
+				if update, changed := m.markWorkingOrderFailed(tracked.order, tracked.snapshot, err); changed {
+					updates = append(updates, update)
+				}
+			}
 			continue
 		}
 		if lookup == nil {
@@ -135,6 +144,46 @@ func (m *Manager) RefreshWorkingOrders(ctx context.Context) []OrderUpdate {
 		}
 	}
 	return updates
+}
+
+func (m *Manager) markWorkingOrderFailed(order model.Order, snapshot OrderSnapshot, cause error) (OrderUpdate, bool) {
+	if order.ID == "" {
+		order.ID = snapshot.OrderID
+	}
+	if order.ID == "" {
+		return OrderUpdate{}, false
+	}
+	now := time.Now().UTC()
+
+	m.mu.Lock()
+	tracked, ok := m.tracked[order.ID]
+	if !ok {
+		m.mu.Unlock()
+		return OrderUpdate{}, false
+	}
+
+	prev := tracked.snapshot
+	next := prev
+	next.State = OrderStateFailed
+	next.BrokerStatus = "not_found"
+	next.UpdatedAt = now
+	if cause != nil {
+		next.LastError = cause.Error()
+	}
+	next.ExecutionQuality = buildExecutionQuality(tracked.order, next, now)
+	tracked.snapshot = next
+
+	changed := orderSnapshotChanged(prev, next, tracked.fill, nil)
+	if !changed {
+		m.mu.Unlock()
+		return OrderUpdate{}, false
+	}
+
+	update := OrderUpdate{Snapshot: next}
+	record := persistedOrderFromTracked(tracked)
+	m.mu.Unlock()
+	m.persistTrackedOrder(record)
+	return update, true
 }
 
 func (m *Manager) CancelWorkingOrder(ctx context.Context, orderID string) error {
@@ -211,6 +260,14 @@ func (m *Manager) applyOrderLookup(order model.Order, lookup ibkr.OrderLookup) (
 		next.State = OrderStatePartiallyFilled
 		fill = synthesizeProgressFill(order, lookup)
 		tracked.fill = cloneFill(fill)
+	case isUnacknowledgedBrokerStatus(lookup.Status):
+		if unacknowledgedBrokerStatusExpired(prev, now) {
+			next.State = OrderStateFailed
+			next.LastError = fmt.Sprintf("order not acknowledged by broker within %s; last status=%s", unacknowledgedBrokerOrderTTL(), lookup.Status)
+		} else {
+			next.State = OrderStateWorking
+			next.LastError = fmt.Sprintf("order not yet acknowledged by broker; last status=%s", lookup.Status)
+		}
 	case lookup.Active:
 		next.State = OrderStateWorking
 	case lookup.Done:
@@ -248,18 +305,19 @@ func (m *Manager) recordPendingOrder(order model.Order, pending *ibkr.PendingOrd
 	m.tracked[order.ID] = &trackedOrder{
 		order: order,
 		snapshot: OrderSnapshot{
-			OrderID:       order.ID,
-			ThesisID:      order.ThesisID,
-			DeskID:        order.DeskID,
-			DisplaySymbol: order.DisplaySymbol(),
-			BrokerOrderID: pending.OrderID,
-			State:         OrderStateWorking,
-			BrokerStatus:  pending.Status,
-			Quantity:      order.Quantity,
-			SubmittedAt:   now,
-			UpdatedAt:     now,
-			LastError:     pending.Error(),
-			Paper:         m.ibkr.IsPaper(),
+			OrderID:           order.ID,
+			ThesisID:          order.ThesisID,
+			DeskID:            order.DeskID,
+			DisplaySymbol:     order.DisplaySymbol(),
+			BrokerOrderID:     pending.OrderID,
+			State:             OrderStateWorking,
+			BrokerStatus:      pending.Status,
+			Quantity:          order.Quantity,
+			RemainingQuantity: order.Quantity,
+			SubmittedAt:       now,
+			UpdatedAt:         now,
+			LastError:         pending.Error(),
+			Paper:             m.ibkr.IsPaper(),
 			ExecutionQuality: buildExecutionQuality(order, OrderSnapshot{
 				Quantity:          order.Quantity,
 				FilledQuantity:    0,
@@ -366,6 +424,41 @@ func terminalStateFromBrokerStatus(status string) OrderState {
 	default:
 		return OrderStateFailed
 	}
+}
+
+func isUnacknowledgedBrokerStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "pendingsubmit", "apipending", "":
+		return true
+	default:
+		return false
+	}
+}
+
+func unacknowledgedBrokerStatusExpired(snapshot OrderSnapshot, asOf time.Time) bool {
+	if snapshot.SubmittedAt.IsZero() {
+		return false
+	}
+	if asOf.IsZero() {
+		asOf = time.Now().UTC()
+	}
+	age := asOf.Sub(snapshot.SubmittedAt.UTC())
+	if age < 0 {
+		age = 0
+	}
+	return age >= unacknowledgedBrokerOrderTTL()
+}
+
+func unacknowledgedBrokerOrderTTL() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("IBKR_UNACKNOWLEDGED_ORDER_TTL"))
+	if raw == "" {
+		return defaultUnacknowledgedBrokerOrderTTL
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed < 0 {
+		return defaultUnacknowledgedBrokerOrderTTL
+	}
+	return parsed
 }
 
 func buildExecutionQuality(order model.Order, snapshot OrderSnapshot, asOf time.Time) ExecutionQuality {

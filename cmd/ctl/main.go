@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/hnic/trading-floor/internal/execution/ibkr"
 	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/store"
 	"github.com/hnic/trading-floor/pkg/model"
@@ -28,6 +30,10 @@ func main() {
 	switch os.Args[1] {
 	case "market":
 		cmdMarket()
+	case "broker-orders":
+		cmdBrokerOrders()
+	case "broker-probe-order":
+		cmdBrokerProbeOrder()
 	case "positions":
 		ctx, db := mustOpenDB()
 		defer db.Close()
@@ -64,6 +70,8 @@ func usage() {
 	fmt.Println()
 	fmt.Println("commands:")
 	fmt.Println("  market [SYMBOL]  Show live market data from the configured market data provider")
+	fmt.Println("  broker-orders    Show open orders reported directly by IBKR/TWS")
+	fmt.Println("  broker-probe-order [SYMBOL] [--side buy|sell] [--qty N] [--type limit|market] [--limit P] [--keep-open]")
 	fmt.Println("  positions     List all open positions from the database")
 	fmt.Println("  theses        List recent theses with status")
 	fmt.Println("  anti          Show anti-portfolio (rejected theses)")
@@ -81,6 +89,255 @@ func mustOpenDB() (context.Context, *store.DB) {
 		os.Exit(1)
 	}
 	return ctx, db
+}
+
+func diagnosticIBKRConfig() ibkr.Config {
+	cfg := ibkr.DefaultConfig()
+	if raw := strings.TrimSpace(os.Getenv("IBKR_DIAGNOSTIC_CLIENT_ID")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			cfg.ClientID = parsed
+		}
+	} else {
+		cfg.ClientID += 50
+	}
+	if cfg.ClientIDTries < 10 {
+		cfg.ClientIDTries = 10
+	}
+	return cfg
+}
+
+func cmdBrokerOrders() {
+	allClients := true
+	for _, arg := range os.Args[2:] {
+		switch arg {
+		case "--own-client":
+			allClients = false
+		case "--all-clients":
+			allClients = true
+		default:
+			fmt.Fprintf(os.Stderr, "ctl broker-orders: unknown option %q\n", arg)
+			fmt.Fprintf(os.Stderr, "usage: ctl broker-orders [--all-clients|--own-client]\n")
+			os.Exit(1)
+		}
+	}
+
+	cfg := diagnosticIBKRConfig()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := ibkr.NewClient(cfg)
+	if err := client.Connect(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl broker-orders: connect failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	orders, err := client.OpenOrders(ctx, allClients)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ctl broker-orders: %v\n", err)
+		os.Exit(1)
+	}
+	if len(orders) == 0 {
+		fmt.Println("No open broker orders.")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if !writeTablef(w, "ORDER\tPERM\tCLIENT\tSYMBOL\tSEC\tEXCHANGE\tCUR\tACTION\tTYPE\tQTY\tLMT\tAUX\tTIF\tOUT_RTH\tTX\tSTATUS\tFILLED\tREMAIN\tWHY_HELD\n") {
+		return
+	}
+	for _, order := range orders {
+		symbol := order.Symbol
+		if order.LocalSymbol != "" && order.LocalSymbol != symbol {
+			symbol = symbol + "(" + order.LocalSymbol + ")"
+		}
+		exchange := order.Exchange
+		if order.PrimaryExchange != "" {
+			exchange = exchange + "/" + order.PrimaryExchange
+		}
+		whyHeld := order.WhyHeld
+		if whyHeld == "" {
+			whyHeld = "-"
+		}
+		if !writeTablef(w, "%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%.4g\t%.4f\t%.4f\t%s\t%t\t%t\t%s\t%.4g\t%.4g\t%s\n",
+			order.OrderID,
+			order.PermID,
+			order.ClientID,
+			symbol,
+			order.SecType,
+			exchange,
+			order.Currency,
+			order.Action,
+			order.OrderType,
+			order.TotalQuantity,
+			order.LmtPrice,
+			order.AuxPrice,
+			order.TIF,
+			order.OutsideRTH,
+			order.Transmit,
+			order.Status,
+			order.FilledQuantity,
+			order.RemainingQuantity,
+			whyHeld,
+		) {
+			return
+		}
+	}
+	flushTable(w)
+}
+
+func cmdBrokerProbeOrder() {
+	symbol := "AAPL"
+	side := model.Long
+	qty := 1.0
+	limit := 1.0
+	orderType := model.OrderLimit
+	keepOpen := false
+
+	args := os.Args[2:]
+	if len(args) > 0 && !strings.HasPrefix(args[0], "--") {
+		symbol = strings.ToUpper(strings.TrimSpace(args[0]))
+		args = args[1:]
+	}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--keep-open":
+			keepOpen = true
+		case "--market":
+			orderType = model.OrderMarket
+		case "--type":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "ctl broker-probe-order: --type requires limit or market")
+				os.Exit(1)
+			}
+			switch strings.ToLower(strings.TrimSpace(args[i])) {
+			case "limit", "lmt":
+				orderType = model.OrderLimit
+			case "market", "mkt":
+				orderType = model.OrderMarket
+			default:
+				fmt.Fprintf(os.Stderr, "ctl broker-probe-order: unsupported type %q\n", args[i])
+				os.Exit(1)
+			}
+		case "--side":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "ctl broker-probe-order: --side requires buy or sell")
+				os.Exit(1)
+			}
+			switch strings.ToLower(strings.TrimSpace(args[i])) {
+			case "buy", "long":
+				side = model.Long
+			case "sell", "short":
+				side = model.Short
+			default:
+				fmt.Fprintf(os.Stderr, "ctl broker-probe-order: unsupported side %q\n", args[i])
+				os.Exit(1)
+			}
+		case "--qty":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "ctl broker-probe-order: --qty requires a number")
+				os.Exit(1)
+			}
+			parsed, err := strconv.ParseFloat(args[i], 64)
+			if err != nil || parsed <= 0 {
+				fmt.Fprintf(os.Stderr, "ctl broker-probe-order: invalid qty %q\n", args[i])
+				os.Exit(1)
+			}
+			qty = parsed
+		case "--limit":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "ctl broker-probe-order: --limit requires a number")
+				os.Exit(1)
+			}
+			parsed, err := strconv.ParseFloat(args[i], 64)
+			if err != nil || parsed <= 0 {
+				fmt.Fprintf(os.Stderr, "ctl broker-probe-order: invalid limit %q\n", args[i])
+				os.Exit(1)
+			}
+			limit = parsed
+		default:
+			fmt.Fprintf(os.Stderr, "ctl broker-probe-order: unknown option %q\n", args[i])
+			fmt.Fprintf(os.Stderr, "usage: ctl broker-probe-order [SYMBOL] [--side buy|sell] [--qty N] [--type limit|market] [--limit P] [--keep-open]\n")
+			os.Exit(1)
+		}
+	}
+	if orderType == model.OrderMarket && keepOpen {
+		fmt.Fprintln(os.Stderr, "ctl broker-probe-order: --keep-open is only valid for limit probes")
+		os.Exit(1)
+	}
+
+	cfg := diagnosticIBKRConfig()
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	client := ibkr.NewClient(cfg)
+	if err := client.Connect(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl broker-probe-order: connect failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+	if !client.IsPaper() && !readProbeAllowLive() {
+		fmt.Fprintln(os.Stderr, "ctl broker-probe-order: refusing to submit on a non-paper IBKR session; set IBKR_PROBE_ALLOW_LIVE=true to override")
+		os.Exit(1)
+	}
+	if !client.IsPaper() && orderType == model.OrderMarket {
+		fmt.Fprintln(os.Stderr, "ctl broker-probe-order: refusing live market probe even with override")
+		os.Exit(1)
+	}
+
+	order := model.Order{
+		ID:          "broker-probe-" + time.Now().UTC().Format("20060102T150405"),
+		ThesisID:    "broker-probe",
+		DeskID:      "ctl",
+		Instrument:  model.Instrument{Symbol: symbol, SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Direction:   side,
+		Quantity:    qty,
+		OrderType:   orderType,
+		TimeInForce: "DAY",
+	}
+	if orderType == model.OrderLimit {
+		order.LimitPrice = limit
+	}
+
+	fill, err := client.PlaceOrder(ctx, order)
+	if err != nil {
+		var pending *ibkr.PendingOrderError
+		if !errors.As(err, &pending) {
+			fmt.Fprintf(os.Stderr, "ctl broker-probe-order: submit failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Broker accepted probe order: broker_order_id=%d status=%s reason=%q\n", pending.OrderID, pending.Status, pending.Reason)
+		if keepOpen {
+			return
+		}
+		cancelCtx, cancelOrder := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelOrder()
+		if err := client.CancelOrder(cancelCtx, pending.OrderID); err != nil {
+			fmt.Fprintf(os.Stderr, "ctl broker-probe-order: cancel failed for broker_order_id=%d: %v\n", pending.OrderID, err)
+			os.Exit(1)
+		}
+		fmt.Printf("Cancel requested for broker_order_id=%d\n", pending.OrderID)
+		return
+	}
+	if fill == nil {
+		fmt.Println("Probe completed without fill payload.")
+		return
+	}
+	fmt.Printf("Probe filled: broker_order_id=%d symbol=%s qty=%.4g avg_price=%.4f\n", fill.IBKROrderID, fill.DisplaySymbol(), fill.Quantity, fill.AvgPrice)
+}
+
+func readProbeAllowLive() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("IBKR_PROBE_ALLOW_LIVE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func cmdMarket() {
@@ -182,7 +439,13 @@ func loadCTLMassiveBackedProvider() (string, marketdata.SnapshotProvider, error)
 	switch marketdata.ResolveMassivePlan() {
 	case marketdata.MassivePlanBasicFree:
 		snapshotProvider := marketdata.NewHistoricalSnapshotProvider(polygonProvider)
-		return "massive_free+polygon_agg_snapshots", marketdata.NewSplitProvider(snapshotProvider, polygonProvider), nil
+		nasdaq := marketdata.NewNasdaqProvider()
+		if fallback, fallbackErr := marketdata.NewFMPProvider(""); fallbackErr == nil {
+			provider := marketdata.NewFallbackProvider(marketdata.NewFallbackProvider(snapshotProvider, fallback), nasdaq)
+			return "massive_free+polygon_agg_snapshots+fmp_fallback+nasdaq_quote", provider, nil
+		}
+		provider := marketdata.NewFallbackProvider(marketdata.NewSplitProvider(snapshotProvider, polygonProvider), nasdaq)
+		return "massive_free+polygon_agg_snapshots+nasdaq_quote", provider, nil
 	default:
 		var provider marketdata.SnapshotProvider = polygonProvider
 		providerName := "massive"
@@ -190,6 +453,8 @@ func loadCTLMassiveBackedProvider() (string, marketdata.SnapshotProvider, error)
 			provider = marketdata.NewFallbackProvider(provider, fallback)
 			providerName = "massive+fmp_fallback"
 		}
+		provider = marketdata.NewFallbackProvider(provider, marketdata.NewNasdaqProvider())
+		providerName += "+nasdaq_quote"
 		return providerName, provider, nil
 	}
 }

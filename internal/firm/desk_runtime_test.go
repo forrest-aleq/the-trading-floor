@@ -38,6 +38,7 @@ func (s scriptedLLM) Complete(_ context.Context, req llm.Request) (*llm.Response
 type runtimeStubBroker struct {
 	connected atomic.Bool
 	orders    atomic.Int32
+	lastOrder atomic.Value
 	err       error
 }
 
@@ -45,6 +46,7 @@ func (b *runtimeStubBroker) IsConnected() bool { return b.connected.Load() }
 func (b *runtimeStubBroker) IsPaper() bool     { return true }
 func (b *runtimeStubBroker) PlaceOrder(_ context.Context, o model.Order) (*model.Fill, error) {
 	b.orders.Add(1)
+	b.lastOrder.Store(o)
 	if b.err != nil {
 		return nil, b.err
 	}
@@ -373,6 +375,121 @@ func TestTreatmentDeskUsesShadowModeUntilCompetenceIsEarned(t *testing.T) {
 	thesisB, _ := deskB.GetThesis(posB.ThesisID)
 	if thesisB == nil || thesisB.AutonomyMode != model.Autonomous {
 		t.Fatalf("expected control desk to remain autonomous, got %+v", thesisB)
+	}
+}
+
+func TestTreatmentDeskExecutesBrokerPaperWhenRestrictedOverrideEnabled(t *testing.T) {
+	t.Cleanup(firm.ReloadRuntimeConfig)
+	t.Setenv("IBKR_PAPER_ALLOW_RESTRICTED_AUTONOMY", "true")
+	firm.ReloadRuntimeConfig()
+
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "AAPL", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        100.0,
+		"target_price":       110.0,
+		"stop_loss":          95.0,
+		"conviction":         0.8,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.01,
+		"strategy":           "event",
+		"evidence":           []string{"catalyst", "follow-through"},
+		"counter_args":       []string{"already priced"},
+		"kill_rules":         []map[string]any{{"condition": "price_below_stop", "threshold": 95.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"crowded"},
+		"missing_data":          []string{"flow"},
+		"historical_analogues":  []string{"prior event"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"AAPL","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.8,"category":"corporate","reasoning":"event"}`},
+		scriptedLLM{response: string(researchResp)},
+		scriptedLLM{response: string(prosecuteResp)},
+	)
+
+	broker := &runtimeStubBroker{}
+	desk, bk, _ := newRuntimeDeskWithBroker(t, "A", "corporate", router, nil, nil, nil, broker)
+	desk.Process(context.Background(), signal.Signal{
+		ID:        "sig-paper-restricted",
+		Source:    "test",
+		Type:      signal.TypeNews,
+		Category:  "corporate",
+		Timestamp: time.Now(),
+		Urgency:   0.8,
+		Raw:       []byte(`AAPL event catalyst forms`),
+	})
+
+	pos := fetchOpenPosition(t, bk)
+	if pos.Shadow {
+		t.Fatal("expected restricted treatment desk to execute in broker paper mode")
+	}
+	if got := broker.orders.Load(); got != 1 {
+		t.Fatalf("expected one broker paper order, got %d", got)
+	}
+	thesis, _ := desk.GetThesis(pos.ThesisID)
+	if thesis == nil || thesis.AutonomyMode != model.Restricted {
+		t.Fatalf("expected autonomy to remain restricted while executing paper, got %+v", thesis)
+	}
+}
+
+func TestBrokerStockOrderUsesWholeShareMinimum(t *testing.T) {
+	t.Cleanup(firm.ReloadRuntimeConfig)
+	t.Setenv("IBKR_PAPER_ALLOW_RESTRICTED_AUTONOMY", "true")
+	firm.ReloadRuntimeConfig()
+
+	researchResp, _ := json.Marshal(map[string]any{
+		"instrument":         map[string]any{"symbol": "MU", "sec_type": "STK", "currency": "USD", "exchange": "SMART"},
+		"direction":          "long",
+		"entry_price":        100.0,
+		"target_price":       120.0,
+		"stop_loss":          90.0,
+		"conviction":         0.8,
+		"time_horizon_hours": 24,
+		"position_size_pct":  0.000001,
+		"strategy":           "event",
+		"evidence":           []string{"catalyst", "follow-through"},
+		"counter_args":       []string{"already priced"},
+		"kill_rules":         []map[string]any{{"condition": "price_below_stop", "threshold": 90.0, "action": "close"}},
+	})
+	prosecuteResp, _ := json.Marshal(map[string]any{
+		"verdict":               "survived",
+		"bear_args":             []string{"crowded"},
+		"missing_data":          []string{"flow"},
+		"historical_analogues":  []string{"prior event"},
+		"crowded_score":         0.2,
+		"confidence_adjustment": 0.0,
+	})
+
+	router := llm.NewRouter(
+		scriptedLLM{response: `{"tradeable":true,"score":85,"instruments":[{"symbol":"MU","sec_type":"STK","currency":"USD"}],"direction":"long","urgency":0.8,"category":"corporate","reasoning":"event"}`},
+		scriptedLLM{response: string(researchResp)},
+		scriptedLLM{response: string(prosecuteResp)},
+	)
+
+	broker := &runtimeStubBroker{}
+	desk, _, _ := newRuntimeDeskWithBroker(t, "A", "corporate", router, nil, nil, nil, broker)
+	desk.Process(context.Background(), signal.Signal{
+		ID:        "sig-whole-share",
+		Source:    "test",
+		Type:      signal.TypeNews,
+		Category:  "corporate",
+		Timestamp: time.Now(),
+		Urgency:   0.8,
+		Raw:       []byte(`MU event catalyst forms`),
+	})
+
+	raw := broker.lastOrder.Load()
+	if raw == nil {
+		t.Fatal("expected broker order")
+	}
+	order := raw.(model.Order)
+	if order.Quantity != 1 {
+		t.Fatalf("expected stock order to round up to one whole share, got %.4f", order.Quantity)
 	}
 }
 

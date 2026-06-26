@@ -16,18 +16,24 @@ import (
 
 type KalshiFeed struct {
 	log      *slog.Logger
-	client   *kalshi.Client
+	client   kalshiMarketClient
 	interval time.Duration
 	limit    int
+	maxPages int
 	state    *sourceState
 }
 
-func NewKalshiFeed(client *kalshi.Client) *KalshiFeed {
+type kalshiMarketClient interface {
+	GetMarkets(ctx context.Context, status string, limit int, cursor string) (*kalshi.MarketsResponse, error)
+}
+
+func NewKalshiFeed(client kalshiMarketClient) *KalshiFeed {
 	return &KalshiFeed{
 		log:      slog.Default().With("component", "feed-kalshi"),
 		client:   client,
 		interval: readFeedDuration("KALSHI_FEED_INTERVAL", 2*time.Minute),
 		limit:    readFeedInt("KALSHI_FEED_MARKET_LIMIT", 100),
+		maxPages: readFeedInt("KALSHI_FEED_MAX_PAGES", 10),
 		state:    newSourceState(4096),
 	}
 }
@@ -61,16 +67,25 @@ func (f *KalshiFeed) fetchAndSend(ctx context.Context, out chan<- signal.Signal)
 		return
 	}
 
-	resp, err := f.client.GetMarkets(ctx, "open", f.limit, "")
+	markets, pages, cursor, err := f.fetchOpenMarkets(ctx)
 	if err != nil {
 		backoff := f.state.RecordFailure(time.Now(), f.interval)
 		f.log.Warn("kalshi market fetch failed", "error", err, "retry_after", backoff)
 		return
 	}
 	f.state.RecordSuccess()
+	if strings.TrimSpace(cursor) != "" {
+		f.log.Warn("kalshi market pagination capped",
+			"pages", pages,
+			"limit", f.limit,
+			"max_pages", f.maxPages,
+			"next_cursor", cursor,
+		)
+	}
 
 	now := time.Now().UTC()
-	for _, market := range resp.Markets {
+	emitted := 0
+	for _, market := range markets {
 		if strings.TrimSpace(market.Ticker) == "" {
 			continue
 		}
@@ -101,7 +116,43 @@ func (f *KalshiFeed) fetchAndSend(ctx context.Context, out chan<- signal.Signal)
 				{Name: market.Ticker, Type: "prediction_market", ID: market.Ticker},
 			},
 		}
+		emitted++
 	}
+	if emitted > 0 {
+		f.log.Info("kalshi market signals emitted", "count", emitted, "markets", len(markets), "pages", pages)
+	}
+}
+
+func (f *KalshiFeed) fetchOpenMarkets(ctx context.Context) ([]kalshi.Market, int, string, error) {
+	maxPages := f.maxPages
+	if maxPages <= 0 {
+		maxPages = 1
+	}
+	limit := f.limit
+	if limit <= 0 {
+		limit = 100
+	}
+
+	var markets []kalshi.Market
+	cursor := ""
+	pages := 0
+	for pages < maxPages {
+		resp, err := f.client.GetMarkets(ctx, "open", limit, cursor)
+		if err != nil {
+			return nil, pages, cursor, err
+		}
+		pages++
+		if resp != nil {
+			markets = append(markets, resp.Markets...)
+			cursor = strings.TrimSpace(resp.Cursor)
+		} else {
+			cursor = ""
+		}
+		if cursor == "" {
+			break
+		}
+	}
+	return markets, pages, cursor, nil
 }
 
 func kalshiMarketHasActionablePrice(market kalshi.Market) bool {

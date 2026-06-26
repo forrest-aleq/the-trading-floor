@@ -88,6 +88,28 @@ func TestPredictionMarketSignalsRouteToPredictionDesk(t *testing.T) {
 	}
 }
 
+func TestRawKalshiMarketInventoryStaysOnPredictionMarketLane(t *testing.T) {
+	sig := signal.Signal{
+		Source:   "kalshi-market",
+		Type:     signal.TypeAlternative,
+		Category: "prediction_market",
+		Raw:      []byte(`{"ticker":"KXTEST-26DEC31-YES","title":"raw exchange inventory"}`),
+		EvidenceMeta: &evidence.Metadata{
+			SourceOwnerGroup: "prediction_market",
+			SourceType:       "alternative",
+		},
+	}
+
+	if !domainShouldReviewSignal("prediction_market", sig) {
+		t.Fatal("expected prediction-market desk to receive raw Kalshi inventory")
+	}
+	for _, domain := range []string{"macro", "tail", "systematic", "corporate"} {
+		if domainShouldReviewSignal(domain, sig) {
+			t.Fatalf("did not expect %s desk to receive raw Kalshi inventory", domain)
+		}
+	}
+}
+
 func TestSourceDrivenRoutingSpecializesDeskIntake(t *testing.T) {
 	geo := signal.Signal{
 		Type:     signal.TypeNews,

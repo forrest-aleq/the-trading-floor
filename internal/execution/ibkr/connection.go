@@ -112,6 +112,33 @@ func NewConnection(cfg Config) *Connection {
 	}
 }
 
+func readBoolEnv(name string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func readDurationEnv(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
 func (c *Connection) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -200,11 +227,13 @@ func (c *Connection) validateGateway() error {
 	}
 	c.log.Info("gateway validated", "accounts", len(accounts))
 
-	// Probe account summary without making it a startup hard-gate. TWS sessions
-	// can take a while to surface summary data, and blocking here stalls the
-	// entire daemon before the floor can start.
-	if err := c.probeAccountSummary(ib); err != nil {
-		c.log.Warn("gateway account summary probe incomplete", "error", err)
+	// AccountSummary can block inside ibsync if TWS does not answer and cannot
+	// be cancelled cleanly after a timeout. Keep startup validation to managed
+	// accounts unless an operator explicitly asks for the slower probe.
+	if readBoolEnv("IBKR_STARTUP_ACCOUNT_SUMMARY_PROBE", false) {
+		if err := c.probeAccountSummary(ib); err != nil {
+			c.log.Warn("gateway account summary probe incomplete", "error", err)
+		}
 	}
 
 	return nil

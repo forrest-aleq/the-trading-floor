@@ -102,6 +102,20 @@ func TestDefaultNewsSourcesPreferLiveNonDuplicateFeeds(t *testing.T) {
 	}
 }
 
+func TestEntitiesFromTextMapsKnownCatalystAliases(t *testing.T) {
+	entities := entitiesFromText("Ferrari launched an EV with weak range while Micron memory pricing improved in South Korea.")
+	seen := map[string]string{}
+	for _, entity := range entities {
+		seen[entity.Type+":"+entity.ID] = entity.Name
+	}
+
+	for _, want := range []string{"instrument:RACE", "company:RACE", "instrument:MU", "company:MU", "instrument:EWY", "etf:EWY"} {
+		if _, ok := seen[want]; !ok {
+			t.Fatalf("missing %s in entities: %+v", want, entities)
+		}
+	}
+}
+
 func TestExtraNewsSourcesFromEnv(t *testing.T) {
 	t.Setenv("WIRE_NEWS_EXTRA_SOURCES_JSON", `[
 		{"name":"aljazeera-ar","url":"https://example.com/aljazeera-ar.rss","category":"geopolitical","language":"ar","interval_seconds":75},

@@ -43,6 +43,27 @@ func TestMapThesisLongBuysYesWithinRiskCap(t *testing.T) {
 	}
 }
 
+func TestMapThesisUsesConfiguredTimeInForce(t *testing.T) {
+	t.Setenv("KALSHI_ORDER_TIME_IN_FORCE", "good_till_canceled")
+	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
+
+	mapped, err := mapper.MapThesis(&model.Thesis{
+		ID:         "thesis-gtc",
+		DeskID:     "kalshi-rates-a",
+		Domain:     "prediction_market",
+		Instrument: model.Instrument{Symbol: "KXTEST-26DEC31-YES", SecType: "KALSHI", Currency: "USD"},
+		Direction:  model.Long,
+		Conviction: 0.82,
+		EntryPrice: 0.24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.Request.TimeInForce != "good_till_canceled" {
+		t.Fatalf("time_in_force = %q, want good_till_canceled", mapped.Request.TimeInForce)
+	}
+}
+
 func TestMapThesisShortBuysNoViaYesAsk(t *testing.T) {
 	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
 
@@ -138,6 +159,101 @@ func TestExecutorSizesRiskFromAccountEquity(t *testing.T) {
 	}
 	if result.MappedOrder.MaxOrderCents != 100 {
 		t.Fatalf("max order = %d, want dynamic cap 100", result.MappedOrder.MaxOrderCents)
+	}
+}
+
+func TestExecutorCapsDynamicSizingByAvailableBalance(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/trade-api/v2/portfolio/balance" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"balance":50,"portfolio_value":5000,"updated_ts":123}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:       server.URL + "/trade-api/v2",
+		KeyID:         "key-id",
+		PrivateKeyPEM: privateKeyPEM(privateKey),
+		MaxOrderCents: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(
+		client,
+		NewMapper(MapperConfig{MaxOrderCents: 1000, RiskPctEquity: 10, MinConviction: 0.65}),
+		ExecutionDryRun,
+		t.TempDir()+"/kalshi-dry.jsonl",
+	)
+
+	result, err := executor.SubmitThesis(context.Background(), &model.Thesis{
+		ID:         "thesis-available-cash",
+		DeskID:     "kalshi-rates-a",
+		Domain:     "prediction_market",
+		Instrument: model.Instrument{Symbol: "KXTEST-26DEC31-YES", SecType: "KALSHI", Currency: "USD"},
+		Direction:  model.Long,
+		Conviction: 0.82,
+		EntryPrice: 0.25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MappedOrder.MaxOrderCents != 50 {
+		t.Fatalf("max order = %d, want available cash cap 50", result.MappedOrder.MaxOrderCents)
+	}
+	if result.MappedOrder.EstimatedRiskCents != 50 {
+		t.Fatalf("risk = %d, want 50", result.MappedOrder.EstimatedRiskCents)
+	}
+}
+
+func TestExecutorRejectsWhenAvailableBalanceTooSmallForContract(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/trade-api/v2/portfolio/balance" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"balance":3,"portfolio_value":5000,"updated_ts":123}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:       server.URL + "/trade-api/v2",
+		KeyID:         "key-id",
+		PrivateKeyPEM: privateKeyPEM(privateKey),
+		MaxOrderCents: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(
+		client,
+		NewMapper(MapperConfig{MaxOrderCents: 1000, RiskPctEquity: 10, MinConviction: 0.65}),
+		ExecutionDryRun,
+		t.TempDir()+"/kalshi-dry.jsonl",
+	)
+
+	_, err = executor.SubmitThesis(context.Background(), &model.Thesis{
+		ID:         "thesis-no-cash",
+		DeskID:     "kalshi-rates-a",
+		Domain:     "prediction_market",
+		Instrument: model.Instrument{Symbol: "KXTEST-26DEC31-YES", SecType: "KALSHI", Currency: "USD"},
+		Direction:  model.Long,
+		Conviction: 0.82,
+		EntryPrice: 0.25,
+	})
+	if err == nil {
+		t.Fatal("expected available cash cap to block one-contract order")
+	}
+	if !strings.Contains(err.Error(), "risk cap $0.03 too small") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -268,6 +384,61 @@ func TestExecutorLiveSessionRiskCapBlocksBeforeSubmit(t *testing.T) {
 	}
 }
 
+func TestExecutorLiveReleasesSafetyReservationOnSubmitError(t *testing.T) {
+	t.Setenv("KALSHI_LIVE_DISABLE_AFTER_FIRST", "false")
+	t.Setenv("KALSHI_LIVE_MAX_ORDERS_PER_SESSION", "10")
+	t.Setenv("KALSHI_LIVE_MAX_RISK_DOLLARS_PER_SESSION", "0.75")
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orderCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/trade-api/v2/portfolio/events/orders" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		orderCalls++
+		if orderCalls == 1 {
+			http.Error(w, `{"error":{"code":"temporary"}}`, http.StatusInternalServerError)
+			return
+		}
+		var payload createOrderV2Request
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"order_id":"ord-live-2","client_order_id":"` + payload.ClientOrderID + `","fill_count":"0.00","remaining_count":"2.00"}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:       server.URL + "/trade-api/v2",
+		KeyID:         "key-id",
+		PrivateKeyPEM: privateKeyPEM(privateKey),
+		LiveTrading:   true,
+		LiveConfirm:   LiveConfirmation,
+		MaxOrderCents: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(client, NewMapper(MapperConfig{MaxOrderCents: 50, MinConviction: 0.65}), ExecutionLive, t.TempDir()+"/kalshi-live.jsonl")
+
+	if _, err := executor.SubmitThesis(context.Background(), liveTestThesis("thesis-error-1", "KXERR1-26DEC31-YES", 0.25)); err == nil {
+		t.Fatal("expected first submit to fail")
+	}
+	second, err := executor.SubmitThesis(context.Background(), liveTestThesis("thesis-error-2", "KXERR2-26DEC31-YES", 0.25))
+	if err != nil {
+		t.Fatalf("expected second submit to pass after reservation release, got %v", err)
+	}
+	if second == nil || second.Response == nil || second.Response.OrderID != "ord-live-2" {
+		t.Fatalf("unexpected second submit result: %+v", second)
+	}
+	if orderCalls != 2 {
+		t.Fatalf("order endpoint calls = %d, want 2", orderCalls)
+	}
+}
+
 func liveTestThesis(id, ticker string, entryPrice float64) *model.Thesis {
 	return &model.Thesis{
 		ID:         id,
@@ -287,15 +458,15 @@ func newLiveOrderTestClient(t *testing.T, orderCalls *int) *Client {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/trade-api/v2/portfolio/orders" {
+		if r.Method != http.MethodPost || r.URL.Path != "/trade-api/v2/portfolio/events/orders" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		*orderCalls++
-		var payload OrderRequest
+		var payload createOrderV2Request
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		_, _ = w.Write([]byte(`{"order":{"order_id":"ord-live","client_order_id":"` + payload.ClientOrderID + `","ticker":"` + payload.Ticker + `","side":"` + payload.Side + `","action":"buy","status":"resting","fill_count_fp":"0","remaining_count_fp":"1"}}`))
+		_, _ = w.Write([]byte(`{"order_id":"ord-live","client_order_id":"` + payload.ClientOrderID + `","fill_count":"0.00","remaining_count":"1.00"}`))
 	}))
 	t.Cleanup(server.Close)
 

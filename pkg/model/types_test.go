@@ -44,6 +44,15 @@ func TestIsKalshiTickerAvoidsPlainEquityPrefixes(t *testing.T) {
 	if !IsKalshiTicker("KXBTC-26") {
 		t.Fatal("expected hyphenated KX event ticker to be Kalshi")
 	}
+	if !IsKalshiTicker("KXTHORNE") {
+		t.Fatal("expected long unhyphenated KX event code to be Kalshi-like")
+	}
+	if !IsKalshiTicker("KX001") {
+		t.Fatal("expected digit-bearing KX event code to be Kalshi-like")
+	}
+	if !IsKalshiTicker("KXUSQ") {
+		t.Fatal("expected KX-prefixed prediction-market code to be Kalshi-like")
+	}
 	if IsKalshiTicker("KXIN") {
 		t.Fatal("expected plain equity-style KX prefix to stay non-Kalshi")
 	}

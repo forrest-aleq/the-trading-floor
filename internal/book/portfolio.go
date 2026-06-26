@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +47,18 @@ type Book struct {
 	initialCapital    float64
 	reconcileInterval time.Duration
 	brokerSync        brokerAccountState
+	now               func() time.Time
+
+	// Calendar anchors for honest period P&L. Daily realized P&L resets on
+	// date change; weekly/monthly P&L measure NAV against the NAV captured at
+	// the period boundary. In-memory only: a mid-period restart re-anchors at
+	// initial capital, so period figures span at most since-restart.
+	loc            *time.Location
+	dayKey         string
+	weekKey        string
+	monthKey       string
+	weekAnchorNAV  float64
+	monthAnchorNAV float64
 }
 
 type brokerAccountState struct {
@@ -52,6 +66,8 @@ type brokerAccountState struct {
 	nav                 float64
 	cash                float64
 	dailyPnL            float64
+	dailyPnLAvailable   bool
+	dailyPnLSource      string
 	unrealizedPnL       float64
 	realizedPnL         float64
 	openPositions       int
@@ -59,6 +75,7 @@ type brokerAccountState struct {
 	netExposure         float64
 	lastSynced          time.Time
 	lastAccountSynced   time.Time
+	lastPnLSynced       time.Time
 	lastPositionsSynced time.Time
 	lastFailure         time.Time
 	lastError           string
@@ -71,6 +88,8 @@ type BrokerSyncStatus struct {
 	NAV                 float64
 	Cash                float64
 	DailyPnL            float64
+	DailyPnLAvailable   bool
+	DailyPnLSource      string
 	UnrealizedPnL       float64
 	RealizedPnL         float64
 	OpenPositions       int
@@ -78,6 +97,7 @@ type BrokerSyncStatus struct {
 	NetExposure         float64
 	LastSynced          time.Time
 	LastAccountSynced   time.Time
+	LastPnLSynced       time.Time
 	LastPositionsSynced time.Time
 	LastFailure         time.Time
 	LastError           string
@@ -101,8 +121,11 @@ func NewBook(positionSource PositionSource, initialCapital float64) *Book {
 	if source, ok := positionSource.(AccountSource); ok {
 		accountSource = source
 	}
+	log := slog.Default().With("component", "book")
+	loc := rolloverLocation(log)
+	day, week, month := periodKeys(time.Now(), loc)
 	return &Book{
-		log:               slog.Default().With("component", "book"),
+		log:               log,
 		positions:         make(map[string]*model.Position),
 		positionSource:    positionSource,
 		accountSource:     accountSource,
@@ -114,6 +137,63 @@ func NewBook(positionSource PositionSource, initialCapital float64) *Book {
 		deskPositions:     make(map[string]int),
 		deskCapital:       make(map[string]float64),
 		reconcileInterval: 60 * time.Second,
+		loc:               loc,
+		dayKey:            day,
+		weekKey:           week,
+		monthKey:          month,
+		weekAnchorNAV:     initialCapital,
+		monthAnchorNAV:    initialCapital,
+	}
+}
+
+func (b *Book) currentTime() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
+}
+
+// Trading days roll on the exchange calendar, not the host clock: a UTC
+// server must not reset daily P&L at 8pm New York time.
+func rolloverLocation(log *slog.Logger) *time.Location {
+	name := strings.TrimSpace(os.Getenv("BOOK_ROLLOVER_TZ"))
+	if name == "" {
+		name = "America/New_York"
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		log.Warn("failed to load rollover timezone; falling back to UTC", "tz", name, "error", err)
+		return time.UTC
+	}
+	return loc
+}
+
+func periodKeys(t time.Time, loc *time.Location) (day, week, month string) {
+	if loc != nil {
+		t = t.In(loc)
+	}
+	isoYear, isoWeek := t.ISOWeek()
+	return t.Format("2006-01-02"), fmt.Sprintf("%04d-W%02d", isoYear, isoWeek), t.Format("2006-01")
+}
+
+// rolloverLocked must run before NAV is recalculated so period anchors
+// capture the NAV the portfolio carried into the new period.
+func (b *Book) rolloverLocked(now time.Time) {
+	day, week, month := periodKeys(now, b.loc)
+	if day != b.dayKey {
+		b.dayKey = day
+		b.dailyPnL = 0
+		for k := range b.deskPnL {
+			b.deskPnL[k] = 0
+		}
+	}
+	if week != b.weekKey {
+		b.weekKey = week
+		b.weekAnchorNAV = b.nav
+	}
+	if month != b.monthKey {
+		b.monthKey = month
+		b.monthAnchorNAV = b.nav
 	}
 }
 
@@ -255,6 +335,7 @@ func (b *Book) newPosition(fill *model.Fill, thesis *model.Thesis) *model.Positi
 	if pos.OpenedAt.IsZero() {
 		pos.OpenedAt = time.Now()
 	}
+	pos.MarkedAt = pos.OpenedAt
 	return pos
 }
 
@@ -274,6 +355,10 @@ func (b *Book) applyExecutionFillLocked(pos *model.Position, fill *model.Fill) {
 		pos.EntryPrice = fill.AvgPrice
 		if pos.CurrentPrice <= 0 || pos.CurrentPrice == minShadowEntryPrice {
 			pos.CurrentPrice = fill.AvgPrice
+			pos.MarkedAt = fill.FilledAt
+			if pos.MarkedAt.IsZero() {
+				pos.MarkedAt = b.currentTime()
+			}
 		}
 	}
 	if fill.IBKROrderID > 0 {
@@ -400,6 +485,7 @@ func (b *Book) Mark(prices map[string]float64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	markTime := b.currentTime()
 	for _, pos := range b.positions {
 		if pos.Status != "open" {
 			continue
@@ -419,12 +505,14 @@ func (b *Book) Mark(prices map[string]float64) {
 			}
 			if updated {
 				pos.CurrentPrice = math.Abs(current)
+				pos.MarkedAt = markTime
 			}
 			continue
 		}
 
 		if price, ok := lookupInstrumentPrice(prices, pos.Instrument); ok && price > 0 {
 			pos.CurrentPrice = price
+			pos.MarkedAt = markTime
 		}
 	}
 
@@ -432,8 +520,17 @@ func (b *Book) Mark(prices map[string]float64) {
 }
 
 func (b *Book) Snapshot() PortfolioSnapshot {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// A quiet book may cross a period boundary with no fills or marks to
+	// trigger a recalculation; observing the calendar here keeps reported
+	// period P&L honest regardless of activity. Period P&L is measured on
+	// the local book's NAV stream (anchors and deltas alike) even when the
+	// snapshot's NAV column reports broker equity.
+	b.rolloverLocked(b.currentTime())
+	b.weeklyPnL = b.nav - b.weekAnchorNAV
+	b.monthlyPnL = b.nav - b.monthAnchorNAV
 
 	openCount := 0
 	for _, pos := range b.positions {
@@ -460,32 +557,52 @@ func (b *Book) Snapshot() PortfolioSnapshot {
 	nav := b.nav
 	cash := b.cash
 	dailyPnL := b.dailyPnL
+	dailyPnLAvailable := true
+	dailyPnLSource := "book"
 	grossExposure := b.grossExposure
 	netExposure := b.netExposure
 	if b.brokerSync.connected && b.brokerSync.nav > 0 {
 		nav = b.brokerSync.nav
 		cash = b.brokerSync.cash
-		dailyPnL = b.brokerSync.dailyPnL
+		dailyPnLAvailable = b.brokerSync.dailyPnLAvailable
+		dailyPnLSource = b.brokerSync.dailyPnLSource
+		if dailyPnLAvailable {
+			dailyPnL = b.brokerSync.dailyPnL
+		} else {
+			dailyPnL = 0
+		}
 		grossExposure = b.brokerSync.grossExposure
 		netExposure = b.brokerSync.netExposure
 		openCount = b.brokerSync.openPositions
 	}
 
+	peak := b.peakNAV
+	if nav > peak {
+		peak = nav
+	}
+	currentDrawdownPct := 0.0
+	if peak > 0 && nav < peak {
+		currentDrawdownPct = (peak - nav) / peak * 100
+	}
+
 	return PortfolioSnapshot{
-		NAV:           nav,
-		Cash:          cash,
-		GrossExposure: grossExposure,
-		NetExposure:   netExposure,
-		DailyPnL:      dailyPnL,
-		WeeklyPnL:     b.weeklyPnL,
-		MonthlyPnL:    b.monthlyPnL,
-		TotalPnL:      b.totalPnL,
-		MaxDrawdown:   b.maxDrawdown,
-		OpenPositions: openCount,
-		DeskPnL:       deskPnL,
-		DeskPositions: deskPos,
-		DeskCapital:   deskCap,
-		TotalTrades:   b.totalTrades,
+		NAV:                nav,
+		Cash:               cash,
+		GrossExposure:      grossExposure,
+		NetExposure:        netExposure,
+		DailyPnL:           dailyPnL,
+		DailyPnLAvailable:  dailyPnLAvailable,
+		DailyPnLSource:     dailyPnLSource,
+		WeeklyPnL:          b.weeklyPnL,
+		MonthlyPnL:         b.monthlyPnL,
+		TotalPnL:           b.totalPnL,
+		MaxDrawdown:        b.maxDrawdown,
+		CurrentDrawdownPct: currentDrawdownPct,
+		OpenPositions:      openCount,
+		DeskPnL:            deskPnL,
+		DeskPositions:      deskPos,
+		DeskCapital:        deskCap,
+		TotalTrades:        b.totalTrades,
 	}
 }
 
@@ -498,6 +615,8 @@ func (b *Book) BrokerSyncStatus() BrokerSyncStatus {
 		NAV:                 b.brokerSync.nav,
 		Cash:                b.brokerSync.cash,
 		DailyPnL:            b.brokerSync.dailyPnL,
+		DailyPnLAvailable:   b.brokerSync.dailyPnLAvailable,
+		DailyPnLSource:      b.brokerSync.dailyPnLSource,
 		UnrealizedPnL:       b.brokerSync.unrealizedPnL,
 		RealizedPnL:         b.brokerSync.realizedPnL,
 		OpenPositions:       b.brokerSync.openPositions,
@@ -505,6 +624,7 @@ func (b *Book) BrokerSyncStatus() BrokerSyncStatus {
 		NetExposure:         b.brokerSync.netExposure,
 		LastSynced:          b.brokerSync.lastSynced,
 		LastAccountSynced:   b.brokerSync.lastAccountSynced,
+		LastPnLSynced:       b.brokerSync.lastPnLSynced,
 		LastPositionsSynced: b.brokerSync.lastPositionsSynced,
 		LastFailure:         b.brokerSync.lastFailure,
 		LastError:           b.brokerSync.lastError,
@@ -513,20 +633,25 @@ func (b *Book) BrokerSyncStatus() BrokerSyncStatus {
 }
 
 type PortfolioSnapshot struct {
-	NAV           float64
-	Cash          float64
-	GrossExposure float64
-	NetExposure   float64
-	DailyPnL      float64
-	WeeklyPnL     float64
-	MonthlyPnL    float64
-	TotalPnL      float64
-	MaxDrawdown   float64
-	OpenPositions int
-	DeskPnL       map[string]float64
-	DeskPositions map[string]int
-	DeskCapital   map[string]float64
-	TotalTrades   int64
+	NAV               float64
+	Cash              float64
+	GrossExposure     float64
+	NetExposure       float64
+	DailyPnL          float64
+	DailyPnLAvailable bool
+	DailyPnLSource    string
+	WeeklyPnL         float64
+	MonthlyPnL        float64
+	TotalPnL          float64
+	// MaxDrawdown is the high-water drawdown fraction for the run;
+	// CurrentDrawdownPct is the live percentage off peak NAV.
+	MaxDrawdown        float64
+	CurrentDrawdownPct float64
+	OpenPositions      int
+	DeskPnL            map[string]float64
+	DeskPositions      map[string]int
+	DeskCapital        map[string]float64
+	TotalTrades        int64
 }
 
 func (b *Book) StartReconcile(ctx context.Context) {
@@ -581,14 +706,16 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 		}
 
 		bookQty := signedPositionQuantity(pos)
-		if bookQty != ip.Quantity || pos.EntryPrice != ip.AvgCost {
-			applyBrokerRepair(pos, ip)
+		bookAvg := pos.EntryPrice
+		brokerAvg := normalizedBrokerAvgCost(pos, ip.AvgCost)
+		if !approxEqual(bookQty, ip.Quantity) || !approxEqual(bookAvg, brokerAvg) {
+			applyBrokerRepair(pos, ip, brokerAvg)
 			discrepancies = append(discrepancies, Discrepancy{
 				Symbol:      ip.Symbol,
 				BookQty:     bookQty,
 				IBKRQty:     ip.Quantity,
-				BookAvgCost: pos.EntryPrice,
-				IBKRAvgCost: ip.AvgCost,
+				BookAvgCost: bookAvg,
+				IBKRAvgCost: brokerAvg,
 			})
 		}
 	}
@@ -608,6 +735,16 @@ func (b *Book) Reconcile(ibkrPositions []ibkr.IBKRPosition) []Discrepancy {
 
 	b.recalculateLocked()
 	return discrepancies
+}
+
+// approxEqual tolerates float64 representation noise without masking real
+// quantity or price drift between the book and the broker.
+func approxEqual(a, b float64) bool {
+	diff := math.Abs(a - b)
+	if diff <= 1e-6 {
+		return true
+	}
+	return diff <= math.Max(math.Abs(a), math.Abs(b))*1e-9
 }
 
 func (b *Book) GetOpenPositions() []*model.Position {
@@ -642,6 +779,8 @@ func (b *Book) ResetDaily() {
 }
 
 func (b *Book) recalculateLocked() {
+	b.rolloverLocked(b.currentTime())
+
 	totalEquityAdjustment := 0.0
 	totalUnrealized := 0.0
 	b.grossExposure = 0
@@ -673,8 +812,8 @@ func (b *Book) recalculateLocked() {
 
 	b.nav = b.cash + totalEquityAdjustment
 	b.totalPnL = b.nav - b.initialCapital
-	b.weeklyPnL = b.totalPnL
-	b.monthlyPnL = b.totalPnL
+	b.weeklyPnL = b.nav - b.weekAnchorNAV
+	b.monthlyPnL = b.nav - b.monthAnchorNAV
 
 	if b.nav > b.peakNAV {
 		b.peakNAV = b.nav
@@ -750,11 +889,31 @@ func (b *Book) applyAccountSummary(summary *ibkr.AccountSummary) {
 
 	if summary.NetLiquidation > 0 {
 		b.brokerSync.nav = summary.NetLiquidation
+		// Broker equity is the authoritative NAV stream; peak and max
+		// drawdown must see it so the kill switch reflects account reality
+		// even when the local book is quiet or out of sync.
+		if summary.NetLiquidation > b.peakNAV {
+			b.peakNAV = summary.NetLiquidation
+		}
+		if b.peakNAV > 0 {
+			if drawdown := (b.peakNAV - summary.NetLiquidation) / b.peakNAV; drawdown > b.maxDrawdown {
+				b.maxDrawdown = drawdown
+			}
+		}
 	}
 	b.brokerSync.cash = summary.Cash
-	b.brokerSync.unrealizedPnL = summary.UnrealizedPnL
-	b.brokerSync.realizedPnL = summary.RealizedPnL
-	b.brokerSync.dailyPnL = summary.UnrealizedPnL + summary.RealizedPnL
+	if summary.DailyPnLReady {
+		b.brokerSync.dailyPnL = summary.DailyPnL
+		b.brokerSync.dailyPnLAvailable = true
+		b.brokerSync.dailyPnLSource = summary.PnLSource
+		b.brokerSync.unrealizedPnL = summary.UnrealizedPnL
+		b.brokerSync.realizedPnL = summary.RealizedPnL
+		b.brokerSync.lastPnLSynced = time.Now()
+	} else if b.brokerSync.lastPnLSynced.IsZero() {
+		b.brokerSync.dailyPnL = 0
+		b.brokerSync.dailyPnLAvailable = false
+		b.brokerSync.dailyPnLSource = ""
+	}
 	b.brokerSync.lastAccountSynced = time.Now()
 }
 
@@ -882,7 +1041,39 @@ func signedPositionQuantity(pos *model.Position) float64 {
 	return pos.Quantity
 }
 
-func applyBrokerRepair(pos *model.Position, brokerPos ibkr.IBKRPosition) {
+// normalizedBrokerAvgCost converts IBKR's avgCost to the book's per-share
+// convention. IBKR reports option avgCost per contract (premium × multiplier,
+// including fees) while the book stores per-share premiums; positionUnrealizedPnL
+// re-applies the multiplier, so storing a per-contract cost corrupts P&L and
+// stops by ~100x. Accept either convention from upstream by picking the
+// interpretation closest to the position's own price.
+func normalizedBrokerAvgCost(pos *model.Position, avgCost float64) float64 {
+	if pos == nil || avgCost <= 0 {
+		return avgCost
+	}
+	// FOP multipliers vary per contract (ES=50, CL=1000, ...), so they
+	// normalize only when the instrument carries an explicit Multiplier —
+	// desk-originated FOP always does; broker-recovered FOP cannot be
+	// normalized and keeps the raw broker value.
+	mult := pos.PrimaryInstrument().MultiplierValue()
+	if mult <= 1 {
+		return avgCost
+	}
+	perShare := avgCost / mult
+	ref := pos.CurrentPrice
+	if ref <= 0 {
+		ref = pos.EntryPrice
+	}
+	if ref <= 0 {
+		return perShare
+	}
+	if math.Abs(perShare-ref) <= math.Abs(avgCost-ref) {
+		return perShare
+	}
+	return avgCost
+}
+
+func applyBrokerRepair(pos *model.Position, brokerPos ibkr.IBKRPosition, avgCost float64) {
 	if pos == nil {
 		return
 	}
@@ -892,10 +1083,10 @@ func applyBrokerRepair(pos *model.Position, brokerPos ibkr.IBKRPosition) {
 	} else {
 		pos.Direction = model.Long
 	}
-	if brokerPos.AvgCost > 0 {
-		pos.EntryPrice = brokerPos.AvgCost
+	if avgCost > 0 {
+		pos.EntryPrice = avgCost
 		if pos.CurrentPrice <= 0 {
-			pos.CurrentPrice = brokerPos.AvgCost
+			pos.CurrentPrice = avgCost
 		}
 	}
 	if brokerPos.ConID > 0 {
@@ -909,7 +1100,11 @@ func recoveredBrokerPosition(ip ibkr.IBKRPosition) *model.Position {
 		direction = model.Short
 	}
 	qty := math.Abs(ip.Quantity)
+	inst := model.Instrument{Symbol: ip.Symbol, SecType: ip.SecType, Exchange: ip.Exchange, Currency: ip.Currency, ConID: ip.ConID}
 	price := ip.AvgCost
+	if mult := inst.MultiplierValue(); mult > 1 && price > 0 {
+		price /= mult
+	}
 	if price <= 0 {
 		price = minShadowEntryPrice
 	}
@@ -917,7 +1112,7 @@ func recoveredBrokerPosition(ip ibkr.IBKRPosition) *model.Position {
 		ID:             "broker-recovered:" + reconcileKey(ip.ConID, ip.Symbol),
 		ThesisID:       "",
 		DeskID:         brokerRecoveryDeskID,
-		Instrument:     model.Instrument{Symbol: ip.Symbol, SecType: ip.SecType, Exchange: ip.Exchange, Currency: ip.Currency, ConID: ip.ConID},
+		Instrument:     inst,
 		Direction:      direction,
 		Quantity:       qty,
 		EntryPrice:     price,

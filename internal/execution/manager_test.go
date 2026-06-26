@@ -20,6 +20,7 @@ type testBroker struct {
 	err       error
 	mu        sync.Mutex
 	lookups   map[int64]*ibkr.OrderLookup
+	lookupErr error
 	cancelled []int64
 }
 
@@ -31,6 +32,17 @@ type testOrderJournal struct {
 type testTokenValidator struct {
 	err   error
 	calls atomic.Int64
+}
+
+type testBrokerFailureObserver struct {
+	mu       sync.Mutex
+	failures []BrokerOrderFailure
+}
+
+func (o *testBrokerFailureObserver) RecordBrokerOrderFailure(failure BrokerOrderFailure) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.failures = append(o.failures, failure)
 }
 
 func (v *testTokenValidator) ValidateCapabilityToken(*model.CapToken, model.Order) error {
@@ -103,6 +115,9 @@ func (b *testBroker) GetAccountSummary(_ context.Context) (*ibkr.AccountSummary,
 func (b *testBroker) GetOrderStatus(_ context.Context, _ model.Order, orderID int64) (*ibkr.OrderLookup, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.lookupErr != nil {
+		return nil, b.lookupErr
+	}
 	if lookup, ok := b.lookups[orderID]; ok {
 		cp := *lookup
 		return &cp, nil
@@ -173,6 +188,58 @@ func TestSubmitRejectsInvalidCapabilityTokenBeforeBrokerCall(t *testing.T) {
 	}
 	if broker.calls.Load() != 0 {
 		t.Fatalf("expected broker not to be called, got %d", broker.calls.Load())
+	}
+}
+
+func TestSubmitNotifiesObserverOnUnacknowledgedBrokerOrder(t *testing.T) {
+	broker := &testBroker{
+		err: &ibkr.UnacknowledgedOrderError{
+			OrderID: 777,
+			Status:  "ApiPending",
+			Cause:   errors.New("ack timeout"),
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+	observer := &testBrokerFailureObserver{}
+	manager.SetBrokerOrderFailureObserver(observer)
+
+	order := model.Order{
+		ID:         "order-unack",
+		ThesisID:   "thesis-unack",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   10,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	_, err := manager.Submit(context.Background(), &model.CapToken{}, order)
+	if err == nil {
+		t.Fatal("expected submit to fail")
+	}
+
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	if len(observer.failures) != 1 {
+		t.Fatalf("expected one broker failure notification, got %d", len(observer.failures))
+	}
+	failure := observer.failures[0]
+	if !failure.Unacknowledged {
+		t.Fatal("expected unacknowledged failure")
+	}
+	if failure.BrokerOrderID != 777 || failure.Status != "ApiPending" {
+		t.Fatalf("unexpected failure notification: %+v", failure)
+	}
+	if failure.Cause != BrokerFailureCauseTWSOrderPrecautions {
+		t.Fatalf("expected TWS order precautions cause, got %q", failure.Cause)
+	}
+	if failure.Hint == "" {
+		t.Fatal("expected remediation hint for TWS order precautions")
+	}
+	if failure.Order.ID != order.ID || failure.Order.DeskID != order.DeskID {
+		t.Fatalf("expected order context in failure notification, got %+v", failure.Order)
 	}
 }
 
@@ -516,6 +583,143 @@ func TestCancelWorkingOrderMarksCancelRequested(t *testing.T) {
 	}
 	if snapshot.BrokerStatus != "cancel_requested" {
 		t.Fatalf("expected cancel_requested broker status, got %q", snapshot.BrokerStatus)
+	}
+}
+
+func TestRefreshWorkingOrdersMarksBrokerNotFoundFailed(t *testing.T) {
+	broker := &testBroker{
+		err: &ibkr.PendingOrderError{
+			OrderID: 92,
+			Status:  "Submitted",
+			Reason:  "accepted but still working",
+		},
+		lookupErr: ibkr.ErrOrderNotFound,
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+
+	order := model.Order{
+		ID:         "order-not-found",
+		ThesisID:   "thesis-not-found",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "SPY", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   1,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected initial pending fill error")
+	}
+
+	updates := manager.RefreshWorkingOrders(context.Background())
+	if len(updates) != 1 {
+		t.Fatalf("expected one failed-order update, got %d", len(updates))
+	}
+	if updates[0].Snapshot.State != OrderStateFailed {
+		t.Fatalf("expected failed state, got %s", updates[0].Snapshot.State)
+	}
+	if updates[0].Snapshot.BrokerStatus != "not_found" {
+		t.Fatalf("expected not_found broker status, got %q", updates[0].Snapshot.BrokerStatus)
+	}
+	if snapshot, ok := manager.OrderStatus(order.ID); !ok || snapshot.State != OrderStateFailed {
+		t.Fatalf("expected tracked order to move to failed, got ok=%v snapshot=%+v", ok, snapshot)
+	}
+}
+
+func TestRefreshWorkingOrdersFailsStaleUnacknowledgedBrokerStatus(t *testing.T) {
+	t.Setenv("IBKR_UNACKNOWLEDGED_ORDER_TTL", "1s")
+
+	broker := &testBroker{
+		err: &ibkr.PendingOrderError{
+			OrderID: 94,
+			Status:  "ApiPending",
+			Reason:  "accepted locally but not yet acknowledged",
+		},
+		lookups: map[int64]*ibkr.OrderLookup{
+			94: {
+				OrderID:           94,
+				Status:            "ApiPending",
+				RemainingQuantity: 1,
+				UpdatedAt:         time.Now().UTC().Add(2 * time.Minute),
+				Active:            true,
+			},
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+
+	order := model.Order{
+		ID:         "order-stale-apipending",
+		ThesisID:   "thesis-stale-apipending",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "SPY", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   1,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected initial pending fill error")
+	}
+
+	updates := manager.RefreshWorkingOrders(context.Background())
+	if len(updates) != 1 {
+		t.Fatalf("expected one failed-order update, got %d", len(updates))
+	}
+	if updates[0].Snapshot.State != OrderStateFailed {
+		t.Fatalf("expected stale ApiPending order to fail, got %s", updates[0].Snapshot.State)
+	}
+	if !strings.Contains(updates[0].Snapshot.LastError, "not acknowledged") {
+		t.Fatalf("expected acknowledgement error, got %q", updates[0].Snapshot.LastError)
+	}
+}
+
+func TestRefreshWorkingOrdersKeepsFreshUnacknowledgedBrokerStatusWorking(t *testing.T) {
+	t.Setenv("IBKR_UNACKNOWLEDGED_ORDER_TTL", "1h")
+
+	broker := &testBroker{
+		err: &ibkr.PendingOrderError{
+			OrderID: 95,
+			Status:  "ApiPending",
+			Reason:  "accepted locally but not yet acknowledged",
+		},
+		lookups: map[int64]*ibkr.OrderLookup{
+			95: {
+				OrderID:           95,
+				Status:            "ApiPending",
+				RemainingQuantity: 1,
+				UpdatedAt:         time.Now().UTC(),
+				Active:            true,
+			},
+		},
+	}
+	broker.connected.Store(true)
+	manager := NewManager(broker)
+
+	order := model.Order{
+		ID:         "order-fresh-apipending",
+		ThesisID:   "thesis-fresh-apipending",
+		DeskID:     "desk-a",
+		Instrument: model.Instrument{Symbol: "SPY", SecType: "STK", Currency: "USD", Exchange: "SMART"},
+		Direction:  model.Long,
+		Quantity:   1,
+		OrderType:  model.OrderLimit,
+		LimitPrice: 100,
+	}
+
+	if _, err := manager.Submit(context.Background(), &model.CapToken{}, order); err == nil {
+		t.Fatal("expected initial pending fill error")
+	}
+
+	updates := manager.RefreshWorkingOrders(context.Background())
+	if len(updates) != 1 {
+		t.Fatalf("expected one working-order update, got %d", len(updates))
+	}
+	if updates[0].Snapshot.State != OrderStateWorking {
+		t.Fatalf("expected fresh ApiPending order to remain working, got %s", updates[0].Snapshot.State)
 	}
 }
 

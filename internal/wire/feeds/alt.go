@@ -139,23 +139,7 @@ func (f *AlternativeFeed) fetchAndSend(ctx context.Context, src AlternativeSourc
 			"published_at": item.PublishedAt,
 		})
 
-		tickers := extractTickers(strings.TrimSpace(item.Title + " " + item.Summary))
-		if symbol := strings.ToUpper(strings.TrimSpace(item.Symbol)); symbol != "" {
-			tickers = append([]string{symbol}, tickers...)
-		}
-		seenTickers := make(map[string]struct{}, len(tickers))
-		entities := make([]signal.Entity, 0, len(tickers))
-		for _, ticker := range tickers {
-			ticker = strings.TrimSpace(strings.ToUpper(ticker))
-			if ticker == "" {
-				continue
-			}
-			if _, ok := seenTickers[ticker]; ok {
-				continue
-			}
-			seenTickers[ticker] = struct{}{}
-			entities = append(entities, signal.Entity{Name: ticker, Type: "instrument"})
-		}
+		entities := entitiesFromText(strings.TrimSpace(item.Title+" "+item.Summary), item.Symbol)
 
 		sig := signal.Signal{
 			ID:         fmt.Sprintf("alt-%s-%s", src.Name, id),

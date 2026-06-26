@@ -200,6 +200,58 @@ func TestProsecutorNormalizesArrayOnlyResponse(t *testing.T) {
 	}
 }
 
+func TestProsecutorPaperDiscoveryKalshiBypassesLLM(t *testing.T) {
+	t.Setenv("FLOOR_RUNTIME_MODE", "paper_discovery")
+	t.Setenv("KALSHI_LIVE_TRADING", "false")
+
+	client := &prosecutorStubClient{}
+	prosecutor := NewProsecutor(llm.NewRouter(client, client, client))
+	thesis := structuredTestThesis()
+	thesis.Instrument = model.NormalizeKalshiInstrument(model.Instrument{Symbol: "KXTEST-26DEC31"})
+
+	result := prosecutor.Challenge(context.Background(), thesis)
+	if result == nil {
+		t.Fatal("expected prosecution result")
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("expected Kalshi paper-discovery prosecution to bypass LLM, got %d requests", len(client.requests))
+	}
+	if result.Verdict != "survived" {
+		t.Fatalf("expected survived verdict, got %q", result.Verdict)
+	}
+	if result.Confidence != 0 {
+		t.Fatalf("expected neutral confidence, got %.2f", result.Confidence)
+	}
+}
+
+func TestProsecutorKalshiLiveOverrideBypassesLLM(t *testing.T) {
+	t.Setenv("FLOOR_RUNTIME_MODE", "live")
+	t.Setenv("KALSHI_LIVE_TRADING", "true")
+	t.Setenv("KALSHI_LIVE_DETERMINISTIC_FAST_PATH", "true")
+
+	client := &prosecutorStubClient{}
+	prosecutor := NewProsecutor(llm.NewRouter(client, client, client))
+	thesis := structuredTestThesis()
+	thesis.Instrument = model.NormalizeKalshiInstrument(model.Instrument{Symbol: "KXLIVE-26DEC31"})
+
+	result := prosecutor.Challenge(context.Background(), thesis)
+	if result == nil {
+		t.Fatal("expected prosecution result")
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("expected Kalshi live prosecution fast path to bypass LLM, got %d requests", len(client.requests))
+	}
+	if result.Verdict != "survived" {
+		t.Fatalf("expected survived verdict, got %q", result.Verdict)
+	}
+	if result.Confidence != 0 {
+		t.Fatalf("expected neutral confidence, got %.2f", result.Confidence)
+	}
+	if !strings.Contains(strings.Join(result.BearArgs, " "), "Live deterministic Kalshi prosecution path") {
+		t.Fatalf("expected live fast-path bear args, got %+v", result.BearArgs)
+	}
+}
+
 func TestBuildProsecutionPromptIncludesInstitutionalContext(t *testing.T) {
 	prosecutor := NewProsecutor(nil)
 	prompt := prosecutor.buildProsecutionPrompt(thesisWithInstitutionalContext())

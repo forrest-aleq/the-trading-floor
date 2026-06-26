@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hnic/trading-floor/internal/book"
+	"github.com/hnic/trading-floor/internal/execution"
 	"github.com/hnic/trading-floor/internal/firm"
 	"github.com/hnic/trading-floor/internal/marketdata"
 	"github.com/hnic/trading-floor/internal/wire"
@@ -169,6 +170,44 @@ func TestLoadDecisionThresholdsFallsBackOnInvalidEnv(t *testing.T) {
 	}
 }
 
+func TestLoadDecisionThresholdsForPaperDiscoveryUsesDiscoveryDefaults(t *testing.T) {
+	t.Setenv("SCANNER_MIN_SCORE", "")
+	t.Setenv("RESEARCH_MIN_CONVICTION", "")
+	t.Setenv("DESK_MIN_CONVICTION", "")
+	t.Setenv("DESK_COUNCIL_THRESHOLD", "")
+
+	cfg := loadDecisionThresholdsForMode(runtimeModePaperDiscovery)
+	if cfg.ScannerMinScore != 55 {
+		t.Fatalf("scanner min score = %.2f, want discovery default 55", cfg.ScannerMinScore)
+	}
+	if cfg.ResearchMinConviction != 0.50 {
+		t.Fatalf("research min conviction = %.2f, want discovery default 0.50", cfg.ResearchMinConviction)
+	}
+	if cfg.DeskMinConviction != cfg.ResearchMinConviction {
+		t.Fatalf("desk min conviction = %.2f, want research discovery default %.2f", cfg.DeskMinConviction, cfg.ResearchMinConviction)
+	}
+	if cfg.CouncilThreshold != 0.02 {
+		t.Fatalf("council threshold = %.2f, want default 0.02", cfg.CouncilThreshold)
+	}
+}
+
+func TestLoadDecisionThresholdsForPaperDiscoveryHonorsEnv(t *testing.T) {
+	t.Setenv("SCANNER_MIN_SCORE", "61")
+	t.Setenv("RESEARCH_MIN_CONVICTION", "0.57")
+	t.Setenv("DESK_MIN_CONVICTION", "0.59")
+
+	cfg := loadDecisionThresholdsForMode(runtimeModePaperDiscovery)
+	if cfg.ScannerMinScore != 61 {
+		t.Fatalf("scanner min score = %.2f, want env override 61", cfg.ScannerMinScore)
+	}
+	if cfg.ResearchMinConviction != 0.57 {
+		t.Fatalf("research min conviction = %.2f, want env override 0.57", cfg.ResearchMinConviction)
+	}
+	if cfg.DeskMinConviction != 0.59 {
+		t.Fatalf("desk min conviction = %.2f, want env override 0.59", cfg.DeskMinConviction)
+	}
+}
+
 func TestActiveDeskConfigRejectsUnknownAllowlistDesk(t *testing.T) {
 	t.Setenv("FLOOR_ENABLED_DESKS", "corp-earnings-a,no-such-desk")
 	t.Setenv("FLOOR_DESK_LIMIT", "")
@@ -247,6 +286,18 @@ func TestLoadRuntimeModeRejectsUnknownValue(t *testing.T) {
 
 	if _, err := loadRuntimeMode(); err == nil {
 		t.Fatal("expected invalid runtime mode to return error")
+	}
+}
+
+func TestLoadRuntimeModeAcceptsPaperDiscovery(t *testing.T) {
+	t.Setenv("FLOOR_RUNTIME_MODE", "paper_discovery")
+
+	mode, err := loadRuntimeMode()
+	if err != nil {
+		t.Fatalf("loadRuntimeMode returned error: %v", err)
+	}
+	if mode != runtimeModePaperDiscovery {
+		t.Fatalf("runtime mode = %s, want %s", mode, runtimeModePaperDiscovery)
 	}
 }
 
@@ -441,6 +492,34 @@ func TestValidateRuntimeReadinessAllowsKalshiOnlyWithoutBroker(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeReadinessRequiresKalshiDryRunForPaperDiscovery(t *testing.T) {
+	err := validateRuntimeReadiness(runtimeReadiness{
+		Mode:                    runtimeModePaperDiscovery,
+		DBReady:                 true,
+		BrokerExecutionRequired: false,
+		KalshiExecutionRequired: true,
+		KalshiExecutionReady:    true,
+		KalshiDryRun:            false,
+	})
+	if err == nil {
+		t.Fatal("expected paper discovery readiness to fail without Kalshi dry-run")
+	}
+}
+
+func TestValidateRuntimeReadinessAllowsKalshiDryRunForPaperDiscovery(t *testing.T) {
+	err := validateRuntimeReadiness(runtimeReadiness{
+		Mode:                    runtimeModePaperDiscovery,
+		DBReady:                 true,
+		BrokerExecutionRequired: false,
+		KalshiExecutionRequired: true,
+		KalshiExecutionReady:    true,
+		KalshiDryRun:            true,
+	})
+	if err != nil {
+		t.Fatalf("expected paper discovery Kalshi dry-run readiness to pass, got %v", err)
+	}
+}
+
 func TestValidateRuntimeReadinessRequiresKalshiExecutorForKalshiDesks(t *testing.T) {
 	err := validateRuntimeReadiness(runtimeReadiness{
 		Mode:                    runtimeModePaper,
@@ -582,6 +661,236 @@ func TestRuntimeHealthAllowsEntriesWhenBrokerAndQuotesAreHealthy(t *testing.T) {
 	}
 	if policy.Mode != firm.EntryModeNormal {
 		t.Fatalf("expected normal mode, got %s", policy.Mode)
+	}
+}
+
+func TestRuntimeHealthAllowsEntriesWhenMinimumFreshQuotesMet(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:  true,
+			LastSynced: now.Add(-30 * time.Second),
+		}},
+		MarketFreshness: stubHealthMarket{report: marketdata.QuoteFreshnessReport{
+			Total:          2,
+			Fresh:          1,
+			Stale:          0,
+			Missing:        1,
+			MissingSymbols: []string{"QQQ STK SMART USD"},
+		}},
+		RequiredQuotes: []model.Instrument{
+			{Symbol: "SPY", SecType: "STK", Currency: "USD"},
+			{Symbol: "QQQ", SecType: "STK", Currency: "USD"},
+		},
+		MinFreshQuotes: 1,
+	})
+
+	policy := supervisor.EvaluateNow(now)
+	if !policy.AllowEntries {
+		t.Fatalf("expected minimum fresh quotes to allow entries, got reason %q", policy.Reason)
+	}
+	if policy.Mode != firm.EntryModeNormal {
+		t.Fatalf("expected normal mode, got %s", policy.Mode)
+	}
+}
+
+func TestRuntimeHealthAllowsEntriesWhenQuoteGateDisabled(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:  true,
+			LastSynced: now.Add(-30 * time.Second),
+		}},
+		MarketFreshness: stubHealthMarket{report: marketdata.QuoteFreshnessReport{
+			Total:          2,
+			Fresh:          0,
+			Stale:          0,
+			Missing:        2,
+			MissingSymbols: []string{"SPY STK SMART USD", "QQQ STK SMART USD"},
+		}},
+		RequiredQuotes: []model.Instrument{
+			{Symbol: "SPY", SecType: "STK", Currency: "USD"},
+			{Symbol: "QQQ", SecType: "STK", Currency: "USD"},
+		},
+		DisableQuoteGate: true,
+	})
+
+	policy := supervisor.EvaluateNow(now)
+	if !policy.AllowEntries {
+		t.Fatalf("expected disabled quote gate to allow entries, got reason %q", policy.Reason)
+	}
+	if policy.Mode != firm.EntryModeNormal {
+		t.Fatalf("expected normal mode, got %s", policy.Mode)
+	}
+}
+
+func TestRuntimeHealthDisablesEntriesAfterBrokerAckFailures(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:  true,
+			LastSynced: now.Add(-30 * time.Second),
+		}},
+		DisableQuoteGate:          true,
+		BrokerAckFailureThreshold: 3,
+		BrokerAckFailureWindow:    time.Minute,
+		BrokerAckFailureCooldown:  5 * time.Minute,
+	})
+	for i := 0; i < 3; i++ {
+		supervisor.RecordBrokerOrderFailure(execution.BrokerOrderFailure{
+			Order: model.Order{
+				DeskID:     "sector-tech-a",
+				Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+			},
+			BrokerOrderID:  int64(100 + i),
+			Status:         "ApiPending",
+			Cause:          execution.BrokerFailureCauseTWSOrderPrecautions,
+			Hint:           execution.BrokerFailureHintTWSOrderPrecautions,
+			Error:          "order not acknowledged by broker",
+			Unacknowledged: true,
+			At:             now.Add(time.Duration(i-2) * time.Second),
+		})
+	}
+
+	policy := supervisor.EvaluateNow(now)
+	if policy.AllowEntries {
+		t.Fatal("expected broker ack failures to disable entries")
+	}
+	if policy.Mode != firm.EntryModeEntriesDisabled {
+		t.Fatalf("expected entries disabled mode, got %s", policy.Mode)
+	}
+	if policy.Reason != "broker_order_ack_failures:3/1m0s" {
+		t.Fatalf("expected broker ack failure reason, got %q", policy.Reason)
+	}
+	telemetry := supervisor.BrokerAckFailureTelemetry(now)
+	if telemetry["broker_ack_failure_last_cause"] != execution.BrokerFailureCauseTWSOrderPrecautions {
+		t.Fatalf("expected TWS order precautions telemetry cause, got %#v", telemetry["broker_ack_failure_last_cause"])
+	}
+	if telemetry["broker_ack_failure_last_hint"] == "" {
+		t.Fatal("expected TWS order precautions telemetry hint")
+	}
+}
+
+func TestRuntimeHealthAllowsEntriesAfterBrokerAckCooldown(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:  true,
+			LastSynced: now.Add(-30 * time.Second),
+		}},
+		DisableQuoteGate:          true,
+		BrokerAckFailureThreshold: 2,
+		BrokerAckFailureWindow:    10 * time.Minute,
+		BrokerAckFailureCooldown:  time.Minute,
+	})
+	for i := 0; i < 2; i++ {
+		supervisor.RecordBrokerOrderFailure(execution.BrokerOrderFailure{
+			Order: model.Order{
+				DeskID:     "sector-tech-a",
+				Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+			},
+			BrokerOrderID:  int64(200 + i),
+			Status:         "ApiPending",
+			Error:          "order not acknowledged by broker",
+			Unacknowledged: true,
+			At:             now.Add(-2*time.Minute + time.Duration(i)*time.Second),
+		})
+	}
+
+	policy := supervisor.EvaluateNow(now)
+	if !policy.AllowEntries {
+		t.Fatalf("expected broker ack cooldown to reopen entries, got reason %q", policy.Reason)
+	}
+	if policy.Mode != firm.EntryModeNormal {
+		t.Fatalf("expected normal mode, got %s", policy.Mode)
+	}
+}
+
+func TestRuntimeHealthBrokerAckCooldownSurvivesRollingWindowPrune(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:  true,
+			LastSynced: now.Add(-30 * time.Second),
+		}},
+		DisableQuoteGate:          true,
+		MaxBrokerSyncAge:          10 * time.Minute,
+		BrokerAckFailureThreshold: 3,
+		BrokerAckFailureWindow:    2 * time.Minute,
+		BrokerAckFailureCooldown:  5 * time.Minute,
+	})
+	for i := 0; i < 3; i++ {
+		supervisor.RecordBrokerOrderFailure(execution.BrokerOrderFailure{
+			Order: model.Order{
+				DeskID:     "sector-tech-a",
+				Instrument: model.Instrument{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+			},
+			BrokerOrderID:  int64(300 + i),
+			Status:         "ApiPending",
+			Cause:          execution.BrokerFailureCauseTWSOrderPrecautions,
+			Hint:           execution.BrokerFailureHintTWSOrderPrecautions,
+			Error:          "order not acknowledged by broker",
+			Unacknowledged: true,
+			At:             now.Add(time.Duration(i) * time.Second),
+		})
+	}
+
+	insideCooldown := now.Add(3 * time.Minute)
+	policy := supervisor.EvaluateNow(insideCooldown)
+	if policy.AllowEntries {
+		t.Fatal("expected broker ack cooldown to keep entries disabled after rolling window prune")
+	}
+	if policy.Reason != "broker_order_ack_failures:3/2m0s" {
+		t.Fatalf("expected latched broker ack failure reason, got %q", policy.Reason)
+	}
+	telemetry := supervisor.BrokerAckFailureTelemetry(insideCooldown)
+	if telemetry["broker_ack_failure_last_cause"] != execution.BrokerFailureCauseTWSOrderPrecautions {
+		t.Fatalf("expected cooldown telemetry to retain TWS cause after pruning, got %#v", telemetry["broker_ack_failure_last_cause"])
+	}
+	if telemetry["broker_ack_failure_last_hint"] == "" {
+		t.Fatal("expected cooldown telemetry to retain TWS hint after pruning")
+	}
+
+	afterCooldown := now.Add(7 * time.Minute)
+	policy = supervisor.EvaluateNow(afterCooldown)
+	if !policy.AllowEntries {
+		t.Fatalf("expected broker ack cooldown to expire, got reason %q", policy.Reason)
+	}
+	if policy.Mode != firm.EntryModeNormal {
+		t.Fatalf("expected normal mode, got %s", policy.Mode)
+	}
+}
+
+func TestRuntimeHealthQuoteGateDisabledDoesNotBypassPersistence(t *testing.T) {
+	now := time.Now().UTC()
+	supervisor := newRuntimeHealthSupervisor(runtimeHealthConfig{
+		Broker: stubHealthBroker{connected: true},
+		BrokerSync: stubHealthBook{status: book.BrokerSyncStatus{
+			Connected:  true,
+			LastSynced: now.Add(-30 * time.Second),
+		}},
+		MarketFreshness: stubHealthMarket{report: marketdata.QuoteFreshnessReport{
+			Total:   1,
+			Missing: 1,
+		}},
+		PersistenceProbe: stubHealthStore{err: errors.New("postgres unavailable")},
+		RequiredQuotes: []model.Instrument{
+			{Symbol: "SPY", SecType: "STK", Currency: "USD"},
+		},
+		DisableQuoteGate: true,
+	})
+
+	policy := supervisor.EvaluateNow(now)
+	if policy.AllowEntries {
+		t.Fatal("expected persistence failure to disable entries even when quote gate is disabled")
+	}
+	if policy.Reason != "persistence_unavailable" {
+		t.Fatalf("expected persistence_unavailable reason, got %q", policy.Reason)
 	}
 }
 

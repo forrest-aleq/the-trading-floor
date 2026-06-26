@@ -23,11 +23,14 @@ func TestDefaultWatchlistIsReferenceOnly(t *testing.T) {
 	}
 }
 
-func TestDefaultWatchlistRemainsTickerSilentByDefault(t *testing.T) {
+func TestDefaultWatchlistBootstrapsActiveCatalystUniverse(t *testing.T) {
 	t.Parallel()
 
-	if got := len(DefaultWatchlist()); got != 0 {
-		t.Fatalf("default watchlist len = %d, want 0", got)
+	got := symbols(DefaultWatchlist())
+	for _, want := range []string{"MU", "RACE", "EWY"} {
+		if !containsSymbol(got, want) {
+			t.Fatalf("default watchlist missing %s: %v", want, got)
+		}
 	}
 }
 
@@ -80,4 +83,13 @@ func symbols(instruments []model.Instrument) []string {
 		out = append(out, inst.Symbol)
 	}
 	return out
+}
+
+func containsSymbol(symbols []string, want string) bool {
+	for _, symbol := range symbols {
+		if symbol == want {
+			return true
+		}
+	}
+	return false
 }

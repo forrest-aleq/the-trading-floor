@@ -30,6 +30,13 @@ type liveSafetyGuard struct {
 	disabledByOnce bool
 }
 
+type liveSafetyReservation struct {
+	riskCents      int64
+	intentKey      string
+	reservedIntent bool
+	disabledByOnce bool
+}
+
 func newLiveSafetyGuardFromEnv() *liveSafetyGuard {
 	cfg := liveSafetyConfig{
 		KillSwitch: readAnyBoolEnv(false,
@@ -63,28 +70,28 @@ func newLiveSafetyGuardFromEnv() *liveSafetyGuard {
 	}
 }
 
-func (g *liveSafetyGuard) reserve(mapped MappedOrder, at time.Time) error {
+func (g *liveSafetyGuard) reserve(mapped MappedOrder, at time.Time) (*liveSafetyReservation, error) {
 	if g == nil {
-		return nil
+		return nil, nil
 	}
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
 	if g.killSwitchEnabled() {
-		return fmt.Errorf("kalshi_live_kill_switch_enabled")
+		return nil, fmt.Errorf("kalshi_live_kill_switch_enabled")
 	}
 
 	deskID := strings.ToLower(strings.TrimSpace(mapped.DeskID))
 	if len(g.cfg.AllowedDesks) > 0 {
 		if _, ok := g.cfg.AllowedDesks[deskID]; !ok {
-			return fmt.Errorf("kalshi_live_desk_not_allowed: %s", mapped.DeskID)
+			return nil, fmt.Errorf("kalshi_live_desk_not_allowed: %s", mapped.DeskID)
 		}
 	}
 
 	ticker := strings.ToUpper(strings.TrimSpace(mapped.Request.Ticker))
 	if len(g.cfg.AllowedTickers) > 0 {
 		if _, ok := g.cfg.AllowedTickers[ticker]; !ok {
-			return fmt.Errorf("kalshi_live_ticker_not_allowed: %s", mapped.Request.Ticker)
+			return nil, fmt.Errorf("kalshi_live_ticker_not_allowed: %s", mapped.Request.Ticker)
 		}
 	}
 
@@ -95,13 +102,13 @@ func (g *liveSafetyGuard) reserve(mapped MappedOrder, at time.Time) error {
 	defer g.mu.Unlock()
 
 	if g.disabledByOnce || (g.cfg.DisableAfterFirst && g.sessionOrders > 0) {
-		return fmt.Errorf("kalshi_live_canary_already_used")
+		return nil, fmt.Errorf("kalshi_live_canary_already_used")
 	}
 	if g.cfg.MaxOrders > 0 && g.sessionOrders >= g.cfg.MaxOrders {
-		return fmt.Errorf("kalshi_live_session_order_cap_reached: %d/%d", g.sessionOrders, g.cfg.MaxOrders)
+		return nil, fmt.Errorf("kalshi_live_session_order_cap_reached: %d/%d", g.sessionOrders, g.cfg.MaxOrders)
 	}
 	if g.cfg.MaxRiskCents > 0 && g.sessionRisk+mapped.EstimatedRiskCents > g.cfg.MaxRiskCents {
-		return fmt.Errorf("kalshi_live_session_risk_cap_reached: current=%s next=%s cap=%s",
+		return nil, fmt.Errorf("kalshi_live_session_risk_cap_reached: current=%s next=%s cap=%s",
 			FormatCents(g.sessionRisk),
 			FormatCents(mapped.EstimatedRiskCents),
 			FormatCents(g.cfg.MaxRiskCents),
@@ -109,19 +116,47 @@ func (g *liveSafetyGuard) reserve(mapped MappedOrder, at time.Time) error {
 	}
 	if g.cfg.DuplicateCooldown > 0 {
 		if previous, ok := g.recentIntents[intentKey]; ok && at.Sub(previous) < g.cfg.DuplicateCooldown {
-			return fmt.Errorf("kalshi_live_duplicate_intent_cooldown: %s cooldown=%s", intentKey, g.cfg.DuplicateCooldown)
+			return nil, fmt.Errorf("kalshi_live_duplicate_intent_cooldown: %s cooldown=%s", intentKey, g.cfg.DuplicateCooldown)
 		}
 	}
 
+	reservation := &liveSafetyReservation{
+		riskCents:      mapped.EstimatedRiskCents,
+		intentKey:      intentKey,
+		disabledByOnce: g.cfg.DisableAfterFirst,
+	}
 	g.sessionOrders++
 	g.sessionRisk += mapped.EstimatedRiskCents
 	if intentKey != "|" {
 		g.recentIntents[intentKey] = at
+		reservation.reservedIntent = true
 	}
 	if g.cfg.DisableAfterFirst {
 		g.disabledByOnce = true
 	}
-	return nil
+	return reservation, nil
+}
+
+func (g *liveSafetyGuard) release(reservation *liveSafetyReservation) {
+	if g == nil || reservation == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.sessionOrders > 0 {
+		g.sessionOrders--
+	}
+	g.sessionRisk -= reservation.riskCents
+	if g.sessionRisk < 0 {
+		g.sessionRisk = 0
+	}
+	if reservation.reservedIntent {
+		delete(g.recentIntents, reservation.intentKey)
+	}
+	if reservation.disabledByOnce {
+		g.disabledByOnce = false
+	}
 }
 
 func (g *liveSafetyGuard) killSwitchEnabled() bool {

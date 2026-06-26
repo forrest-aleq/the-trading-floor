@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // trading-day rollover needs America/New_York even in scratch containers
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -188,9 +189,12 @@ func main() {
 	}
 	mdMgr := marketdata.NewManager(marketState.Provider, marketState.RequestBudget, marketDataPollInterval)
 	marketBootstrap := marketrefs.StartupPricingWatchlist()
+	healthRequiredQuotes := marketBootstrap
 	if strings.HasPrefix(marketStateLabel, "massive_free+") {
-		marketBootstrap = limitInstruments(marketBootstrap, readRuntimeInt("MARKET_DATA_REQUIRED_QUOTE_LIMIT", 4))
+		healthRequiredQuotes = limitInstruments(marketBootstrap, readRuntimeInt("MARKET_DATA_REQUIRED_QUOTE_LIMIT", 4))
 	}
+	minFreshHealthQuotes := readRuntimeInt("MARKET_DATA_MIN_FRESH_QUOTES", len(healthRequiredQuotes))
+	disableHealthQuoteGate := readRuntimeBool("MARKET_DATA_DISABLE_HEALTH_QUOTE_GATE", false)
 	var positionWriter *positionPersistenceWriter
 	if db != nil {
 		positionWriter = newPositionPersistenceWriter(
@@ -233,6 +237,7 @@ func main() {
 		BrokerExecutionRequired: brokerExecutionRequired,
 		KalshiExecutionRequired: kalshiExecutionRequired,
 		KalshiExecutionReady:    kalshiExecutor != nil,
+		KalshiDryRun:            kalshiExecutor == nil || kalshiExecutor.IsDryRun(),
 		BrokerConnected:         ibkrClient.IsConnected(),
 		BrokerPaper:             ibkrClient.IsPaper(),
 		MarketStateConfigured:   marketState.Provider != nil,
@@ -249,6 +254,7 @@ func main() {
 			"broker_execution_required", brokerExecutionRequired,
 			"kalshi_execution_required", kalshiExecutionRequired,
 			"kalshi_execution_ready", kalshiExecutor != nil,
+			"kalshi_dry_run", kalshiExecutor == nil || kalshiExecutor.IsDryRun(),
 			"broker_connected", ibkrClient.IsConnected(),
 			"broker_paper", ibkrClient.IsPaper(),
 			"market_data_provider", firstNonEmpty(marketState.Label, string(marketState.Mode)),
@@ -266,6 +272,12 @@ func main() {
 
 	// --- Wire (Signal Feeds) ---
 	wireMgr := wire.NewManager()
+	startManualInputServer(ctx, manualInputServerConfig{
+		Enabled: readRuntimeBool("MANUAL_INPUT_SERVER_ENABLED", false),
+		Bind:    os.Getenv("MANUAL_INPUT_BIND"),
+		Token:   os.Getenv("MANUAL_INPUT_TOKEN"),
+		Publish: wireMgr.Publish,
+	})
 
 	// --- Shared Services ---
 	riskGate := risk.NewGate(risk.DefaultLimits())
@@ -383,7 +395,10 @@ func main() {
 		}
 	}
 	learnWorker := memory.NewLearnWorker(beliefGraph, engramStore)
-	decisionThresholds := loadDecisionThresholds()
+	if runtimeMode == runtimeModePaperDiscovery {
+		scanner.ApplyPaperDiscoveryDefaults()
+	}
+	decisionThresholds := loadDecisionThresholdsForMode(runtimeMode)
 	scan := scanner.NewEngine(llmRouter, decisionThresholds.ScannerMinScore)
 	researchDesk := research.NewDesk(llmRouter, decisionThresholds.ResearchMinConviction)
 	researchDesk.SetMarketContextService(marketcontext.NewService(mdMgr))
@@ -427,6 +442,7 @@ func main() {
 	})
 	startBeliefDecay(ctx, beliefGraph)
 	slog.Info("decision services initialized",
+		"runtime_mode", runtimeMode,
 		"scanner_min_score", decisionThresholds.ScannerMinScore,
 		"research_min_conviction", decisionThresholds.ResearchMinConviction,
 		"desk_min_conviction", decisionThresholds.DeskMinConviction,
@@ -470,17 +486,25 @@ func main() {
 		maxBrokerSyncAge := readRuntimeDuration("RUNTIME_HEALTH_MAX_BROKER_SYNC_AGE", 2*time.Minute)
 		maxQuoteAge := readRuntimeDuration("RUNTIME_HEALTH_MAX_QUOTE_AGE", defaultMaxQuoteAge)
 		persistenceProbeTimeout := readRuntimeDuration("RUNTIME_HEALTH_PERSISTENCE_TIMEOUT", 2*time.Second)
+		brokerAckFailureThreshold := readRuntimeInt("RUNTIME_HEALTH_BROKER_ACK_FAILURE_THRESHOLD", 3)
+		brokerAckFailureWindow := readRuntimeDuration("RUNTIME_HEALTH_BROKER_ACK_FAILURE_WINDOW", 2*time.Minute)
+		brokerAckFailureCooldown := readRuntimeDuration("RUNTIME_HEALTH_BROKER_ACK_FAILURE_COOLDOWN", 5*time.Minute)
 		health := newRuntimeHealthSupervisor(runtimeHealthConfig{
-			Broker:                  ibkrClient,
-			BrokerStatus:            ibkrClient,
-			BrokerSync:              bk,
-			MarketFreshness:         mdMgr,
-			PersistenceProbe:        db,
-			RequiredQuotes:          marketBootstrap,
-			Interval:                healthInterval,
-			MaxBrokerSyncAge:        maxBrokerSyncAge,
-			MaxQuoteAge:             maxQuoteAge,
-			PersistenceProbeTimeout: persistenceProbeTimeout,
+			Broker:                    ibkrClient,
+			BrokerStatus:              ibkrClient,
+			BrokerSync:                bk,
+			MarketFreshness:           mdMgr,
+			PersistenceProbe:          db,
+			RequiredQuotes:            healthRequiredQuotes,
+			MinFreshQuotes:            minFreshHealthQuotes,
+			DisableQuoteGate:          disableHealthQuoteGate,
+			Interval:                  healthInterval,
+			MaxBrokerSyncAge:          maxBrokerSyncAge,
+			MaxQuoteAge:               maxQuoteAge,
+			PersistenceProbeTimeout:   persistenceProbeTimeout,
+			BrokerAckFailureThreshold: brokerAckFailureThreshold,
+			BrokerAckFailureWindow:    brokerAckFailureWindow,
+			BrokerAckFailureCooldown:  brokerAckFailureCooldown,
 			OnPolicyChange: func(policy firm.EntryPolicy, details map[string]any) {
 				audit.Record("runtime_entry_policy", "", "", map[string]any{
 					"mode":          policy.Mode,
@@ -491,17 +515,23 @@ func main() {
 				})
 			},
 		})
+		execMgr.SetBrokerOrderFailureObserver(health)
 		brokerEntryControl = health
 		health.EvaluateNow(time.Now().UTC())
 		observe.SafeGo(slog.Default().With("component", "runtime"), "runtime health loop panic", func() {
 			health.Run(ctx)
 		}, "task", "runtime_health")
 		slog.Info("runtime health supervisor initialized",
-			"required_quotes", len(marketBootstrap),
+			"required_quotes", len(healthRequiredQuotes),
+			"min_fresh_quotes", normalizeMinFreshQuotes(minFreshHealthQuotes, len(healthRequiredQuotes)),
+			"market_data_quote_gate_disabled", disableHealthQuoteGate,
 			"interval", healthInterval,
 			"max_broker_sync_age", maxBrokerSyncAge,
 			"max_quote_age", maxQuoteAge,
 			"persistence_timeout", persistenceProbeTimeout,
+			"broker_ack_failure_threshold", brokerAckFailureThreshold,
+			"broker_ack_failure_window", brokerAckFailureWindow,
+			"broker_ack_failure_cooldown", brokerAckFailureCooldown,
 		)
 	} else if !brokerExecutionRequired {
 		slog.Info("runtime health supervisor disabled; selected desks do not use broker execution")
@@ -575,7 +605,7 @@ func main() {
 
 	// --- Working Order Monitor ---
 	workingOrderPollInterval := readRuntimeDuration("EXECUTION_WORKING_ORDER_POLL_INTERVAL", 15*time.Second)
-	stalePaperOrderAge := readRuntimeDuration("EXECUTION_STALE_PAPER_ORDER_AGE", 2*time.Minute)
+	stalePaperOrderAge := readRuntimeDuration("EXECUTION_STALE_PAPER_ORDER_AGE", 0)
 	observe.SafeGo(slog.Default().With("component", "runtime"), "working order loop panic", func() {
 		if workingOrderPollInterval <= 0 {
 			return
@@ -743,6 +773,15 @@ func main() {
 			"price":  closePrice,
 		})
 	})
+	monitor.SetStaleMarkMaxAge(readRuntimeDuration("MONITOR_STALE_MARK_MAX_AGE", 2*time.Minute))
+	monitor.SetLifecycleHandler(func(pos *model.Position, alert model.LifecycleAlert) {
+		audit.Record("position_lifecycle", pos.DeskID, pos.ThesisID, map[string]any{
+			"kind":       alert.Kind,
+			"severity":   alert.Severity,
+			"message":    alert.Message,
+			"instrument": alert.Instrument,
+		})
+	})
 	observe.SafeGo(slog.Default().With("component", "runtime"), "position monitor panic", func() {
 		monitor.Run(ctx)
 	}, "task", "position_monitor")
@@ -797,7 +836,7 @@ func main() {
 	)
 
 	slog.Info("trading floor is LIVE — processing signals")
-	startRuntimeHeartbeat(ctx, floor, bk)
+	startRuntimeHeartbeat(ctx, floor, bk, execMgr, brokerEntryControl, disableHealthQuoteGate)
 
 	if err := floor.Run(ctx); err != nil {
 		if err == context.Canceled {
@@ -877,7 +916,7 @@ func startBeliefDecay(ctx context.Context, graph *belief.Graph) {
 	}, "interval", interval.String(), "decay_pct", decayPct)
 }
 
-func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book) {
+func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book, execMgr *execution.Manager, brokerEntryControl firm.EntryControl, marketDataQuoteGateDisabled bool) {
 	if floor == nil || bk == nil {
 		return
 	}
@@ -899,6 +938,20 @@ func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book
 			case <-ticker.C:
 				stats := floor.Stats()
 				snapshot := bk.Snapshot()
+				brokerSync := bk.BrokerSyncStatus()
+				tokenUsage := llm.TokenUsageStats()
+				workingOrders := 0
+				workingOrdersByStatus := map[string]int{}
+				if execMgr != nil {
+					for _, working := range execMgr.WorkingOrders() {
+						workingOrders++
+						status := strings.TrimSpace(working.BrokerStatus)
+						if status == "" {
+							status = string(working.State)
+						}
+						workingOrdersByStatus[status]++
+					}
+				}
 
 				signalDelta := stats.SignalsProcessed - prevSignals
 				tradeDelta := stats.TradesExecuted - prevTrades
@@ -906,6 +959,8 @@ func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book
 
 				fields := []any{
 					"workers", stats.Workers,
+					"default_workers", stats.DefaultWorkers,
+					"prediction_workers", stats.PredictionWorkers,
 					"signals_processed", stats.SignalsProcessed,
 					"signals_delta", signalDelta,
 					"trades_executed", stats.TradesExecuted,
@@ -918,6 +973,16 @@ func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book
 					"active_tasks", stats.ActiveTasks,
 					"task_queue_depth", stats.TaskQueueDepth,
 					"task_queue_capacity", stats.TaskQueueCap,
+					"default_task_queue_depth", stats.DefaultTaskQueueDepth,
+					"default_task_queue_capacity", stats.DefaultTaskQueueCap,
+					"prediction_task_queue_depth", stats.PredictionTaskQueueDepth,
+					"prediction_task_queue_capacity", stats.PredictionTaskQueueCap,
+					"overflow_depth", stats.OverflowDepth,
+					"overflow_capacity", stats.OverflowCap,
+					"default_overflow_depth", stats.DefaultOverflowDepth,
+					"default_overflow_capacity", stats.DefaultOverflowCap,
+					"prediction_overflow_depth", stats.PredictionOverflowDepth,
+					"prediction_overflow_capacity", stats.PredictionOverflowCap,
 					"wire_received", stats.WireStats.TotalReceived,
 					"wire_received_delta", receivedDelta,
 					"wire_deduped", stats.WireStats.TotalDeduped,
@@ -926,13 +991,71 @@ func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book
 					"wire_dropped", stats.WireStats.TotalDropped,
 					"open_positions", snapshot.OpenPositions,
 					"total_trades", snapshot.TotalTrades,
+					"working_orders", workingOrders,
+					"working_orders_by_status", workingOrdersByStatus,
 					"nav", snapshot.NAV,
 					"cash", snapshot.Cash,
 					"gross_exposure", snapshot.GrossExposure,
 					"net_exposure", snapshot.NetExposure,
 					"daily_pnl", snapshot.DailyPnL,
+					"daily_pnl_available", snapshot.DailyPnLAvailable,
+					"daily_pnl_source", snapshot.DailyPnLSource,
 					"monthly_pnl", snapshot.MonthlyPnL,
+					"broker_sync_connected", brokerSync.Connected,
+					"broker_sync_nav", brokerSync.NAV,
+					"broker_sync_cash", brokerSync.Cash,
+					"broker_sync_daily_pnl", brokerSync.DailyPnL,
+					"broker_sync_daily_pnl_available", brokerSync.DailyPnLAvailable,
+					"broker_sync_daily_pnl_source", brokerSync.DailyPnLSource,
+					"broker_sync_gross_exposure", brokerSync.GrossExposure,
+					"broker_sync_net_exposure", brokerSync.NetExposure,
+					"broker_sync_open_positions", brokerSync.OpenPositions,
+					"broker_sync_last_synced", brokerSync.LastSynced,
+					"broker_sync_last_account_synced", brokerSync.LastAccountSynced,
+					"broker_sync_last_pnl_synced", brokerSync.LastPnLSynced,
+					"broker_sync_last_positions_synced", brokerSync.LastPositionsSynced,
+					"broker_sync_last_failure", brokerSync.LastFailure,
+					"broker_sync_last_error", brokerSync.LastError,
+					"broker_sync_consecutive_failures", brokerSync.ConsecutiveFailures,
 					"received_by_source", stats.WireStats.ReceivedBySource,
+					"llm_attempts", tokenUsage.Attempts,
+					"llm_calls", tokenUsage.Calls,
+					"llm_errors", tokenUsage.Errors,
+					"llm_input_tokens", tokenUsage.InputTokens,
+					"llm_output_tokens", tokenUsage.OutputTokens,
+					"llm_total_tokens", tokenUsage.TotalTokens,
+					"llm_estimated_input_tokens_failed", tokenUsage.EstimatedInputTokens,
+					"llm_tokens_by_desk", tokenUsage.DeskTokens,
+					"llm_calls_by_desk", tokenUsage.DeskCalls,
+					"llm_attempts_by_desk", tokenUsage.DeskAttempts,
+					"llm_errors_by_desk", tokenUsage.DeskErrors,
+					"llm_tokens_by_stage", tokenUsage.StageTokens,
+					"llm_attempts_by_stage", tokenUsage.StageAttempts,
+					"llm_errors_by_stage", tokenUsage.StageErrors,
+					"llm_tokens_by_model", tokenUsage.ModelTokens,
+					"llm_attempts_by_model", tokenUsage.ModelAttempts,
+					"llm_errors_by_model", tokenUsage.ModelErrors,
+					"llm_last_model", tokenUsage.LastModel,
+				}
+				if brokerEntryControl != nil {
+					policy := brokerEntryControl.CurrentEntryPolicy()
+					fields = append(fields,
+						"broker_entry_mode", policy.Mode,
+						"broker_entry_allow_entries", policy.AllowEntries,
+						"broker_entry_reason", policy.Reason,
+						"broker_entry_updated_at", policy.UpdatedAt,
+						"market_data_quote_gate_disabled", marketDataQuoteGateDisabled,
+					)
+					if ackTelemetry, ok := brokerEntryControl.(interface {
+						BrokerAckFailureTelemetry(time.Time) map[string]any
+					}); ok {
+						for key, value := range ackTelemetry.BrokerAckFailureTelemetry(time.Now().UTC()) {
+							fields = append(fields, key, value)
+						}
+					}
+				}
+				if !tokenUsage.LastUpdated.IsZero() {
+					fields = append(fields, "llm_last_usage_age", time.Since(tokenUsage.LastUpdated).Round(time.Second).String())
 				}
 				if !stats.WireStats.LastSignalAt.IsZero() {
 					fields = append(fields,
@@ -953,6 +1076,9 @@ func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book
 				if stats.TaskQueueDepth > 0 && stats.TasksCompleted == 0 {
 					log.Warn("desk task queue is backlogged",
 						"task_queue_depth", stats.TaskQueueDepth,
+						"default_task_queue_depth", stats.DefaultTaskQueueDepth,
+						"prediction_task_queue_depth", stats.PredictionTaskQueueDepth,
+						"overflow_depth", stats.OverflowDepth,
 						"active_tasks", stats.ActiveTasks,
 						"tasks_enqueued", stats.TasksEnqueued,
 						"tasks_completed", stats.TasksCompleted,
@@ -987,9 +1113,19 @@ type decisionThresholdConfig struct {
 }
 
 func loadDecisionThresholds() decisionThresholdConfig {
-	researchMin := readRuntimeFloatRange("RESEARCH_MIN_CONVICTION", 0.65, 0.01, 1.0)
+	return loadDecisionThresholdsForMode(runtimeModeDev)
+}
+
+func loadDecisionThresholdsForMode(mode runtimeMode) decisionThresholdConfig {
+	scannerDefault := 70.0
+	researchDefault := 0.65
+	if mode == runtimeModePaperDiscovery {
+		scannerDefault = 55
+		researchDefault = 0.50
+	}
+	researchMin := readRuntimeFloatRange("RESEARCH_MIN_CONVICTION", researchDefault, 0.01, 1.0)
 	return decisionThresholdConfig{
-		ScannerMinScore:       readRuntimeFloatRange("SCANNER_MIN_SCORE", 70, 1, 100),
+		ScannerMinScore:       readRuntimeFloatRange("SCANNER_MIN_SCORE", scannerDefault, 1, 100),
 		ResearchMinConviction: researchMin,
 		DeskMinConviction:     readRuntimeFloatRange("DESK_MIN_CONVICTION", researchMin, 0.01, 1.0),
 		CouncilThreshold:      readRuntimeFloatRange("DESK_COUNCIL_THRESHOLD", 0.02, 0.0001, 1.0),

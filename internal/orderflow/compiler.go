@@ -2,6 +2,7 @@ package orderflow
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -15,6 +16,9 @@ const (
 	adaptiveMaxSpreadBps         = 5.0
 	midPriceMaxSpreadBps         = 40.0
 	explicitMidpriceToleranceBps = 15.0
+	maxExplicitReferenceBps      = 2500.0
+	freshQuoteLimitAggressionBps = 5.0
+	referenceLimitAggressionBps  = 50.0
 )
 
 // Compiler deterministically translates theses and positions into executable orders.
@@ -44,6 +48,14 @@ func (c *Compiler) CompileEntry(input EntryInput) (*model.Order, error) {
 	instrument := thesis.PrimaryInstrument()
 	if instrument.Symbol == "" {
 		return nil, fmt.Errorf("primary instrument required")
+	}
+	if instrument.IsKalshi() {
+		return nil, fmt.Errorf("prediction-market instrument %q cannot be compiled for broker execution", instrument.Symbol)
+	}
+	for _, leg := range thesis.Legs {
+		if leg.Instrument.IsKalshi() {
+			return nil, fmt.Errorf("prediction-market leg %q cannot be compiled for broker execution", leg.Instrument.Symbol)
+		}
 	}
 
 	quantity := input.Units
@@ -212,39 +224,103 @@ func chooseEntryOrder(thesis *model.Thesis) (model.OrderType, float64) {
 		return model.OrderMarket, 0
 	}
 	if thesis.EntryPrice > 0 {
-		if shouldUseMidPrice(thesis, thesis.EntryPrice) {
-			if capPrice := aggressiveTouch(thesis.Direction, thesis.MarketContext); capPrice > 0 {
-				return model.OrderMidPrice, capPrice
+		if shouldReplaceImplausibleExplicitEntry(thesis, thesis.EntryPrice) {
+			if orderType, price, ok := chooseFreshQuoteOrder(thesis); ok {
+				return orderType, price
+			}
+			if price := marketContextReferencePrice(thesis.MarketContext); price > 0 {
+				return model.OrderLimit, aggressiveReferenceLimit(thesis.Direction, price)
 			}
 		}
-		return model.OrderLimit, thesis.EntryPrice
+		if shouldUseFreshQuoteForExplicitEntry(thesis, thesis.EntryPrice) {
+			if orderType, price, ok := chooseFreshQuoteOrder(thesis); ok {
+				return orderType, price
+			}
+		}
+		if shouldAggressReferenceLimit(thesis, thesis.EntryPrice) {
+			return model.OrderLimit, aggressiveReferenceLimit(thesis.Direction, thesis.EntryPrice)
+		}
+		return model.OrderLimit, roundReferenceLimit(thesis.EntryPrice)
 	}
 	if thesis.IsMultiLeg() {
 		return model.OrderMarket, 0
 	}
 	if !hasFreshQuote(thesis.MarketContext) {
+		if price := thesisReferencePrice(thesis); price > 0 && referenceLimitEligible(thesis.PrimaryInstrument()) {
+			return model.OrderLimit, aggressiveReferenceLimit(thesis.Direction, price)
+		}
 		return model.OrderMarket, 0
 	}
 
-	switch {
-	case thesis.MarketContext.SpreadBps > 0 && thesis.MarketContext.SpreadBps <= adaptiveMaxSpreadBps:
-		if price := aggressiveTouch(thesis.Direction, thesis.MarketContext); price > 0 {
-			return model.OrderAdaptive, price
-		}
-	case thesis.MarketContext.SpreadBps > 0 && thesis.MarketContext.SpreadBps <= midPriceMaxSpreadBps:
-		if price := aggressiveTouch(thesis.Direction, thesis.MarketContext); price > 0 {
-			return model.OrderMidPrice, price
-		}
-	default:
-		if price := passiveTouch(thesis.Direction, thesis.MarketContext); price > 0 {
-			return model.OrderLimit, price
-		}
+	if orderType, price, ok := chooseFreshQuoteOrder(thesis); ok {
+		return orderType, price
 	}
 
 	if price := thesisReferencePrice(thesis); price > 0 {
-		return model.OrderLimit, price
+		return model.OrderLimit, roundReferenceLimit(price)
 	}
 	return model.OrderMarket, 0
+}
+
+func shouldReplaceImplausibleExplicitEntry(thesis *model.Thesis, entryPrice float64) bool {
+	if thesis == nil || thesis.IsMultiLeg() || entryPrice <= 0 || !referenceLimitEligible(thesis.PrimaryInstrument()) {
+		return false
+	}
+	reference := marketContextReferencePrice(thesis.MarketContext)
+	if reference <= 0 {
+		return false
+	}
+	return absBps(entryPrice, reference) > maxExplicitReferenceBps
+}
+
+func marketContextReferencePrice(ctx *model.MarketContext) float64 {
+	if ctx == nil {
+		return 0
+	}
+	for _, candidate := range []float64{
+		ctx.MidPrice,
+		ctx.CurrentPrice,
+		ctx.AskPrice,
+		ctx.BidPrice,
+	} {
+		if candidate > 0 {
+			return candidate
+		}
+	}
+	return 0
+}
+
+func chooseFreshQuoteOrder(thesis *model.Thesis) (model.OrderType, float64, bool) {
+	if thesis == nil || thesis.IsMultiLeg() || !hasFreshQuote(thesis.MarketContext) {
+		return "", 0, false
+	}
+	price := marketableTouchLimit(thesis.Direction, thesis.MarketContext)
+	if price <= 0 {
+		return "", 0, false
+	}
+	switch {
+	case thesis.MarketContext.SpreadBps > 0 && thesis.MarketContext.SpreadBps <= adaptiveMaxSpreadBps:
+		return model.OrderAdaptive, price, true
+	default:
+		return model.OrderLimit, price, true
+	}
+}
+
+func shouldUseFreshQuoteForExplicitEntry(thesis *model.Thesis, entryPrice float64) bool {
+	if thesis == nil || thesis.MarketContext == nil || entryPrice <= 0 || thesis.IsMultiLeg() {
+		return false
+	}
+	if !hasFreshQuote(thesis.MarketContext) {
+		return false
+	}
+	reference := thesis.MarketContext.MidPrice
+	if reference <= 0 {
+		reference = thesis.MarketContext.CurrentPrice
+	}
+	if reference <= 0 {
+		return false
+	}
+	return absBps(entryPrice, reference) <= explicitMidpriceToleranceBps
 }
 
 func shouldUseMidPrice(thesis *model.Thesis, entryPrice float64) bool {
@@ -270,6 +346,45 @@ func shouldUseMidPrice(thesis *model.Thesis, entryPrice float64) bool {
 	}
 	diffBps := absBps(entryPrice, reference)
 	return diffBps <= explicitMidpriceToleranceBps
+}
+
+func shouldAggressReferenceLimit(thesis *model.Thesis, entryPrice float64) bool {
+	if thesis == nil || entryPrice <= 0 || thesis.IsMultiLeg() || !referenceLimitEligible(thesis.PrimaryInstrument()) {
+		return false
+	}
+	if hasFreshQuote(thesis.MarketContext) {
+		return false
+	}
+	if thesis.MarketContext == nil || thesis.MarketContext.CurrentPrice <= 0 {
+		return false
+	}
+	return absBps(entryPrice, thesis.MarketContext.CurrentPrice) <= 1
+}
+
+func referenceLimitEligible(inst model.Instrument) bool {
+	secType := strings.ToUpper(strings.TrimSpace(inst.SecType))
+	return secType == "" || secType == "STK" || secType == "ETF"
+}
+
+func aggressiveReferenceLimit(direction model.TradeDirection, reference float64) float64 {
+	if reference <= 0 {
+		return 0
+	}
+	multiplier := 1 + referenceLimitAggressionBps/10000
+	if direction == model.Short {
+		multiplier = 1 - referenceLimitAggressionBps/10000
+	}
+	return roundReferenceLimit(reference * multiplier)
+}
+
+func roundReferenceLimit(price float64) float64 {
+	if price <= 0 {
+		return 0
+	}
+	if price < 1 {
+		return math.Round(price*10000) / 10000
+	}
+	return math.Round(price*100) / 100
 }
 
 func hasFreshQuote(ctx *model.MarketContext) bool {
@@ -329,4 +444,16 @@ func absBps(a, b float64) float64 {
 		diff = -diff
 	}
 	return (diff / b) * 10000
+}
+
+func marketableTouchLimit(direction model.TradeDirection, ctx *model.MarketContext) float64 {
+	touch := aggressiveTouch(direction, ctx)
+	if touch <= 0 {
+		return 0
+	}
+	multiplier := 1 + freshQuoteLimitAggressionBps/10000
+	if direction == model.Short {
+		multiplier = 1 - freshQuoteLimitAggressionBps/10000
+	}
+	return roundReferenceLimit(touch * multiplier)
 }

@@ -1,5 +1,16 @@
 {
-  "market_signal_watchlist": [],
+  "market_signal_watchlist": [
+    { "symbol": "SPY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "QQQ", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "IWM", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "SMH", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "MU", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "RACE", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "EWY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "NVDA", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "AMD", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "TSM", "sec_type": "STK", "exchange": "SMART", "currency": "USD" }
+  ],
   "startup_pricing_watchlist": [
     { "symbol": "SPY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
     { "symbol": "QQQ", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
@@ -10,6 +21,9 @@
     { "symbol": "GLD", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
     { "symbol": "USO", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
     { "symbol": "SMH", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "MU", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "RACE", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "EWY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
     { "symbol": "VIX", "sec_type": "IND", "exchange": "CBOE", "currency": "USD" }
   ],
   "earnings_watchlist": [
@@ -21,6 +35,8 @@
     { "symbol": "META", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
     { "symbol": "TSLA", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
     { "symbol": "AMD", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "MU", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
+    { "symbol": "RACE", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
     { "symbol": "LLY", "sec_type": "STK", "exchange": "SMART", "currency": "USD" },
     { "symbol": "JPM", "sec_type": "STK", "exchange": "SMART", "currency": "USD" }
   ],

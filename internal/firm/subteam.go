@@ -107,6 +107,10 @@ func SpawnSubTeam(ctx context.Context, llmRouter *llm.Router, cfg SubTeamConfig)
 
 func (st *SubTeam) run(ctx context.Context) *SubTeamResult {
 	start := time.Now()
+	ctx = llm.WithUsageContext(ctx, llm.UsageContext{
+		DeskID: st.DeskID,
+		Stage:  "subteam",
+	})
 	st.log.Info("sub-team spawned", "purpose", st.Purpose, "agents", len(st.Agents))
 
 	// Run all agents in parallel
@@ -122,6 +126,7 @@ func (st *SubTeam) run(ctx context.Context) *SubTeamResult {
 			prompt := fmt.Sprintf("You are a %s on a temporary research sub-team. Purpose: %s\n\nProvide your analysis in 2-3 paragraphs. Be specific with data points, names, and numbers.", a.Role, st.Purpose)
 
 			callCtx, cancel := context.WithTimeout(ctx, subTeamAgentTimeout)
+			callCtx = llm.WithUsageContext(callCtx, llm.UsageContext{Stage: "subteam:" + a.Role})
 			defer cancel()
 
 			resp, err := st.llm.AskWithLimit(callCtx, llm.TierAnalysis, a.Prompt, prompt, subTeamAgentMaxTokens, 0.4)
@@ -171,6 +176,7 @@ func (st *SubTeam) synthesize(ctx context.Context, analyses map[string]string) s
 	systemPrompt := "You are a research director synthesizing analyses from your sub-team. Combine their perspectives into a unified recommendation. Highlight areas of agreement and disagreement. Provide a clear actionable conclusion in 2-3 paragraphs."
 
 	callCtx, cancel := context.WithTimeout(ctx, subTeamSynthesisTimout)
+	callCtx = llm.WithUsageContext(callCtx, llm.UsageContext{Stage: "subteam:synthesis"})
 	defer cancel()
 
 	resp, err := st.llm.AskWithLimit(callCtx, llm.TierAnalysis, systemPrompt, prompt, subTeamSynthMaxTokens, 0.4)

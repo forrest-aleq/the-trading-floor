@@ -155,6 +155,15 @@ func (s *researchJSONModePrimaryErrorRetryClient) Complete(_ context.Context, re
 	}, nil
 }
 
+type researchAlwaysErrorClient struct {
+	requests []llm.Request
+}
+
+func (s *researchAlwaysErrorClient) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	s.requests = append(s.requests, req)
+	return nil, errors.New("context deadline exceeded")
+}
+
 type researchGroundedThoughtFallbackClient struct {
 	requests []llm.Request
 }
@@ -187,6 +196,9 @@ func TestInvestigateUsesThoughtModeForQwenResearch(t *testing.T) {
 	if client.requests[0].JSONMode {
 		t.Fatal("expected Qwen research request to avoid strict JSON mode")
 	}
+	if got := client.requests[0].Model; got != "qwen/qwen3.5-35b-a3b" {
+		t.Fatalf("primary research model = %q, want configured RESEARCH_MODEL", got)
+	}
 	if got := client.requests[0].Messages[0].Content; got == desk.systemPrompt {
 		t.Fatal("expected thought-friendly research prompt prefix")
 	}
@@ -195,6 +207,31 @@ func TestInvestigateUsesThoughtModeForQwenResearch(t *testing.T) {
 	}
 	if got := client.requests[0].Messages[1].Content; !strings.Contains(got, "Federal Reserve speech signaled a more hawkish balance of risks.") {
 		t.Fatalf("expected research prompt to include signal content, got %q", got)
+	}
+}
+
+func TestInvestigatePrimaryResearchUsesConfiguredModel(t *testing.T) {
+	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.6-flash")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "json")
+
+	client := &researchStubClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected thesis, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis")
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one primary request, got %d", len(client.requests))
+	}
+	if got := client.requests[0].Model; got != "qwen/qwen3.6-flash" {
+		t.Fatalf("primary research model = %q, want configured RESEARCH_MODEL", got)
+	}
+	if !client.requests[0].JSONMode {
+		t.Fatal("expected JSON-mode primary research request")
 	}
 }
 
@@ -415,6 +452,40 @@ func TestInvestigateJSONModeRetryRecoversPrimaryError(t *testing.T) {
 	}
 	if !client.requests[1].JSONMode {
 		t.Fatal("expected retry request to use strict JSON mode")
+	}
+}
+
+func TestInvestigatePaperModeRecoversGroundedThesisAfterLLMErrors(t *testing.T) {
+	t.Setenv("FLOOR_RUNTIME_MODE", "paper")
+	t.Setenv("RESEARCH_MODEL", "qwen/qwen3.6-flash")
+	t.Setenv("RESEARCH_RETRY_MODEL", "qwen/qwen3.6-flash")
+	t.Setenv("RESEARCH_RESPONSE_MODE", "json")
+
+	client := &researchAlwaysErrorClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.65)
+	desk.SetMarketContextService(marketcontext.NewService(researchMarketContextStub{price: 91.25}))
+
+	thesis, err := desk.Investigate(context.Background(), testOpportunity(), testSignal(), "macro-rates-a")
+	if err != nil {
+		t.Fatalf("expected paper grounded recovery to produce thesis, got %v", err)
+	}
+	if thesis == nil {
+		t.Fatal("expected thesis from paper grounded recovery")
+	}
+	if got := len(client.requests); got != 2 {
+		t.Fatalf("expected primary request plus retry before recovery, got %d", got)
+	}
+	if thesis.PrimaryInstrument().Symbol != "TLT" {
+		t.Fatalf("expected recovered instrument TLT, got %q", thesis.PrimaryInstrument().Symbol)
+	}
+	if thesis.Direction != model.Long {
+		t.Fatalf("expected recovered direction long, got %s", thesis.Direction)
+	}
+	if thesis.Conviction != 0.68 {
+		t.Fatalf("expected recovered conviction 0.68, got %.2f", thesis.Conviction)
+	}
+	if thesis.EntryPrice != 91.25 {
+		t.Fatalf("expected recovered entry price 91.25, got %.2f", thesis.EntryPrice)
 	}
 }
 
@@ -823,6 +894,131 @@ func TestEnrichResearchJSONOverridesBadKalshiInstrumentTyping(t *testing.T) {
 	}
 	if payload.EntryPrice != 0.65 || payload.Target != 0.80 || payload.Stop != 0.30 {
 		t.Fatalf("expected percentage prices to normalize to probabilities, got entry=%.2f target=%.2f stop=%.2f", payload.EntryPrice, payload.Target, payload.Stop)
+	}
+}
+
+func TestDeterministicKalshiPaperDiscoveryInvestigationBypassesLLM(t *testing.T) {
+	t.Setenv("FLOOR_RUNTIME_MODE", "paper_discovery")
+	t.Setenv("KALSHI_LIVE_TRADING", "false")
+	t.Setenv("KALSHI_MIN_CONVICTION", "0.55")
+
+	client := &researchStubClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.5)
+	opp := &model.Opportunity{
+		ID: "opp-kalshi-fast",
+		Instruments: []model.Instrument{model.NormalizeKalshiInstrument(model.Instrument{
+			Symbol: "KXTEST-26DEC31",
+		})},
+		Direction: model.Short,
+		Urgency:   0.35,
+		Score:     52,
+		Category:  "prediction_market",
+		SignalIDs: []string{"sig-kalshi-fast"},
+		CreatedAt: time.Now(),
+	}
+	sig := signal.Signal{
+		ID:        "sig-kalshi-fast",
+		Source:    "kalshi-market",
+		Type:      signal.TypeAlternative,
+		Category:  "prediction_market",
+		Timestamp: time.Now(),
+		Urgency:   0.35,
+		Raw: []byte(`{
+			"title":"Will the test event happen?",
+			"yes_bid_dollars":"0.70",
+			"yes_ask_dollars":"0.75",
+			"no_bid_dollars":"0.23",
+			"no_ask_dollars":"0.25"
+		}`),
+	}
+
+	result, err := desk.InvestigateDetailed(context.Background(), opp, sig, "kalshi-macro-a")
+	if err != nil {
+		t.Fatalf("expected deterministic investigation, got error: %v", err)
+	}
+	if !result.Accepted {
+		t.Fatalf("expected accepted investigation, got reason %q", result.Reason)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("expected Kalshi fast path to bypass LLM, got %d requests", len(client.requests))
+	}
+	if result.Thesis == nil {
+		t.Fatal("expected thesis")
+	}
+	if inst := result.Thesis.PrimaryInstrument(); inst.Symbol != "KXTEST-26DEC31" || inst.SecType != model.SecTypeKalshi {
+		t.Fatalf("expected normalized Kalshi instrument, got %+v", inst)
+	}
+	if result.Thesis.Direction != model.Short {
+		t.Fatalf("expected short thesis to buy NO, got %q", result.Thesis.Direction)
+	}
+	if result.Thesis.EntryPrice != 0.25 {
+		t.Fatalf("expected NO ask entry 0.25, got %.4f", result.Thesis.EntryPrice)
+	}
+	if result.Thesis.Conviction != 0.55 {
+		t.Fatalf("expected conviction floor 0.55, got %.4f", result.Thesis.Conviction)
+	}
+	if len(result.Thesis.Evidence) != 1 || !strings.Contains(result.Thesis.Evidence[0].Content, "test event") {
+		t.Fatalf("expected title evidence, got %+v", result.Thesis.Evidence)
+	}
+}
+
+func TestDeterministicKalshiLiveOverrideInvestigationBypassesLLM(t *testing.T) {
+	t.Setenv("FLOOR_RUNTIME_MODE", "live")
+	t.Setenv("KALSHI_LIVE_TRADING", "true")
+	t.Setenv("KALSHI_LIVE_DETERMINISTIC_FAST_PATH", "true")
+	t.Setenv("KALSHI_MIN_CONVICTION", "0.45")
+
+	client := &researchStubClient{}
+	desk := NewDesk(llm.NewRouter(client, client, client), 0.45)
+	opp := &model.Opportunity{
+		ID: "opp-kalshi-live-fast",
+		Instruments: []model.Instrument{model.NormalizeKalshiInstrument(model.Instrument{
+			Symbol: "KXLIVE-26DEC31",
+		})},
+		Direction: model.Long,
+		Urgency:   0.65,
+		Score:     57,
+		Category:  "prediction_market",
+		SignalIDs: []string{"sig-kalshi-live-fast"},
+		CreatedAt: time.Now(),
+	}
+	sig := signal.Signal{
+		ID:        "sig-kalshi-live-fast",
+		Source:    "kalshi-market",
+		Type:      signal.TypeAlternative,
+		Category:  "prediction_market",
+		Timestamp: time.Now(),
+		Urgency:   0.65,
+		Raw: []byte(`{
+			"title":"Will the live test event happen?",
+			"yes_bid_dollars":"0.42",
+			"yes_ask_dollars":"0.45",
+			"no_bid_dollars":"0.54",
+			"no_ask_dollars":"0.58"
+		}`),
+	}
+
+	result, err := desk.InvestigateDetailed(context.Background(), opp, sig, "kalshi-macro-a")
+	if err != nil {
+		t.Fatalf("expected deterministic live investigation, got error: %v", err)
+	}
+	if !result.Accepted {
+		t.Fatalf("expected accepted investigation, got reason %q", result.Reason)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("expected Kalshi live fast path to bypass LLM, got %d requests", len(client.requests))
+	}
+	if result.Thesis == nil {
+		t.Fatal("expected thesis")
+	}
+	if result.Thesis.EntryPrice != 0.45 {
+		t.Fatalf("expected YES ask entry 0.45, got %.4f", result.Thesis.EntryPrice)
+	}
+	if result.Thesis.Conviction != 0.57 {
+		t.Fatalf("expected score-derived conviction 0.57, got %.4f", result.Thesis.Conviction)
+	}
+	if !strings.Contains(strings.Join(result.Thesis.CounterArgs, " "), "Live deterministic Kalshi fast path") {
+		t.Fatalf("expected live fast-path counter args, got %+v", result.Thesis.CounterArgs)
 	}
 }
 

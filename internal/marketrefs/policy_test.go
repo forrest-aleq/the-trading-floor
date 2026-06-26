@@ -1,6 +1,10 @@
 package marketrefs
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/hnic/trading-floor/pkg/model"
+)
 
 func TestParsePolicyRequiresRegimeInstruments(t *testing.T) {
 	t.Parallel()
@@ -112,7 +116,24 @@ func TestEmbeddedPolicyBootstrapsSeriousReferenceUniverse(t *testing.T) {
 	if len(policy.StartupPricingWatchlist) < 6 {
 		t.Fatalf("startup pricing watchlist len = %d, want at least 6", len(policy.StartupPricingWatchlist))
 	}
+	for _, want := range []string{"MU", "RACE", "EWY"} {
+		if !policyContainsSymbol(policy.MarketSignalWatchlist, want) {
+			t.Fatalf("market signal watchlist missing %s", want)
+		}
+		if !policyContainsSymbol(policy.StartupPricingWatchlist, want) {
+			t.Fatalf("startup pricing watchlist missing %s", want)
+		}
+	}
 	if len(policy.EarningsWatchlist) < 6 {
 		t.Fatalf("earnings watchlist len = %d, want at least 6", len(policy.EarningsWatchlist))
 	}
+}
+
+func policyContainsSymbol(instruments []model.Instrument, want string) bool {
+	for _, inst := range instruments {
+		if inst.Symbol == want {
+			return true
+		}
+	}
+	return false
 }

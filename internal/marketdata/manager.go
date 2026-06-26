@@ -21,13 +21,15 @@ type PricePoint struct {
 }
 
 type QuoteFreshnessReport struct {
-	AsOf      time.Time     `json:"as_of"`
-	Total     int           `json:"total"`
-	Fresh     int           `json:"fresh"`
-	Stale     int           `json:"stale"`
-	Missing   int           `json:"missing"`
-	NewestAge time.Duration `json:"newest_age,omitempty"`
-	OldestAge time.Duration `json:"oldest_age,omitempty"`
+	AsOf           time.Time     `json:"as_of"`
+	Total          int           `json:"total"`
+	Fresh          int           `json:"fresh"`
+	Stale          int           `json:"stale"`
+	Missing        int           `json:"missing"`
+	NewestAge      time.Duration `json:"newest_age,omitempty"`
+	OldestAge      time.Duration `json:"oldest_age,omitempty"`
+	StaleSymbols   []string      `json:"stale_symbols,omitempty"`
+	MissingSymbols []string      `json:"missing_symbols,omitempty"`
 }
 
 const maxHistoryPointsPerInstrument = 256
@@ -175,12 +177,14 @@ func (m *Manager) FreshnessReport(instruments []model.Instrument, now time.Time,
 		quote, ok := m.lookupQuoteLocked(inst)
 		if !ok || quote.ReferencePrice() <= 0 {
 			report.Missing++
+			report.MissingSymbols = append(report.MissingSymbols, inst.Label())
 			continue
 		}
 
 		observedAt := quote.ObservedAt
 		if observedAt.IsZero() {
 			report.Missing++
+			report.MissingSymbols = append(report.MissingSymbols, inst.Label())
 			continue
 		}
 
@@ -197,6 +201,7 @@ func (m *Manager) FreshnessReport(instruments []model.Instrument, now time.Time,
 
 		if maxAge > 0 && age > maxAge {
 			report.Stale++
+			report.StaleSymbols = append(report.StaleSymbols, inst.Label())
 			continue
 		}
 		report.Fresh++

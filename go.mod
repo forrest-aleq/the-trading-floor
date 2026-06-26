@@ -24,3 +24,5 @@ require (
 	golang.org/x/text v0.29.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+replace github.com/scmhub/ibsync => ./third_party/ibsync

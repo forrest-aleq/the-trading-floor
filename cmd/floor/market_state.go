@@ -82,7 +82,13 @@ func loadMassiveBackedProvider() (string, marketdata.SnapshotProvider, error) {
 	switch marketdata.ResolveMassivePlan() {
 	case marketdata.MassivePlanBasicFree:
 		snapshotProvider := marketdata.NewHistoricalSnapshotProvider(polygonProvider)
-		return "massive_free+polygon_agg_snapshots", marketdata.NewSplitProvider(snapshotProvider, polygonProvider), nil
+		nasdaq := marketdata.NewNasdaqProvider()
+		if fallback, err := marketdata.NewFMPProvider(""); err == nil {
+			provider := marketdata.NewFallbackProvider(marketdata.NewFallbackProvider(snapshotProvider, fallback), nasdaq)
+			return "massive_free+polygon_agg_snapshots+fmp_fallback+nasdaq_quote", provider, nil
+		}
+		provider := marketdata.NewFallbackProvider(marketdata.NewSplitProvider(snapshotProvider, polygonProvider), nasdaq)
+		return "massive_free+polygon_agg_snapshots+nasdaq_quote", provider, nil
 	default:
 		var provider marketdata.SnapshotProvider = polygonProvider
 		label := "massive"
@@ -90,6 +96,8 @@ func loadMassiveBackedProvider() (string, marketdata.SnapshotProvider, error) {
 			provider = marketdata.NewFallbackProvider(provider, fallback)
 			label = "massive+fmp_fallback"
 		}
+		provider = marketdata.NewFallbackProvider(provider, marketdata.NewNasdaqProvider())
+		label += "+nasdaq_quote"
 		return label, provider, nil
 	}
 }

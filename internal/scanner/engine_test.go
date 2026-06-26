@@ -284,6 +284,58 @@ func restoreScannerRuntimeConfig(t *testing.T) {
 	})
 }
 
+func TestApplyPaperDiscoveryDefaultsEnablesKalshiMarketDiscovery(t *testing.T) {
+	restoreScannerRuntimeConfig(t)
+	t.Setenv("KALSHI_MARKET_DISCOVERY_ENABLED", "")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_SCORE", "")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_MAX_SPREAD", "")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_BUY_CHEAPER_SIDE", "")
+
+	kalshiMarketDiscoveryEnabled = false
+	kalshiMarketDiscoveryScore = 70
+	kalshiMarketDiscoveryMaxSpread = 0.05
+	kalshiMarketDiscoveryBuyCheaperSide = false
+
+	ApplyPaperDiscoveryDefaults()
+
+	if !kalshiMarketDiscoveryEnabled {
+		t.Fatal("expected paper discovery defaults to enable Kalshi market discovery")
+	}
+	if kalshiMarketDiscoveryScore != 52 {
+		t.Fatalf("discovery score = %.2f, want 52", kalshiMarketDiscoveryScore)
+	}
+	if kalshiMarketDiscoveryMaxSpread != 0.20 {
+		t.Fatalf("discovery max spread = %.2f, want 0.20", kalshiMarketDiscoveryMaxSpread)
+	}
+	if !kalshiMarketDiscoveryBuyCheaperSide {
+		t.Fatal("expected paper discovery defaults to buy cheaper side")
+	}
+}
+
+func TestApplyPaperDiscoveryDefaultsHonorsExplicitKalshiDiscoveryEnv(t *testing.T) {
+	restoreScannerRuntimeConfig(t)
+	t.Setenv("KALSHI_MARKET_DISCOVERY_ENABLED", "false")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_SCORE", "61")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_MAX_SPREAD", "0.04")
+	t.Setenv("KALSHI_MARKET_DISCOVERY_BUY_CHEAPER_SIDE", "false")
+	ReloadRuntimeConfig()
+
+	ApplyPaperDiscoveryDefaults()
+
+	if kalshiMarketDiscoveryEnabled {
+		t.Fatal("expected explicit env to keep Kalshi market discovery disabled")
+	}
+	if kalshiMarketDiscoveryScore != 61 {
+		t.Fatalf("discovery score = %.2f, want explicit env 61", kalshiMarketDiscoveryScore)
+	}
+	if kalshiMarketDiscoveryMaxSpread != 0.04 {
+		t.Fatalf("discovery max spread = %.2f, want explicit env 0.04", kalshiMarketDiscoveryMaxSpread)
+	}
+	if kalshiMarketDiscoveryBuyCheaperSide {
+		t.Fatal("expected explicit env to keep buy-cheaper-side disabled")
+	}
+}
+
 func TestEvaluateRetriesCompactPromptOnContextWindowError(t *testing.T) {
 	t.Setenv("SCANNER_RESPONSE_MODE", "json")
 
@@ -816,6 +868,31 @@ func TestEvaluateDetailedNormalizesKalshiTickerForPredictionMarket(t *testing.T)
 	inst := result.Opportunity.Instruments[0]
 	if inst.SecType != model.SecTypeKalshi || inst.Exchange != model.SecTypeKalshi {
 		t.Fatalf("expected Kalshi instrument, got %+v", inst)
+	}
+}
+
+func TestEvaluateDetailedRejectsKalshiTickerForBrokerDomain(t *testing.T) {
+	t.Setenv("SCANNER_RESPONSE_MODE", "json")
+
+	client := &scannerDeterministicClient{
+		content: `{"tradeable":true,"score":91,"instruments":[{"symbol":"KXTHORNE","sec_type":"STK","currency":"USD"}],"direction":"short","urgency":0.8,"category":"corporate","reasoning":"broker desk must not trade Kalshi symbols"}`,
+	}
+	engine := NewEngine(llm.NewRouter(client, client, client), 70)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:         "sig-internal-kalshi",
+		Source:     "internal/kalshi-tech-a",
+		Type:       signal.TypeAlternative,
+		Category:   "prediction_market",
+		Timestamp:  time.Now(),
+		Urgency:    0.8,
+		Translated: "Internal Kalshi thesis KXTHORNE asks corporate desk for cross-asset read-through.",
+	}, "corporate")
+	if result.Accepted {
+		t.Fatalf("expected Kalshi ticker to be rejected for broker domain, got %+v", result)
+	}
+	if result.Reason != "no_instruments" {
+		t.Fatalf("expected no_instruments reason, got %q", result.Reason)
 	}
 }
 

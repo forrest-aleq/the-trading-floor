@@ -242,6 +242,12 @@ func TestFreshnessReportCountsFreshStaleAndMissingQuotes(t *testing.T) {
 	if report.Missing != 1 {
 		t.Fatalf("expected 1 missing quote, got %d", report.Missing)
 	}
+	if len(report.MissingSymbols) != 1 || report.MissingSymbols[0] != "IWM" {
+		t.Fatalf("expected missing symbol IWM, got %+v", report.MissingSymbols)
+	}
+	if len(report.StaleSymbols) != 1 || report.StaleSymbols[0] != "QQQ" {
+		t.Fatalf("expected stale symbol QQQ, got %+v", report.StaleSymbols)
+	}
 	if report.OldestAge < 5*time.Minute-time.Second {
 		t.Fatalf("expected oldest age near 5m, got %s", report.OldestAge)
 	}

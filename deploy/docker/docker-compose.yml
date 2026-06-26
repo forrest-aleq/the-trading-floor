@@ -36,9 +36,9 @@ services:
       # LLM — set your OpenRouter API key
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
-      LLM_MODEL_SPEED: ${LLM_MODEL_SPEED:-qwen/qwen3.6-flash}
-      LLM_MODEL_ANALYSIS: ${LLM_MODEL_ANALYSIS:-qwen/qwen3.6-plus}
-      LLM_MODEL_CRITICAL: ${LLM_MODEL_CRITICAL:-qwen/qwen3.6-max-preview}
+      LLM_MODEL_SPEED: ${LLM_MODEL_SPEED:-qwen/qwen3.7-plus}
+      LLM_MODEL_ANALYSIS: ${LLM_MODEL_ANALYSIS:-z-ai/glm-5.2}
+      LLM_MODEL_CRITICAL: ${LLM_MODEL_CRITICAL:-moonshotai/kimi-k2.7-code}
 
       TRADING_FLOOR_MIGRATION_PATH: /migrations
     extra_hosts:

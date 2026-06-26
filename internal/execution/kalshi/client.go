@@ -145,6 +145,62 @@ type OrderbookResponse struct {
 	Orderbook Orderbook `json:"orderbook"`
 }
 
+type OrderQuery struct {
+	Ticker      string
+	EventTicker string
+	Status      string
+	Limit       int
+	Cursor      string
+}
+
+type OrdersResponse struct {
+	Orders []OrderResponse `json:"orders"`
+	Cursor string          `json:"cursor"`
+}
+
+type CancelOrderResponse struct {
+	Order     OrderResponse `json:"order"`
+	ReducedBy string        `json:"reduced_by_fp"`
+}
+
+type PositionQuery struct {
+	Ticker      string
+	EventTicker string
+	CountFilter string
+	Limit       int
+	Cursor      string
+}
+
+type MarketPosition struct {
+	Ticker                string `json:"ticker"`
+	TotalTradedDollars    string `json:"total_traded_dollars"`
+	PositionFP            string `json:"position_fp"`
+	MarketExposureDollars string `json:"market_exposure_dollars"`
+	RealizedPNLDollars    string `json:"realized_pnl_dollars"`
+	RestingOrdersCount    int64  `json:"resting_orders_count"`
+	FeesPaidDollars       string `json:"fees_paid_dollars"`
+	LastUpdatedTS         string `json:"last_updated_ts"`
+}
+
+type EventPosition struct {
+	EventTicker          string `json:"event_ticker"`
+	TotalCostDollars     string `json:"total_cost_dollars"`
+	TotalCostSharesFP    string `json:"total_cost_shares_fp"`
+	EventExposureDollars string `json:"event_exposure_dollars"`
+	RealizedPNLDollars   string `json:"realized_pnl_dollars"`
+	FeesPaidDollars      string `json:"fees_paid_dollars"`
+}
+
+type PositionsResponse struct {
+	MarketPositions []MarketPosition `json:"market_positions"`
+	EventPositions  []EventPosition  `json:"event_positions"`
+	Cursor          string           `json:"cursor"`
+}
+
+type TotalRestingOrderValueResponse struct {
+	TotalRestingOrderValue int64 `json:"total_resting_order_value"`
+}
+
 type OrderRequest struct {
 	Ticker                  string `json:"ticker"`
 	Side                    string `json:"side"`   // yes|no
@@ -163,6 +219,22 @@ type OrderRequest struct {
 	OrderGroupID            string `json:"order_group_id,omitempty"`
 	CancelOrderOnPause      bool   `json:"cancel_order_on_pause"`
 	Subaccount              int    `json:"subaccount,omitempty"`
+	ExchangeIndex           int    `json:"exchange_index,omitempty"`
+}
+
+type createOrderV2Request struct {
+	Ticker                  string `json:"ticker"`
+	ClientOrderID           string `json:"client_order_id,omitempty"`
+	Side                    string `json:"side"` // bid|ask, quoted from YES side
+	Count                   string `json:"count"`
+	Price                   string `json:"price"`
+	TimeInForce             string `json:"time_in_force"`
+	SelfTradePreventionType string `json:"self_trade_prevention_type"`
+	PostOnly                *bool  `json:"post_only,omitempty"`
+	CancelOrderOnPause      bool   `json:"cancel_order_on_pause"`
+	ReduceOnly              bool   `json:"reduce_only"`
+	Subaccount              int    `json:"subaccount,omitempty"`
+	OrderGroupID            string `json:"order_group_id,omitempty"`
 	ExchangeIndex           int    `json:"exchange_index,omitempty"`
 }
 
@@ -297,6 +369,74 @@ func (c *Client) GetOrderbook(ctx context.Context, ticker string) (*OrderbookRes
 	return &out, nil
 }
 
+func (c *Client) ListOrders(ctx context.Context, query OrderQuery) (*OrdersResponse, error) {
+	q := url.Values{}
+	if strings.TrimSpace(query.Ticker) != "" {
+		q.Set("ticker", strings.TrimSpace(query.Ticker))
+	}
+	if strings.TrimSpace(query.EventTicker) != "" {
+		q.Set("event_ticker", strings.TrimSpace(query.EventTicker))
+	}
+	if strings.TrimSpace(query.Status) != "" {
+		q.Set("status", strings.TrimSpace(query.Status))
+	}
+	if query.Limit > 0 {
+		q.Set("limit", strconv.Itoa(query.Limit))
+	}
+	if strings.TrimSpace(query.Cursor) != "" {
+		q.Set("cursor", strings.TrimSpace(query.Cursor))
+	}
+	var out OrdersResponse
+	if err := c.do(ctx, http.MethodGet, "/portfolio/orders", q, nil, &out, true); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) CancelOrder(ctx context.Context, orderID string) (*CancelOrderResponse, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return nil, fmt.Errorf("order_id required")
+	}
+	var out CancelOrderResponse
+	if err := c.do(ctx, http.MethodDelete, "/portfolio/orders/"+url.PathEscape(orderID), nil, nil, &out, true); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) GetPositions(ctx context.Context, query PositionQuery) (*PositionsResponse, error) {
+	q := url.Values{}
+	if strings.TrimSpace(query.Ticker) != "" {
+		q.Set("ticker", strings.TrimSpace(query.Ticker))
+	}
+	if strings.TrimSpace(query.EventTicker) != "" {
+		q.Set("event_ticker", strings.TrimSpace(query.EventTicker))
+	}
+	if strings.TrimSpace(query.CountFilter) != "" {
+		q.Set("count_filter", strings.TrimSpace(query.CountFilter))
+	}
+	if query.Limit > 0 {
+		q.Set("limit", strconv.Itoa(query.Limit))
+	}
+	if strings.TrimSpace(query.Cursor) != "" {
+		q.Set("cursor", strings.TrimSpace(query.Cursor))
+	}
+	var out PositionsResponse
+	if err := c.do(ctx, http.MethodGet, "/portfolio/positions", q, nil, &out, true); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) GetTotalRestingOrderValue(ctx context.Context) (*TotalRestingOrderValueResponse, error) {
+	var out TotalRestingOrderValueResponse
+	if err := c.do(ctx, http.MethodGet, "/portfolio/summary/total_resting_order_value", nil, nil, &out, true); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) CreateOrder(ctx context.Context, req OrderRequest) (*OrderResponse, error) {
 	if !c.liveTrading {
 		return nil, fmt.Errorf("kalshi live trading disabled; set KALSHI_LIVE_TRADING=true")
@@ -308,12 +448,116 @@ func (c *Client) CreateOrder(ctx context.Context, req OrderRequest) (*OrderRespo
 		return nil, err
 	}
 	req = normalizeOrderRequest(req)
-
-	var out createOrderResponse
-	if err := c.do(ctx, http.MethodPost, "/portfolio/orders", nil, req, &out, true); err != nil {
+	v2Req, err := toCreateOrderV2Request(req)
+	if err != nil {
 		return nil, err
 	}
-	return &out.Order, nil
+
+	var out OrderResponse
+	if err := c.do(ctx, http.MethodPost, "/portfolio/events/orders", nil, v2Req, &out, true); err != nil {
+		return nil, err
+	}
+	hydrateV2OrderResponse(&out, req)
+	return &out, nil
+}
+
+func toCreateOrderV2Request(req OrderRequest) (createOrderV2Request, error) {
+	req = normalizeOrderRequest(req)
+	count, err := orderCount(req)
+	if err != nil {
+		return createOrderV2Request{}, fmt.Errorf("count: %w", err)
+	}
+	side, price, err := v2SideAndPrice(req)
+	if err != nil {
+		return createOrderV2Request{}, err
+	}
+	return createOrderV2Request{
+		Ticker:                  req.Ticker,
+		ClientOrderID:           req.ClientOrderID,
+		Side:                    side,
+		Count:                   formatRatFixed(count, 2),
+		Price:                   formatRatFixed(price, 4),
+		TimeInForce:             req.TimeInForce,
+		SelfTradePreventionType: req.SelfTradePreventionType,
+		PostOnly:                req.PostOnly,
+		CancelOrderOnPause:      req.CancelOrderOnPause,
+		ReduceOnly:              req.ReduceOnly,
+		Subaccount:              req.Subaccount,
+		OrderGroupID:            req.OrderGroupID,
+		ExchangeIndex:           req.ExchangeIndex,
+	}, nil
+}
+
+func v2SideAndPrice(req OrderRequest) (string, *big.Rat, error) {
+	side := strings.ToLower(strings.TrimSpace(req.Side))
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		action = "buy"
+	}
+
+	priceRaw := req.YesPriceDollars
+	if side == "no" {
+		priceRaw = req.NoPriceDollars
+	}
+	price, err := parsePositiveDecimal(priceRaw)
+	if err != nil {
+		return "", nil, fmt.Errorf("price: %w", err)
+	}
+
+	switch {
+	case side == "yes" && action == "buy":
+		return "bid", price, nil
+	case side == "yes" && action == "sell":
+		return "ask", price, nil
+	case side == "no" && action == "buy":
+		return "ask", yesComplement(price), nil
+	case side == "no" && action == "sell":
+		return "bid", yesComplement(price), nil
+	default:
+		return "", nil, fmt.Errorf("unsupported side/action for v2 order: %s/%s", side, action)
+	}
+}
+
+func yesComplement(price *big.Rat) *big.Rat {
+	if price == nil {
+		return big.NewRat(0, 1)
+	}
+	return new(big.Rat).Sub(big.NewRat(1, 1), price)
+}
+
+func formatRatFixed(value *big.Rat, decimals int) string {
+	if value == nil {
+		value = big.NewRat(0, 1)
+	}
+	return value.FloatString(decimals)
+}
+
+func hydrateV2OrderResponse(resp *OrderResponse, req OrderRequest) {
+	if resp == nil {
+		return
+	}
+	if strings.TrimSpace(resp.Ticker) == "" {
+		resp.Ticker = req.Ticker
+	}
+	if strings.TrimSpace(resp.ClientOrderID) == "" {
+		resp.ClientOrderID = req.ClientOrderID
+	}
+	if strings.TrimSpace(resp.Side) == "" {
+		resp.Side = req.Side
+	}
+	if strings.TrimSpace(resp.Action) == "" {
+		resp.Action = req.Action
+	}
+	if strings.TrimSpace(resp.Status) == "" {
+		switch {
+		case resp.HasFill() && !resp.IsResting():
+			resp.Status = "filled"
+		case resp.IsResting():
+			resp.Status = "resting"
+		default:
+			resp.Status = "accepted"
+		}
+	}
 }
 
 func (c *Client) ValidateOrder(req OrderRequest) (*OrderValidation, error) {

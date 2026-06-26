@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,28 @@ type OrderJournal interface {
 	LoadWorkingOrders(context.Context) ([]PersistedOrder, error)
 }
 
+type BrokerOrderFailure struct {
+	Order          model.Order
+	BrokerOrderID  int64
+	Status         string
+	Cause          string
+	Hint           string
+	Error          string
+	Unacknowledged bool
+	At             time.Time
+}
+
+const (
+	BrokerFailureCauseUnacknowledged      = "broker_order_unacknowledged"
+	BrokerFailureCauseTWSOrderPrecautions = "tws_api_order_precautions"
+
+	BrokerFailureHintTWSOrderPrecautions = "TWS API order precautions are holding API orders; accept the TWS Bypass Order Precautions for API Orders prompt or disable broker entries."
+)
+
+type BrokerOrderFailureObserver interface {
+	RecordBrokerOrderFailure(BrokerOrderFailure)
+}
+
 type CapabilityTokenValidator interface {
 	ValidateCapabilityToken(*model.CapToken, model.Order) error
 }
@@ -49,6 +72,7 @@ type Manager struct {
 	mu               sync.Mutex
 	submitted        map[string]cachedFill
 	tracked          map[string]*trackedOrder
+	failureObserver  BrokerOrderFailureObserver
 	group            singleflight.Group
 	submittedTTL     time.Duration
 	cleanupInterval  time.Duration
@@ -77,7 +101,18 @@ func (m *Manager) SetTokenValidator(validator CapabilityTokenValidator) {
 	if m == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.token = validator
+}
+
+func (m *Manager) SetBrokerOrderFailureObserver(observer BrokerOrderFailureObserver) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failureObserver = observer
 }
 
 func (m *Manager) HydrateWorkingOrders(ctx context.Context) error {
@@ -185,6 +220,7 @@ func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model
 				"thesis_id", order.ThesisID,
 				"error", err,
 			)
+			m.notifyBrokerOrderFailure(order, err)
 			m.recordFailedOrder(order, err)
 			return nil, fmt.Errorf("place order: %w", err)
 		}
@@ -201,14 +237,63 @@ func (m *Manager) Submit(ctx context.Context, token *model.CapToken, order model
 	})
 }
 
+func (m *Manager) notifyBrokerOrderFailure(order model.Order, err error) {
+	if m == nil || err == nil {
+		return
+	}
+	var unack *ibkr.UnacknowledgedOrderError
+	if !errors.As(err, &unack) {
+		return
+	}
+
+	m.mu.Lock()
+	observer := m.failureObserver
+	m.mu.Unlock()
+	if observer == nil {
+		return
+	}
+
+	cause, hint := classifyBrokerOrderFailure(unack, err)
+	observer.RecordBrokerOrderFailure(BrokerOrderFailure{
+		Order:          order,
+		BrokerOrderID:  unack.OrderID,
+		Status:         unack.Status,
+		Cause:          cause,
+		Hint:           hint,
+		Error:          err.Error(),
+		Unacknowledged: true,
+		At:             time.Now().UTC(),
+	})
+}
+
+func classifyBrokerOrderFailure(unack *ibkr.UnacknowledgedOrderError, err error) (string, string) {
+	if unack == nil {
+		return "", ""
+	}
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
+	if strings.EqualFold(unack.Status, "ApiPending") || strings.Contains(errText, "TWS API order precautions") {
+		return BrokerFailureCauseTWSOrderPrecautions, BrokerFailureHintTWSOrderPrecautions
+	}
+	return BrokerFailureCauseUnacknowledged, ""
+}
+
 func (m *Manager) validateCapabilityToken(token *model.CapToken, order model.Order) error {
 	if token == nil {
 		return fmt.Errorf("missing capability token")
 	}
-	if m == nil || m.token == nil {
+	if m == nil {
 		return nil
 	}
-	if err := m.token.ValidateCapabilityToken(token, order); err != nil {
+	m.mu.Lock()
+	validator := m.token
+	m.mu.Unlock()
+	if validator == nil {
+		return nil
+	}
+	if err := validator.ValidateCapabilityToken(token, order); err != nil {
 		return fmt.Errorf("invalid capability token: %w", err)
 	}
 	return nil

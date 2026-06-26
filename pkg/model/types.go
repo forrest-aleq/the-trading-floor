@@ -49,7 +49,17 @@ func (i Instrument) Key() string {
 
 func IsKalshiTicker(symbol string) bool {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
-	return strings.HasPrefix(symbol, "KX") && strings.Contains(symbol, "-")
+	if !strings.HasPrefix(symbol, "KX") {
+		return false
+	}
+	if _, ok := kxEquityTickerExceptions[symbol]; ok {
+		return false
+	}
+	return true
+}
+
+var kxEquityTickerExceptions = map[string]struct{}{
+	"KXIN": {},
 }
 
 func (i Instrument) IsKalshi() bool {
@@ -503,6 +513,7 @@ type Position struct {
 	Quantity       float64        `json:"quantity"`
 	EntryPrice     float64        `json:"entry_price"`
 	CurrentPrice   float64        `json:"current_price"`
+	MarkedAt       time.Time      `json:"marked_at"`
 	UnrealizedPnL  float64        `json:"unrealized_pnl"`
 	RealizedPnL    float64        `json:"realized_pnl"`
 	IBKROrderID    int64          `json:"ibkr_order_id,omitempty"`

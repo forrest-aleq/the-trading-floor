@@ -884,22 +884,32 @@ func (c *Client) GetAccountSummary(ctx context.Context) (*AccountSummary, error)
 		return nil, fmt.Errorf("not connected to IBKR")
 	}
 
-	// ibsync.AccountSummary() performs a blocking request when no account
-	// summary has been cached yet. Bound it so broker reconciliation can mark
-	// account sync stale instead of wedging the runtime.
+	// Keep this request deliberately narrow. ibsync.AccountSummary() requests
+	// the full Account Window tag set including ledgers, which can stall long
+	// enough to make broker reconciliation look dead even when TWS is connected.
 	timeout := readDurationEnv("IBKR_ACCOUNT_SUMMARY_TIMEOUT", 8*time.Second)
+	ib.SetTimeout(timeout)
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	resultCh := make(chan ibsync.AccountSummary, 1)
+	type accountSummaryResult struct {
+		items ibsync.AccountSummary
+		err   error
+	}
+	resultCh := make(chan accountSummaryResult, 1)
 	go func() {
-		resultCh <- ib.AccountSummary()
+		items, err := ib.ReqAccountSummary("All", "NetLiquidation,TotalCashValue,BuyingPower")
+		resultCh <- accountSummaryResult{items: items, err: err}
 	}()
 
 	var items ibsync.AccountSummary
 	select {
 	case <-waitCtx.Done():
 		return nil, fmt.Errorf("account summary timed out after %s: %w", timeout, waitCtx.Err())
-	case items = <-resultCh:
+	case result := <-resultCh:
+		if result.err != nil {
+			return nil, fmt.Errorf("account summary request failed: %w", result.err)
+		}
+		items = result.items
 	}
 	if len(items) == 0 {
 		return nil, fmt.Errorf("empty account summary")

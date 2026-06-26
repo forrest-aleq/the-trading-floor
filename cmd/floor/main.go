@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata" // trading-day rollover needs America/New_York even in scratch containers
@@ -88,8 +89,11 @@ func main() {
 	if kalshiExecutor != nil {
 		slog.Info("Kalshi execution adapter initialized", "dry_run", kalshiExecutor.IsDryRun())
 	}
+	var kalshiBankroll *kalshiBankrollMonitor
 	if kalshiExecutionRequired {
-		reportKalshiBankroll(ctx, kalshiExecutor)
+		kalshiBankroll = newKalshiBankrollMonitor(kalshiExecutor)
+		kalshiBankroll.Refresh(ctx)
+		kalshiBankroll.Start(ctx)
 	}
 
 	// --- LLM ---
@@ -872,7 +876,7 @@ func main() {
 	)
 
 	slog.Info("trading floor is LIVE — processing signals")
-	startRuntimeHeartbeat(ctx, floor, bk, execMgr, brokerEntryControl, disableHealthQuoteGate)
+	startRuntimeHeartbeat(ctx, floor, bk, execMgr, brokerEntryControl, disableHealthQuoteGate, kalshiBankroll)
 
 	if err := floor.Run(ctx); err != nil {
 		if err == context.Canceled {
@@ -952,7 +956,7 @@ func startBeliefDecay(ctx context.Context, graph *belief.Graph) {
 	}, "interval", interval.String(), "decay_pct", decayPct)
 }
 
-func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book, execMgr *execution.Manager, brokerEntryControl firm.EntryControl, marketDataQuoteGateDisabled bool) {
+func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book, execMgr *execution.Manager, brokerEntryControl firm.EntryControl, marketDataQuoteGateDisabled bool, kalshiBankroll *kalshiBankrollMonitor) {
 	if floor == nil || bk == nil {
 		return
 	}
@@ -1102,6 +1106,9 @@ func startRuntimeHeartbeat(ctx context.Context, floor *firm.Floor, bk *book.Book
 				}
 				if !tokenUsage.LastUpdated.IsZero() {
 					fields = append(fields, "llm_last_usage_age", time.Since(tokenUsage.LastUpdated).Round(time.Second).String())
+				}
+				if kalshiBankroll != nil {
+					fields = append(fields, kalshiBankroll.HeartbeatFields()...)
 				}
 				if !stats.WireStats.LastSignalAt.IsZero() {
 					fields = append(fields,
@@ -1460,54 +1467,175 @@ func kalshiDeskConfig() []deskDef {
 	return desks
 }
 
-func reportKalshiBankroll(ctx context.Context, executor *kalshiexec.Executor) {
-	maxOrderRisk := readRuntimeFloat("KALSHI_MAX_ORDER_DOLLARS", 0)
-	riskPct := readRuntimeFloat("KALSHI_RISK_PCT_EQUITY", 0)
-	if configured := readRuntimeFloat("KALSHI_ACCOUNT_EQUITY_DOLLARS", 0); configured > 0 {
-		slog.Info("Kalshi bankroll status",
-			"available", true,
-			"source", "configured_account_equity",
-			"equity", configured,
-			"max_order_risk", maxOrderRisk,
-			"risk_pct_equity", riskPct,
-		)
+type kalshiBankrollMonitor struct {
+	mu       sync.RWMutex
+	executor *kalshiexec.Executor
+	latest   kalshiBankrollSnapshot
+}
+
+type kalshiBankrollSnapshot struct {
+	Available             bool
+	Source                string
+	Reason                string
+	AccountEquity         float64
+	HasAccountEquity      bool
+	AvailableCash         float64
+	HasAvailableCash      bool
+	PortfolioValue        float64
+	HasPortfolioValue     bool
+	MaxOrderRisk          float64
+	EffectiveOrderRisk    float64
+	HasEffectiveOrderRisk bool
+	RiskPctEquity         float64
+	UpdatedAt             time.Time
+}
+
+func newKalshiBankrollMonitor(executor *kalshiexec.Executor) *kalshiBankrollMonitor {
+	return &kalshiBankrollMonitor{executor: executor}
+}
+
+func (m *kalshiBankrollMonitor) Start(ctx context.Context) {
+	if m == nil {
 		return
+	}
+	interval := readRuntimeDuration("KALSHI_BANKROLL_REFRESH_INTERVAL", 2*time.Minute)
+	log := slog.Default().With("component", "kalshi-bankroll")
+	observe.SafeGo(log, "Kalshi bankroll monitor panic", func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.Refresh(ctx)
+			}
+		}
+	}, "interval", interval.String())
+}
+
+func (m *kalshiBankrollMonitor) Refresh(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	snapshot := readKalshiBankrollSnapshot(refreshCtx, m.executor)
+	m.mu.Lock()
+	m.latest = snapshot
+	m.mu.Unlock()
+	logKalshiBankroll(snapshot)
+}
+
+func (m *kalshiBankrollMonitor) HeartbeatFields() []any {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	snapshot := m.latest
+	m.mu.RUnlock()
+	return snapshot.HeartbeatFields()
+}
+
+func readKalshiBankrollSnapshot(ctx context.Context, executor *kalshiexec.Executor) kalshiBankrollSnapshot {
+	snapshot := kalshiBankrollSnapshot{
+		MaxOrderRisk:  readRuntimeFloat("KALSHI_MAX_ORDER_DOLLARS", 0),
+		RiskPctEquity: readRuntimeFloat("KALSHI_RISK_PCT_EQUITY", 0),
+		UpdatedAt:     time.Now().UTC(),
+	}
+	if raw, ok := os.LookupEnv("KALSHI_ACCOUNT_EQUITY_DOLLARS"); ok && strings.TrimSpace(raw) != "" {
+		configured, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		if err != nil || configured < 0 {
+			snapshot.Source = "unavailable"
+			snapshot.Reason = "invalid_configured_account_equity"
+			return snapshot
+		}
+		snapshot.Available = true
+		snapshot.Source = "configured_account_equity"
+		snapshot.AccountEquity = configured
+		snapshot.HasAccountEquity = true
+		return snapshot
 	}
 	if executor == nil {
-		slog.Warn("Kalshi bankroll status",
-			"available", false,
-			"source", "unavailable",
-			"reason", "executor_unavailable",
-			"max_order_risk", maxOrderRisk,
-			"risk_pct_equity", riskPct,
-		)
-		return
+		snapshot.Source = "unavailable"
+		snapshot.Reason = "executor_unavailable"
+		return snapshot
 	}
-	balanceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	balance, err := executor.AccountBalance(balanceCtx)
+	balance, err := executor.AccountBalance(ctx)
 	if err != nil {
-		slog.Warn("Kalshi bankroll status",
-			"available", false,
-			"source", "unavailable",
-			"reason", err.Error(),
-			"max_order_risk", maxOrderRisk,
-			"risk_pct_equity", riskPct,
-		)
+		snapshot.Source = "unavailable"
+		snapshot.Reason = err.Error()
+		return snapshot
+	}
+
+	equityCents := balance.Balance + balance.PortfolioValue
+	snapshot.Available = true
+	snapshot.Source = "kalshi_api"
+	snapshot.AccountEquity = float64(equityCents) / 100.0
+	snapshot.HasAccountEquity = true
+	snapshot.AvailableCash = float64(balance.Balance) / 100.0
+	snapshot.HasAvailableCash = true
+	snapshot.PortfolioValue = float64(balance.PortfolioValue) / 100.0
+	snapshot.HasPortfolioValue = true
+	snapshot.EffectiveOrderRisk = float64(executor.EffectiveMaxOrderCents(ctx)) / 100.0
+	snapshot.HasEffectiveOrderRisk = true
+	return snapshot
+}
+
+func (s kalshiBankrollSnapshot) HeartbeatFields() []any {
+	fields := []any{
+		"kalshi_bankroll_available", s.Available,
+		"kalshi_bankroll_source", s.Source,
+		"kalshi_max_order_risk", s.MaxOrderRisk,
+		"kalshi_risk_pct_equity", s.RiskPctEquity,
+		"kalshi_bankroll_updated_at", s.UpdatedAt,
+	}
+	if s.Reason != "" {
+		fields = append(fields, "kalshi_bankroll_reason", s.Reason)
+	}
+	if s.HasAccountEquity {
+		fields = append(fields, "kalshi_account_equity", s.AccountEquity)
+	}
+	if s.HasAvailableCash {
+		fields = append(fields, "kalshi_available_cash", s.AvailableCash)
+	}
+	if s.HasPortfolioValue {
+		fields = append(fields, "kalshi_portfolio_value", s.PortfolioValue)
+	}
+	if s.HasEffectiveOrderRisk {
+		fields = append(fields, "kalshi_effective_order_risk", s.EffectiveOrderRisk)
+	}
+	return fields
+}
+
+func logKalshiBankroll(snapshot kalshiBankrollSnapshot) {
+	fields := []any{
+		"available", snapshot.Available,
+		"source", snapshot.Source,
+		"max_order_risk", snapshot.MaxOrderRisk,
+		"risk_pct_equity", snapshot.RiskPctEquity,
+	}
+	if snapshot.Reason != "" {
+		fields = append(fields, "reason", snapshot.Reason)
+	}
+	if snapshot.HasAccountEquity {
+		fields = append(fields, "equity", snapshot.AccountEquity)
+	}
+	if snapshot.HasAvailableCash {
+		fields = append(fields, "available_cash", snapshot.AvailableCash)
+	}
+	if snapshot.HasPortfolioValue {
+		fields = append(fields, "portfolio_value", snapshot.PortfolioValue)
+	}
+	if snapshot.HasEffectiveOrderRisk {
+		fields = append(fields, "effective_max_order_risk", snapshot.EffectiveOrderRisk)
+	}
+	if snapshot.Available {
+		slog.Info("Kalshi bankroll status", fields...)
 		return
 	}
-	equityCents := balance.Balance + balance.PortfolioValue
-	effectiveOrderRisk := float64(executor.EffectiveMaxOrderCents(balanceCtx)) / 100.0
-	slog.Info("Kalshi bankroll status",
-		"available", true,
-		"source", "kalshi_api",
-		"equity", float64(equityCents)/100.0,
-		"available_cash", float64(balance.Balance)/100.0,
-		"portfolio_value", float64(balance.PortfolioValue)/100.0,
-		"max_order_risk", maxOrderRisk,
-		"effective_max_order_risk", effectiveOrderRisk,
-		"risk_pct_equity", riskPct,
-	)
+	slog.Warn("Kalshi bankroll status", fields...)
 }
 
 func engramsFromRecords(records []*store.EngramRecord) []*memory.Engram {

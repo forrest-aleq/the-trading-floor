@@ -218,3 +218,69 @@ func TestRecoveredBrokerOptionPositionUsesPerSharePremium(t *testing.T) {
 		t.Fatalf("expected recovered entry price per-share 2.50, got %.4f", recovered.EntryPrice)
 	}
 }
+
+func TestRecoveredBrokerUSStockPositionUsesSmartRoute(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 100000)
+
+	discrepancies := bk.Reconcile([]ibkr.IBKRPosition{{
+		ConID:    131217639,
+		Symbol:   "BB",
+		SecType:  "STK",
+		Exchange: "NYSE",
+		Currency: "USD",
+		Quantity: 946,
+		AvgCost:  3.00,
+	}})
+
+	if len(discrepancies) != 1 {
+		t.Fatalf("expected recovered broker position to be reported, got %+v", discrepancies)
+	}
+	var recovered *model.Position
+	for _, pos := range bk.GetOpenPositions() {
+		if pos.Instrument.Symbol == "BB" {
+			recovered = pos
+		}
+	}
+	if recovered == nil {
+		t.Fatal("expected recovered BB stock position in book")
+	}
+	if recovered.Instrument.Exchange != "SMART" {
+		t.Fatalf("expected recovered US stock exchange SMART, got %q", recovered.Instrument.Exchange)
+	}
+	if recovered.Instrument.ConID != 131217639 || recovered.IBKRContractID != 131217639 {
+		t.Fatalf("expected broker contract id to be preserved, got instrument=%d position=%d", recovered.Instrument.ConID, recovered.IBKRContractID)
+	}
+}
+
+func TestRecoveredBrokerUSStockPositionNormalizesRouteFields(t *testing.T) {
+	bk := NewBook(stubPositionSource{}, 100000)
+
+	discrepancies := bk.Reconcile([]ibkr.IBKRPosition{{
+		ConID:    320227571,
+		Symbol:   " QQQ ",
+		SecType:  " etf ",
+		Exchange: " nasdaq ",
+		Currency: " usd ",
+		Quantity: 10,
+		AvgCost:  710.00,
+	}})
+
+	if len(discrepancies) != 1 {
+		t.Fatalf("expected recovered broker position to be reported, got %+v", discrepancies)
+	}
+	var recovered *model.Position
+	for _, pos := range bk.GetOpenPositions() {
+		if pos.Instrument.Symbol == "QQQ" {
+			recovered = pos
+		}
+	}
+	if recovered == nil {
+		t.Fatal("expected recovered QQQ position in book")
+	}
+	if recovered.Instrument.SecType != "STK" || recovered.Instrument.Exchange != "SMART" || recovered.Instrument.Currency != "USD" {
+		t.Fatalf("expected normalized STK/SMART/USD route fields, got %+v", recovered.Instrument)
+	}
+	if recovered.Instrument.ConID != 320227571 || recovered.IBKRContractID != 320227571 {
+		t.Fatalf("expected broker contract id to be preserved, got instrument=%d position=%d", recovered.Instrument.ConID, recovered.IBKRContractID)
+	}
+}

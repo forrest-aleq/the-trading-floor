@@ -1284,6 +1284,7 @@ func (c *Client) qualifyContract(ctx context.Context, inst model.Instrument) (*i
 	if err := runBlockingIBCall(waitCtx, func() error { return ib.QualifyContract(contract) }); err != nil {
 		return nil, fmt.Errorf("qualify contract %s: %w", inst.Symbol, err)
 	}
+	normalizeStockOrderRoute(contract)
 
 	return contract, nil
 }
@@ -1299,6 +1300,46 @@ func runBlockingIBCall(ctx context.Context, fn func() error) error {
 		return ctx.Err()
 	case err := <-errCh:
 		return err
+	}
+}
+
+func normalizeStockOrderRoute(contract *ibsync.Contract) {
+	if contract == nil {
+		return
+	}
+	secType := strings.ToUpper(strings.TrimSpace(contract.SecType))
+	if secType == "ETF" {
+		secType = "STK"
+		contract.SecType = "STK"
+	}
+	if secType != "STK" {
+		return
+	}
+	currency := strings.ToUpper(strings.TrimSpace(contract.Currency))
+	if currency != "" && currency != "USD" {
+		return
+	}
+	exchange := strings.ToUpper(strings.TrimSpace(contract.Exchange))
+	if !isDirectUSStockExchange(exchange) {
+		return
+	}
+	if strings.TrimSpace(contract.PrimaryExchange) == "" || strings.EqualFold(contract.PrimaryExchange, contract.Exchange) {
+		contract.PrimaryExchange = exchange
+	}
+	contract.Exchange = "SMART"
+	if strings.TrimSpace(contract.Currency) == "" {
+		contract.Currency = "USD"
+	}
+}
+
+func isDirectUSStockExchange(exchange string) bool {
+	switch strings.ToUpper(strings.TrimSpace(exchange)) {
+	case "NYSE", "NASDAQ", "ARCA", "NYSEARCA", "AMEX", "NYSEAMEX", "NYSEMKT",
+		"BATS", "BEX", "BYX", "CHX", "EDGEA", "EDGA", "EDGX", "IEX",
+		"ISLAND", "LTSE", "MEMX", "PEARL", "PSX":
+		return true
+	default:
+		return false
 	}
 }
 

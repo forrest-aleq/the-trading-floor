@@ -206,3 +206,65 @@ func TestEmergencyBackstopStockThresholdUnchanged(t *testing.T) {
 		t.Fatalf("expected emergency close at -6%% on stock, got %q", closeReason)
 	}
 }
+
+func TestMonitorSuppressesDuplicateCloseAttemptsUntilCooldown(t *testing.T) {
+	bk := NewBook(nil, 100000)
+	pos := openStalenessTestPosition(bk, "BB", "STK", 100)
+	now := time.Date(2026, 6, 26, 20, 0, 0, 0, time.UTC)
+	pos.CurrentPrice = 90
+	pos.MarkedAt = now
+
+	closeCount := 0
+	monitor := NewMonitor(bk, func(string) (*model.Thesis, bool) { return nil, false },
+		func(_ *model.Position, _ float64, reason string) {
+			closeCount++
+			if reason != "emergency_loss_backstop" {
+				t.Fatalf("unexpected close reason %q", reason)
+			}
+		})
+	monitor.now = func() time.Time { return now }
+	monitor.SetStaleMarkMaxAge(0)
+	monitor.SetExitRetryCooldown(5 * time.Minute)
+
+	monitor.RunOnce()
+	monitor.RunOnce()
+	if closeCount != 1 {
+		t.Fatalf("expected one close attempt before cooldown, got %d", closeCount)
+	}
+
+	now = now.Add(4 * time.Minute)
+	monitor.RunOnce()
+	if closeCount != 1 {
+		t.Fatalf("expected duplicate close suppressed inside cooldown, got %d", closeCount)
+	}
+
+	now = now.Add(2 * time.Minute)
+	monitor.RunOnce()
+	if closeCount != 2 {
+		t.Fatalf("expected retry after cooldown, got %d", closeCount)
+	}
+}
+
+func TestMonitorCloseAttemptUsesCurrentCooldown(t *testing.T) {
+	bk := NewBook(nil, 100000)
+	pos := openStalenessTestPosition(bk, "IBM", "STK", 100)
+	now := time.Date(2026, 6, 26, 20, 0, 0, 0, time.UTC)
+	pos.CurrentPrice = 90
+	pos.MarkedAt = now
+
+	closeCount := 0
+	monitor := NewMonitor(bk, func(string) (*model.Thesis, bool) { return nil, false },
+		func(_ *model.Position, _ float64, _ string) { closeCount++ })
+	monitor.now = func() time.Time { return now }
+	monitor.SetStaleMarkMaxAge(0)
+	monitor.SetExitRetryCooldown(5 * time.Minute)
+
+	monitor.RunOnce()
+	monitor.SetExitRetryCooldown(time.Minute)
+	now = now.Add(2 * time.Minute)
+	monitor.RunOnce()
+
+	if closeCount != 2 {
+		t.Fatalf("expected updated cooldown to allow retry, got %d close attempts", closeCount)
+	}
+}

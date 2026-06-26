@@ -91,14 +91,15 @@ func TestDefaultRouterUsesTopOpenModelStackForOpenRouter(t *testing.T) {
 		t.Fatalf("critical model = %q, want %q", critical.model, DefaultCloudCriticalModel)
 	}
 	for _, client := range []*OpenRouterClient{speed, analysis, critical} {
-		for _, model := range append([]string{client.model}, client.fallbackModels...) {
-			if strings.Contains(strings.ToLower(model), "qwen") {
-				t.Fatalf("cloud model stack should not default to qwen, got %q in %#v", model, client.fallbackModels)
-			}
+		if isQwenModel(client.model) {
+			t.Fatalf("cloud model primary should not default to qwen, got %q", client.model)
 		}
 	}
 	if !containsModel(speed.fallbackModels, "minimax/minimax-m3") {
 		t.Fatalf("speed fallbacks missing minimax: %#v", speed.fallbackModels)
+	}
+	if !containsModel(speed.fallbackModels, DefaultCloudQwenModel) {
+		t.Fatalf("speed fallbacks should retain qwen diversity model: %#v", speed.fallbackModels)
 	}
 	if !containsModel(critical.fallbackModels, "deepseek/deepseek-v4-pro") {
 		t.Fatalf("critical fallbacks missing deepseek: %#v", critical.fallbackModels)
@@ -115,6 +116,10 @@ func containsModel(models []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func isQwenModel(model string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(model)), "qwen")
 }
 
 func TestOpenRouterClientRetriesLocal500s(t *testing.T) {

@@ -2,7 +2,9 @@ package feeds
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/hnic/trading-floor/internal/execution/kalshi"
 )
@@ -64,5 +66,38 @@ func TestKalshiFeedRespectsMaxPages(t *testing.T) {
 	}
 	if pages != 1 || cursor != "next" || len(markets) != 1 {
 		t.Fatalf("unexpected capped result: pages=%d cursor=%q markets=%+v", pages, cursor, markets)
+	}
+}
+
+func TestMarshalKalshiMarketSignalRawIncludesSportsAvailability(t *testing.T) {
+	active := true
+	observedAt := time.Date(2026, 6, 26, 18, 0, 0, 0, time.UTC)
+	raw, err := marshalKalshiMarketSignalRaw(kalshi.Market{
+		Ticker:   "KXGOAL",
+		Title:    "Norway vs France: Goalscorer",
+		Subtitle: "Erling Haaland: 1+",
+	}, SportsAvailabilityEvidence{
+		Status:     "confirmed",
+		Source:     "espn",
+		Player:     "Erling Haaland",
+		Team:       "Norway",
+		Active:     &active,
+		ObservedAt: &observedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Ticker             string                     `json:"ticker"`
+		SportsAvailability SportsAvailabilityEvidence `json:"sports_availability"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Ticker != "KXGOAL" || payload.SportsAvailability.Status != "confirmed" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if payload.SportsAvailability.Active == nil || !*payload.SportsAvailability.Active {
+		t.Fatalf("expected active availability payload: %+v", payload.SportsAvailability)
 	}
 }

@@ -316,6 +316,67 @@ func TestMapThesisRejectsNonKalshiTicker(t *testing.T) {
 	}
 }
 
+func TestMapThesisRejectsPlayerPropWithoutAvailabilityEvidence(t *testing.T) {
+	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
+
+	_, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+"))
+	if err == nil {
+		t.Fatal("expected unverified player prop to be rejected")
+	}
+	if !strings.Contains(err.Error(), "kalshi_participant_availability_unverified") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMapThesisRejectsUnavailablePlayerProp(t *testing.T) {
+	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
+
+	_, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+ | participant_availability: blocked source=espn player=Erling Haaland active=false reason=player_inactive"))
+	if err == nil {
+		t.Fatal("expected unavailable player prop to be rejected")
+	}
+	if !strings.Contains(err.Error(), "kalshi_participant_availability_blocked") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMapThesisAllowsConfirmedPlayerProp(t *testing.T) {
+	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
+
+	mapped, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+ | participant_availability: confirmed source=espn player=Erling Haaland active=true starter=false reason=espn_roster_match"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.Request.Ticker != "KXGOAL-26JUN26-HAALAND" {
+		t.Fatalf("ticker = %q", mapped.Request.Ticker)
+	}
+}
+
+func TestMapThesisDoesNotTreatAvailabilityEvidenceAsPlayerDependency(t *testing.T) {
+	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
+
+	mapped, err := mapper.MapThesis(&model.Thesis{
+		ID:         "thesis-team-market",
+		DeskID:     "kalshi-sports-a",
+		Domain:     "prediction_market",
+		Instrument: model.Instrument{Symbol: "KXWIN-26JUN26-NORFRA", SecType: "KALSHI", Currency: "USD"},
+		Direction:  model.Long,
+		Conviction: 0.82,
+		EntryPrice: 0.24,
+		Evidence: []model.Evidence{{
+			Source:  "kalshi-market",
+			Content: "Norway vs France: Match winner | participant_availability: confirmed source=espn active=true",
+			Weight:  1,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.Request.Ticker != "KXWIN-26JUN26-NORFRA" {
+		t.Fatalf("ticker = %q", mapped.Request.Ticker)
+	}
+}
+
 func TestExecutorDryRunJournalsMappedOrder(t *testing.T) {
 	path := t.TempDir() + "/kalshi-dry.jsonl"
 	executor := NewExecutor(&Client{maxOrderCents: 200}, NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65}), ExecutionDryRun, path)
@@ -493,6 +554,23 @@ func liveTestThesis(id, ticker string, entryPrice float64) *model.Thesis {
 		Direction:  model.Long,
 		Conviction: 0.82,
 		EntryPrice: entryPrice,
+	}
+}
+
+func kalshiPlayerPropThesis(evidence string) *model.Thesis {
+	return &model.Thesis{
+		ID:         "thesis-haaland",
+		DeskID:     "kalshi-sports-a",
+		Domain:     "prediction_market",
+		Instrument: model.Instrument{Symbol: "KXGOAL-26JUN26-HAALAND", SecType: "KALSHI", Currency: "USD"},
+		Direction:  model.Long,
+		Conviction: 0.82,
+		EntryPrice: 0.24,
+		Evidence: []model.Evidence{{
+			Source:  "kalshi-market",
+			Content: evidence,
+			Weight:  1,
+		}},
 	}
 }
 

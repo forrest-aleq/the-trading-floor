@@ -284,6 +284,9 @@ func (m *Mapper) MapThesisWithMaxOrderCents(thesis *model.Thesis, maxOrderCents 
 	if thesis == nil {
 		return MappedOrder{}, fmt.Errorf("nil thesis")
 	}
+	if err := validateParticipantAvailability(thesis); err != nil {
+		return MappedOrder{}, err
+	}
 	if thesis.Conviction < m.cfg.MinConviction {
 		return MappedOrder{}, fmt.Errorf("conviction %.2f below kalshi minimum %.2f", thesis.Conviction, m.cfg.MinConviction)
 	}

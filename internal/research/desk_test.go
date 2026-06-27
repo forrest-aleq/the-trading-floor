@@ -962,6 +962,43 @@ func TestDeterministicKalshiPaperDiscoveryInvestigationBypassesLLM(t *testing.T)
 	}
 }
 
+func TestDeterministicKalshiEvidenceIncludesSubtitleAndAvailability(t *testing.T) {
+	active := true
+	starter := false
+	raw, err := json.Marshal(map[string]any{
+		"title":    "Norway vs France: Goalscorer",
+		"subtitle": "Erling Haaland: 1+",
+		"sports_availability": map[string]any{
+			"status":      "confirmed",
+			"source":      "espn",
+			"league":      "fifa.world",
+			"event_id":    "760475",
+			"player":      "Erling Haaland",
+			"team":        "Norway",
+			"active":      active,
+			"starter":     starter,
+			"position":    "Substitute",
+			"reason":      "espn_roster_match",
+			"observed_at": "2026-06-26T18:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	evidence := deterministicKalshiEvidence(signal.Signal{Raw: raw})
+	for _, want := range []string{
+		"Norway vs France: Goalscorer",
+		"Erling Haaland: 1+",
+		"participant_availability: confirmed",
+		"active=true",
+	} {
+		if !strings.Contains(evidence, want) {
+			t.Fatalf("expected %q in evidence: %s", want, evidence)
+		}
+	}
+}
+
 func TestDeterministicKalshiLiveOverrideInvestigationBypassesLLM(t *testing.T) {
 	t.Setenv("FLOOR_RUNTIME_MODE", "live")
 	t.Setenv("KALSHI_LIVE_TRADING", "true")

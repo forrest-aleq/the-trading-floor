@@ -1116,13 +1116,28 @@ func kalshiOpportunityInstrument(opp *model.Opportunity) (model.Instrument, bool
 }
 
 type researchKalshiSnapshot struct {
-	Title            string `json:"title"`
-	Subtitle         string `json:"subtitle"`
-	YesBidDollars    string `json:"yes_bid_dollars"`
-	YesAskDollars    string `json:"yes_ask_dollars"`
-	NoBidDollars     string `json:"no_bid_dollars"`
-	NoAskDollars     string `json:"no_ask_dollars"`
-	LastPriceDollars string `json:"last_price_dollars"`
+	Title              string                      `json:"title"`
+	Subtitle           string                      `json:"subtitle"`
+	YesBidDollars      string                      `json:"yes_bid_dollars"`
+	YesAskDollars      string                      `json:"yes_ask_dollars"`
+	NoBidDollars       string                      `json:"no_bid_dollars"`
+	NoAskDollars       string                      `json:"no_ask_dollars"`
+	LastPriceDollars   string                      `json:"last_price_dollars"`
+	SportsAvailability *researchSportsAvailability `json:"sports_availability,omitempty"`
+}
+
+type researchSportsAvailability struct {
+	Status     string     `json:"status,omitempty"`
+	Source     string     `json:"source,omitempty"`
+	League     string     `json:"league,omitempty"`
+	EventID    string     `json:"event_id,omitempty"`
+	Player     string     `json:"player,omitempty"`
+	Team       string     `json:"team,omitempty"`
+	Active     *bool      `json:"active,omitempty"`
+	Starter    *bool      `json:"starter,omitempty"`
+	Position   string     `json:"position,omitempty"`
+	Reason     string     `json:"reason,omitempty"`
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
 }
 
 func paperDiscoveryKalshiFastPathEnabled() bool {
@@ -1208,14 +1223,54 @@ func parseKalshiProbability(raw string) (float64, bool) {
 func deterministicKalshiEvidence(sig signal.Signal) string {
 	var snap researchKalshiSnapshot
 	if len(sig.Raw) > 0 && json.Unmarshal(sig.Raw, &snap) == nil {
-		if title := strings.TrimSpace(firstNonEmptyString(snap.Title, snap.Subtitle)); title != "" {
-			return institutional.TruncateForPrompt(title, 220)
+		parts := []string{}
+		if title := strings.TrimSpace(snap.Title); title != "" {
+			parts = append(parts, title)
+		}
+		if subtitle := strings.TrimSpace(snap.Subtitle); subtitle != "" {
+			parts = append(parts, subtitle)
+		}
+		if availability := formatResearchSportsAvailability(snap.SportsAvailability); availability != "" {
+			parts = append(parts, availability)
+		}
+		if len(parts) > 0 {
+			return institutional.TruncateForPrompt(strings.Join(parts, " | "), 360)
 		}
 	}
 	if text := strings.TrimSpace(firstNonEmptyString(sig.Translated, sig.OriginalText)); text != "" {
 		return institutional.TruncateForPrompt(text, 220)
 	}
 	return "Kalshi market discovery signal selected by deterministic scanner."
+}
+
+func formatResearchSportsAvailability(availability *researchSportsAvailability) string {
+	if availability == nil || strings.TrimSpace(availability.Status) == "" {
+		return ""
+	}
+	parts := []string{"participant_availability: " + strings.ToLower(strings.TrimSpace(availability.Status))}
+	appendPart := func(key, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			parts = append(parts, key+"="+value)
+		}
+	}
+	appendPart("source", availability.Source)
+	appendPart("league", availability.League)
+	appendPart("event", availability.EventID)
+	appendPart("player", availability.Player)
+	appendPart("team", availability.Team)
+	if availability.Active != nil {
+		appendPart("active", strconv.FormatBool(*availability.Active))
+	}
+	if availability.Starter != nil {
+		appendPart("starter", strconv.FormatBool(*availability.Starter))
+	}
+	appendPart("position", availability.Position)
+	appendPart("reason", availability.Reason)
+	if availability.ObservedAt != nil && !availability.ObservedAt.IsZero() {
+		appendPart("observed_at", availability.ObservedAt.UTC().Format(time.RFC3339))
+	}
+	return strings.Join(parts, " ")
 }
 
 func firstSignalID(opp *model.Opportunity) string {

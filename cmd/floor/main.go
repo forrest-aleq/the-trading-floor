@@ -1500,7 +1500,9 @@ func registerDefaultFeeds(wireMgr *wire.Manager, marketClient feeds.MarketDataCl
 		)
 	}
 	if kalshiClient := feeds.NewKalshiClientFromEnv(); kalshiClient != nil {
-		feedSet = append(feedSet, feeds.NewKalshiFeed(kalshiClient))
+		kalshiFeed := feeds.NewKalshiFeed(kalshiClient)
+		kalshiFeed.SetSportsAvailabilityProvider(feeds.NewESPNSportsAvailabilityProviderFromEnv())
+		feedSet = append(feedSet, kalshiFeed)
 	}
 	if marketClient != nil && !kalshiOnly {
 		feedSet = append(feedSet, feeds.NewMarketFeed(marketClient, marketWatchlist))

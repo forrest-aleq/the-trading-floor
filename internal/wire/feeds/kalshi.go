@@ -15,16 +15,36 @@ import (
 )
 
 type KalshiFeed struct {
-	log      *slog.Logger
-	client   kalshiMarketClient
-	interval time.Duration
-	limit    int
-	maxPages int
-	state    *sourceState
+	log                *slog.Logger
+	client             kalshiMarketClient
+	sportsAvailability SportsAvailabilityProvider
+	interval           time.Duration
+	limit              int
+	maxPages           int
+	state              *sourceState
 }
 
 type kalshiMarketClient interface {
 	GetMarkets(ctx context.Context, status string, limit int, cursor string) (*kalshi.MarketsResponse, error)
+}
+
+type SportsAvailabilityProvider interface {
+	CheckMarket(ctx context.Context, market kalshi.Market, now time.Time) SportsAvailabilityEvidence
+}
+
+type SportsAvailabilityEvidence struct {
+	Status     string     `json:"status,omitempty"`
+	Source     string     `json:"source,omitempty"`
+	League     string     `json:"league,omitempty"`
+	EventID    string     `json:"event_id,omitempty"`
+	EventName  string     `json:"event_name,omitempty"`
+	Player     string     `json:"player,omitempty"`
+	Team       string     `json:"team,omitempty"`
+	Active     *bool      `json:"active,omitempty"`
+	Starter    *bool      `json:"starter,omitempty"`
+	Position   string     `json:"position,omitempty"`
+	Reason     string     `json:"reason,omitempty"`
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
 }
 
 func NewKalshiFeed(client kalshiMarketClient) *KalshiFeed {
@@ -39,6 +59,13 @@ func NewKalshiFeed(client kalshiMarketClient) *KalshiFeed {
 }
 
 func (f *KalshiFeed) Name() string { return "kalshi" }
+
+func (f *KalshiFeed) SetSportsAvailabilityProvider(provider SportsAvailabilityProvider) *KalshiFeed {
+	if f != nil {
+		f.sportsAvailability = provider
+	}
+	return f
+}
 
 func (f *KalshiFeed) Start(ctx context.Context, out chan<- signal.Signal) error {
 	if f.client == nil {
@@ -96,12 +123,28 @@ func (f *KalshiFeed) fetchAndSend(ctx context.Context, out chan<- signal.Signal)
 		if f.state.Seen(id) {
 			continue
 		}
-		raw, err := json.Marshal(market)
+		availability := SportsAvailabilityEvidence{}
+		if f.sportsAvailability != nil {
+			availability = f.sportsAvailability.CheckMarket(ctx, market, now)
+		}
+		raw, err := marshalKalshiMarketSignalRaw(market, availability)
 		if err != nil {
 			f.log.Warn("kalshi market marshal failed", "ticker", market.Ticker, "error", err)
 			continue
 		}
 		text := formatKalshiMarketSignalText(market)
+		if availabilityText := availability.EvidenceLine(); availabilityText != "" {
+			text += " | " + availabilityText
+		}
+		entities := []signal.Entity{
+			{Name: market.Ticker, Type: "prediction_market", ID: market.Ticker},
+		}
+		if strings.TrimSpace(availability.Player) != "" {
+			entities = append(entities, signal.Entity{Name: availability.Player, Type: "person"})
+		}
+		if strings.TrimSpace(availability.Team) != "" {
+			entities = append(entities, signal.Entity{Name: availability.Team, Type: "team"})
+		}
 		out <- signal.Signal{
 			ID:         id,
 			Source:     "kalshi-market",
@@ -112,9 +155,7 @@ func (f *KalshiFeed) fetchAndSend(ctx context.Context, out chan<- signal.Signal)
 			Strength:   0.45,
 			Raw:        raw,
 			Translated: text,
-			Entities: []signal.Entity{
-				{Name: market.Ticker, Type: "prediction_market", ID: market.Ticker},
-			},
+			Entities:   entities,
 		}
 		emitted++
 	}
@@ -169,6 +210,22 @@ func kalshiMarketHasActionablePrice(market kalshi.Market) bool {
 		}
 	}
 	return false
+}
+
+func marshalKalshiMarketSignalRaw(market kalshi.Market, availability SportsAvailabilityEvidence) ([]byte, error) {
+	raw, err := json.Marshal(market)
+	if err != nil {
+		return nil, err
+	}
+	if availability.Status == "" {
+		return raw, nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	payload["sports_availability"] = availability
+	return json.Marshal(payload)
 }
 
 func NewKalshiClientFromEnv() *kalshi.Client {
@@ -262,6 +319,37 @@ func formatKalshiMarketSignalText(market kalshi.Market) string {
 		return strings.TrimSpace(market.Ticker)
 	}
 	return strings.Join(cleaned, " | ")
+}
+
+func (e SportsAvailabilityEvidence) EvidenceLine() string {
+	status := strings.ToLower(strings.TrimSpace(e.Status))
+	if status == "" {
+		return ""
+	}
+	parts := []string{"participant_availability: " + status}
+	appendPart := func(key, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			parts = append(parts, key+"="+value)
+		}
+	}
+	appendPart("source", e.Source)
+	appendPart("league", e.League)
+	appendPart("event", e.EventID)
+	appendPart("player", e.Player)
+	appendPart("team", e.Team)
+	if e.Active != nil {
+		appendPart("active", strconv.FormatBool(*e.Active))
+	}
+	if e.Starter != nil {
+		appendPart("starter", strconv.FormatBool(*e.Starter))
+	}
+	appendPart("position", e.Position)
+	appendPart("reason", e.Reason)
+	if e.ObservedAt != nil && !e.ObservedAt.IsZero() {
+		appendPart("observed_at", e.ObservedAt.UTC().Format(time.RFC3339))
+	}
+	return strings.Join(parts, " ")
 }
 
 func kalshiMarketSnapshotKey(market kalshi.Market) string {

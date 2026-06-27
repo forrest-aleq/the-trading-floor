@@ -337,6 +337,53 @@ func TestMapThesisRejectsMultivariateWrapperTicker(t *testing.T) {
 	}
 }
 
+func TestExecutorRejectsOverpricedMVEWrapperByFairValue(t *testing.T) {
+	t.Setenv(unsafeAllowMVEWrappersEnv, "true")
+	t.Setenv(mveMaxLegsEnv, "10")
+	t.Setenv(mveMaxMarkupEnv, "0.03")
+	executor := newMVEFairValueTestExecutor(t)
+
+	_, err := executor.SubmitThesis(context.Background(), kalshiMVEThesis(0.232))
+	if err == nil {
+		t.Fatal("expected overpriced MVE wrapper to be rejected")
+	}
+	if !strings.Contains(err.Error(), "kalshi_mve_fair_value_rejected") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestExecutorAllowsFairlyPricedMVEWrapperWhenExplicitlyEnabled(t *testing.T) {
+	t.Setenv(unsafeAllowMVEWrappersEnv, "true")
+	t.Setenv(mveMaxLegsEnv, "10")
+	t.Setenv(mveMaxMarkupEnv, "0.03")
+	executor := newMVEFairValueTestExecutor(t)
+
+	result, err := executor.SubmitThesis(context.Background(), kalshiMVEThesis(0.115))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MappedOrder.MVEFairValue == nil || !result.MappedOrder.MVEFairValue.Allowed {
+		t.Fatalf("expected fair-value report to allow order, got %+v", result.MappedOrder.MVEFairValue)
+	}
+	if got := result.MappedOrder.MVEFairValue.FairPrice; got < 0.114 || got > 0.115 {
+		t.Fatalf("fair price = %.6f, want about 0.1145", got)
+	}
+}
+
+func TestExecutorRejectsMVEWrapperAboveLegCountCap(t *testing.T) {
+	t.Setenv(unsafeAllowMVEWrappersEnv, "true")
+	t.Setenv(mveMaxLegsEnv, "3")
+	executor := newMVEFairValueTestExecutor(t)
+
+	_, err := executor.SubmitThesis(context.Background(), kalshiMVEThesis(0.115))
+	if err == nil {
+		t.Fatal("expected MVE wrapper above leg cap to be rejected")
+	}
+	if !strings.Contains(err.Error(), "kalshi_mve_leg_count_exceeded") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestMapThesisRejectsPlayerPropWithoutAvailabilityEvidence(t *testing.T) {
 	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
 
@@ -590,6 +637,58 @@ func liveTestThesis(id, ticker string, entryPrice float64) *model.Thesis {
 		Conviction: 0.82,
 		EntryPrice: entryPrice,
 	}
+}
+
+const mveWrapperTicker = "KXMVESPORTSMULTIGAMEEXTENDED-S202601A7277A770-22D4C50549A"
+
+func kalshiMVEThesis(entryPrice float64) *model.Thesis {
+	return &model.Thesis{
+		ID:         "thesis-mve-fair-value",
+		DeskID:     "kalshi-macro-a",
+		Domain:     "prediction_market",
+		Instrument: model.Instrument{Symbol: mveWrapperTicker, SecType: model.SecTypeKalshi, Currency: "USD"},
+		Direction:  model.Long,
+		Conviction: 0.82,
+		EntryPrice: entryPrice,
+	}
+}
+
+func newMVEFairValueTestExecutor(t *testing.T) *Executor {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markets := map[string]string{
+		mveWrapperTicker:                  `{"market":{"ticker":"` + mveWrapperTicker + `","mve_collection_ticker":"KXMVESPORTSMULTIGAMEEXTENDED","mve_selected_legs":[{"event_ticker":"KXMLBGAME-26JUN262145LADSD","market_ticker":"KXMLBGAME-26JUN262145LADSD-LAD","side":"yes"},{"event_ticker":"KXMLBGAME-26JUN262215ATLSF","market_ticker":"KXMLBGAME-26JUN262215ATLSF-ATL","side":"yes"},{"event_ticker":"KXMLBGAME-26JUN271310NYYBOS","market_ticker":"KXMLBGAME-26JUN271310NYYBOS-NYY","side":"yes"},{"event_ticker":"KXWCGAME-26JUN26NORFRA","market_ticker":"KXWCGAME-26JUN26NORFRA-FRA","side":"yes"}]}}`,
+		"KXMLBGAME-26JUN262145LADSD-LAD":  `{"market":{"ticker":"KXMLBGAME-26JUN262145LADSD-LAD","yes_ask_dollars":"0.5700"}}`,
+		"KXMLBGAME-26JUN262215ATLSF-ATL":  `{"market":{"ticker":"KXMLBGAME-26JUN262215ATLSF-ATL","yes_ask_dollars":"0.6000"}}`,
+		"KXMLBGAME-26JUN271310NYYBOS-NYY": `{"market":{"ticker":"KXMLBGAME-26JUN271310NYYBOS-NYY","yes_ask_dollars":"0.5400"}}`,
+		"KXWCGAME-26JUN26NORFRA-FRA":      `{"market":{"ticker":"KXWCGAME-26JUN26NORFRA-FRA","yes_ask_dollars":"0.6200"}}`,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+		ticker := strings.TrimPrefix(r.URL.Path, "/trade-api/v2/markets/")
+		body, ok := markets[ticker]
+		if !ok {
+			t.Fatalf("unexpected market path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(Config{
+		BaseURL:       server.URL + "/trade-api/v2",
+		KeyID:         "key-id",
+		PrivateKeyPEM: privateKeyPEM(privateKey),
+		MaxOrderCents: 500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewExecutor(client, NewMapper(MapperConfig{MaxOrderCents: 500, MinConviction: 0.65}), ExecutionDryRun, t.TempDir()+"/kalshi-dry.jsonl")
 }
 
 func kalshiPlayerPropThesis(evidence string) *model.Thesis {

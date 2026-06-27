@@ -87,6 +87,40 @@ func TestCreateOrderRequiresLiveConfirmation(t *testing.T) {
 	}
 }
 
+func TestGetMarketUsesTickerEndpoint(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/trade-api/v2/markets/KXMVESPORTSMULTIGAMEEXTENDED-S202601A7277A770-22D4C50549A" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"market":{"ticker":"KXMVESPORTSMULTIGAMEEXTENDED-S202601A7277A770-22D4C50549A","mve_collection_ticker":"KXMVESPORTSMULTIGAMEEXTENDED","mve_selected_legs":[{"event_ticker":"KXMLBGAME-26JUN262145LADSD","market_ticker":"KXMLBGAME-26JUN262145LADSD-LAD","side":"yes"}]}}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:       server.URL + "/trade-api/v2",
+		KeyID:         "key-id",
+		PrivateKeyPEM: privateKeyPEM(privateKey),
+		MaxOrderCents: 200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.GetMarket(context.Background(), "KXMVESPORTSMULTIGAMEEXTENDED-S202601A7277A770-22D4C50549A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Market.MVESelectedLegs) != 1 || resp.Market.MVESelectedLegs[0].MarketTicker != "KXMLBGAME-26JUN262145LADSD-LAD" {
+		t.Fatalf("unexpected market response: %+v", resp)
+	}
+}
+
 func TestCreateOrderUsesCurrentKalshiOrderEndpointAndSchema(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

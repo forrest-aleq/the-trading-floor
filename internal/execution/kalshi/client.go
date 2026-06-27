@@ -144,6 +144,10 @@ type MarketsResponse struct {
 	Cursor  string   `json:"cursor"`
 }
 
+type MarketResponse struct {
+	Market Market `json:"market"`
+}
+
 type Orderbook struct {
 	Yes [][]int64 `json:"yes"`
 	No  [][]int64 `json:"no"`
@@ -360,6 +364,18 @@ func (c *Client) GetMarkets(ctx context.Context, status string, limit int, curso
 	}
 	var out MarketsResponse
 	if err := c.do(ctx, http.MethodGet, "/markets", q, nil, &out, false); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) GetMarket(ctx context.Context, ticker string) (*MarketResponse, error) {
+	ticker = strings.TrimSpace(ticker)
+	if ticker == "" {
+		return nil, fmt.Errorf("ticker required")
+	}
+	var out MarketResponse
+	if err := c.do(ctx, http.MethodGet, "/markets/"+url.PathEscape(ticker), nil, nil, &out, false); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -36,13 +36,14 @@ type Mapper struct {
 }
 
 type MappedOrder struct {
-	Request            OrderRequest `json:"request"`
-	EstimatedRiskCents int64        `json:"estimated_risk_cents"`
-	MaxOrderCents      int64        `json:"max_order_cents"`
-	ThesisID           string       `json:"thesis_id"`
-	DeskID             string       `json:"desk_id"`
-	Direction          string       `json:"direction"`
-	ContractIntent     string       `json:"contract_intent"`
+	Request            OrderRequest        `json:"request"`
+	EstimatedRiskCents int64               `json:"estimated_risk_cents"`
+	MaxOrderCents      int64               `json:"max_order_cents"`
+	ThesisID           string              `json:"thesis_id"`
+	DeskID             string              `json:"desk_id"`
+	Direction          string              `json:"direction"`
+	ContractIntent     string              `json:"contract_intent"`
+	MVEFairValue       *MVEFairValueReport `json:"mve_fair_value,omitempty"`
 }
 
 type Executor struct {
@@ -182,6 +183,11 @@ func (e *Executor) SubmitThesis(ctx context.Context, thesis *model.Thesis) (*Exe
 	mapped, err := e.mapper.MapThesisWithMaxOrderCents(thesis, maxOrderCents)
 	if err != nil {
 		return nil, err
+	}
+	if report, err := e.validateMVEFairValue(ctx, mapped); err != nil {
+		return nil, err
+	} else if report != nil {
+		mapped.MVEFairValue = report
 	}
 	if e.client != nil {
 		validation, err := (&Client{maxOrderCents: maxOrderCents}).ValidateOrder(mapped.Request)

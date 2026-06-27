@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -657,6 +658,9 @@ func main() {
 			refreshCancel()
 
 			for _, update := range updates {
+				if handleBrokerRecoveryWorkingOrderUpdate(ctx, bk, db, update) {
+					continue
+				}
 				desk := desksByID[update.Snapshot.DeskID]
 				if desk == nil {
 					slog.Warn("working order update for unknown desk",
@@ -767,6 +771,14 @@ func main() {
 			fill, err := execMgr.SubmitExit(executionCtx, *exitOrder)
 			cancel()
 			if err != nil {
+				if pending, ok := pendingFillError(err); ok {
+					slog.Info("closing order already working; deferring book close until fill",
+						"position_id", pos.ID,
+						"broker_order_id", pending.OrderID,
+						"broker_status", pending.Status,
+					)
+					return
+				}
 				slog.Error("failed to submit closing order", "position_id", pos.ID, "error", err)
 				return
 			}
@@ -926,6 +938,129 @@ func normalizeClosedAt(pos *model.Position) time.Time {
 		return pos.ClosedAt.UTC()
 	}
 	return time.Now().UTC()
+}
+
+const brokerRecoveryDeskID = "broker-recovery"
+
+func pendingFillError(err error) (*execution.PendingFillError, bool) {
+	var pending *execution.PendingFillError
+	if errors.As(err, &pending) {
+		return pending, true
+	}
+	return nil, false
+}
+
+func handleBrokerRecoveryWorkingOrderUpdate(ctx context.Context, bk *book.Book, db *store.DB, update execution.OrderUpdate) bool {
+	if strings.TrimSpace(update.Snapshot.DeskID) != brokerRecoveryDeskID {
+		return false
+	}
+
+	switch update.Snapshot.State {
+	case execution.OrderStateWorking:
+		return true
+	case execution.OrderStatePartiallyFilled:
+		if update.Snapshot.FilledQuantity > 0 {
+			slog.Warn("broker recovery close order partially filled; awaiting broker position reconciliation",
+				"order_id", update.Snapshot.OrderID,
+				"broker_order_id", update.Snapshot.BrokerOrderID,
+				"filled_quantity", update.Snapshot.FilledQuantity,
+				"remaining_quantity", update.Snapshot.RemainingQuantity,
+				"status", update.Snapshot.BrokerStatus,
+			)
+		}
+		return true
+	case execution.OrderStateFilled:
+		positionID, ok := brokerRecoveryPositionIDFromCloseOrder(update.Snapshot.OrderID)
+		if !ok {
+			slog.Warn("broker recovery close order has unexpected id",
+				"order_id", update.Snapshot.OrderID,
+				"broker_order_id", update.Snapshot.BrokerOrderID,
+			)
+			return true
+		}
+		exitPrice := brokerRecoveryExitPrice(update)
+		if exitPrice <= 0 {
+			slog.Warn("broker recovery close fill missing price",
+				"position_id", positionID,
+				"order_id", update.Snapshot.OrderID,
+				"broker_order_id", update.Snapshot.BrokerOrderID,
+			)
+			return true
+		}
+		outcome, err := bk.ClosePosition(positionID, exitPrice, "broker_recovery_exit_filled")
+		if err != nil {
+			slog.Warn("broker recovery close fill failed",
+				"position_id", positionID,
+				"order_id", update.Snapshot.OrderID,
+				"broker_order_id", update.Snapshot.BrokerOrderID,
+				"error", err,
+			)
+			return true
+		}
+		if outcome == nil {
+			return true
+		}
+		if db != nil {
+			if pos, ok := bk.GetPosition(positionID); ok && pos != nil && pos.ClosedAt != nil {
+				if err := db.UpdatePositionClose(ctx, pos.ID, outcome.RealizedPnL, exitPrice, *pos.ClosedAt); err != nil {
+					slog.Warn("persist broker recovery position close failed", "position_id", pos.ID, "error", err)
+				}
+			}
+		}
+		slog.Info("broker recovery close fill applied to book",
+			"position_id", positionID,
+			"order_id", update.Snapshot.OrderID,
+			"broker_order_id", update.Snapshot.BrokerOrderID,
+			"exit_price", exitPrice,
+			"pnl", outcome.RealizedPnL,
+		)
+		return true
+	case execution.OrderStateCancelled, execution.OrderStateFailed:
+		if update.Snapshot.FilledQuantity > 0 {
+			slog.Warn("broker recovery close order terminal after partial fill; manual reconciliation required",
+				"order_id", update.Snapshot.OrderID,
+				"broker_order_id", update.Snapshot.BrokerOrderID,
+				"state", update.Snapshot.State,
+				"status", update.Snapshot.BrokerStatus,
+				"filled_quantity", update.Snapshot.FilledQuantity,
+				"remaining_quantity", update.Snapshot.RemainingQuantity,
+				"error", update.Snapshot.LastError,
+			)
+			return true
+		}
+		slog.Warn("broker recovery close order terminal without fill",
+			"order_id", update.Snapshot.OrderID,
+			"broker_order_id", update.Snapshot.BrokerOrderID,
+			"state", update.Snapshot.State,
+			"status", update.Snapshot.BrokerStatus,
+			"error", update.Snapshot.LastError,
+		)
+		return true
+	default:
+		return true
+	}
+}
+
+func brokerRecoveryPositionIDFromCloseOrder(orderID string) (string, bool) {
+	orderID = strings.TrimSpace(orderID)
+	if !strings.HasSuffix(orderID, "-close") {
+		return "", false
+	}
+	positionID := strings.TrimSuffix(orderID, "-close")
+	return positionID, positionID != ""
+}
+
+func brokerRecoveryExitPrice(update execution.OrderUpdate) float64 {
+	if update.Fill != nil && update.Fill.AvgPrice > 0 {
+		return update.Fill.AvgPrice
+	}
+	if update.Snapshot.AvgFillPrice > 0 {
+		return update.Snapshot.AvgFillPrice
+	}
+	if update.Snapshot.LastFillPrice > 0 {
+		return update.Snapshot.LastFillPrice
+	}
+	return 0
 }
 
 func startBeliefDecay(ctx context.Context, graph *belief.Graph) {

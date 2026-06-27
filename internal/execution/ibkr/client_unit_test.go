@@ -233,6 +233,45 @@ func TestBuildContractNormalizesETFToStockContract(t *testing.T) {
 	}
 }
 
+func TestNormalizeStockOrderRouteSmartRoutesDirectUSExchange(t *testing.T) {
+	contract := &ibsync.Contract{
+		ConID:           131217639,
+		Symbol:          "BB",
+		SecType:         "STK",
+		Exchange:        "NYSE",
+		PrimaryExchange: "NYSE",
+		Currency:        "USD",
+	}
+
+	normalizeStockOrderRoute(contract)
+
+	if contract.Exchange != "SMART" {
+		t.Fatalf("expected SMART exchange, got %q", contract.Exchange)
+	}
+	if contract.PrimaryExchange != "NYSE" {
+		t.Fatalf("expected NYSE primary exchange, got %q", contract.PrimaryExchange)
+	}
+	if contract.ConID != 131217639 {
+		t.Fatalf("expected conId preserved, got %d", contract.ConID)
+	}
+}
+
+func TestNormalizeStockOrderRouteLeavesNonUSDExchangeAlone(t *testing.T) {
+	contract := &ibsync.Contract{
+		Symbol:          "9984",
+		SecType:         "STK",
+		Exchange:        "TSEJ",
+		PrimaryExchange: "TSEJ",
+		Currency:        "JPY",
+	}
+
+	normalizeStockOrderRoute(contract)
+
+	if contract.Exchange != "TSEJ" {
+		t.Fatalf("expected non-USD exchange unchanged, got %q", contract.Exchange)
+	}
+}
+
 func TestQualifyContractRejectsPredictionMarketInstrument(t *testing.T) {
 	client := &Client{conn: &fakeConnection{}, log: slog.Default()}
 	_, err := client.qualifyContract(context.Background(), model.Instrument{

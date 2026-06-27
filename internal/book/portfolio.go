@@ -1363,10 +1363,13 @@ func (b *Book) applyBrokerRecoveryDeltaLocked(key string, positions []*model.Pos
 			recovery.CurrentPrice = avgCost
 		}
 	}
-	recovery.Instrument.Symbol = firstNonEmptyBookString(recovery.Instrument.Symbol, brokerPos.Symbol)
-	recovery.Instrument.SecType = firstNonEmptyBookString(recovery.Instrument.SecType, brokerPos.SecType)
-	recovery.Instrument.Exchange = firstNonEmptyBookString(recovery.Instrument.Exchange, brokerPos.Exchange)
-	recovery.Instrument.Currency = firstNonEmptyBookString(recovery.Instrument.Currency, brokerPos.Currency)
+	recoveredInst := recoveredBrokerInstrument(brokerPos)
+	recovery.Instrument.Symbol = firstNonEmptyBookString(recovery.Instrument.Symbol, recoveredInst.Symbol)
+	recovery.Instrument.SecType = firstNonEmptyBookString(recovery.Instrument.SecType, recoveredInst.SecType)
+	if strings.TrimSpace(recoveredInst.Exchange) != "" {
+		recovery.Instrument.Exchange = recoveredInst.Exchange
+	}
+	recovery.Instrument.Currency = firstNonEmptyBookString(recovery.Instrument.Currency, recoveredInst.Currency)
 	if brokerPos.ConID > 0 {
 		recovery.Instrument.ConID = brokerPos.ConID
 		recovery.IBKRContractID = brokerPos.ConID
@@ -1379,7 +1382,7 @@ func recoveredBrokerPosition(ip ibkr.IBKRPosition) *model.Position {
 		direction = model.Short
 	}
 	qty := math.Abs(ip.Quantity)
-	inst := model.Instrument{Symbol: ip.Symbol, SecType: ip.SecType, Exchange: ip.Exchange, Currency: ip.Currency, ConID: ip.ConID}
+	inst := recoveredBrokerInstrument(ip)
 	price := ip.AvgCost
 	if mult := inst.MultiplierValue(); mult > 1 && price > 0 {
 		price /= mult
@@ -1399,5 +1402,39 @@ func recoveredBrokerPosition(ip ibkr.IBKRPosition) *model.Position {
 		IBKRContractID: ip.ConID,
 		Status:         "open",
 		OpenedAt:       time.Now().UTC(),
+	}
+}
+
+func recoveredBrokerInstrument(ip ibkr.IBKRPosition) model.Instrument {
+	inst := model.Instrument{
+		Symbol:   strings.TrimSpace(ip.Symbol),
+		SecType:  strings.ToUpper(strings.TrimSpace(ip.SecType)),
+		Exchange: strings.ToUpper(strings.TrimSpace(ip.Exchange)),
+		Currency: strings.ToUpper(strings.TrimSpace(ip.Currency)),
+		ConID:    ip.ConID,
+	}
+	if inst.SecType == "ETF" {
+		inst.SecType = "STK"
+	}
+	if inst.SecType != "" && inst.SecType != "STK" {
+		return inst
+	}
+	if isDirectUSStockExchange(inst.Exchange) && (inst.Currency == "" || inst.Currency == "USD") {
+		inst.Exchange = "SMART"
+		if inst.Currency == "" {
+			inst.Currency = "USD"
+		}
+	}
+	return inst
+}
+
+func isDirectUSStockExchange(exchange string) bool {
+	switch strings.ToUpper(strings.TrimSpace(exchange)) {
+	case "NYSE", "NASDAQ", "ARCA", "NYSEARCA", "AMEX", "NYSEAMEX", "NYSEMKT",
+		"BATS", "BEX", "BYX", "CHX", "EDGEA", "EDGA", "EDGX", "IEX",
+		"ISLAND", "LTSE", "MEMX", "PEARL", "PSX":
+		return true
+	default:
+		return false
 	}
 }

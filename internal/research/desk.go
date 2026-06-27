@@ -286,29 +286,30 @@ func (d *Desk) InvestigateDetailed(ctx context.Context, opp *model.Opportunity, 
 	}
 
 	thesis := &model.Thesis{
-		ID:                 uuid.New().String(),
-		OpportunityID:      opp.ID,
-		DeskID:             deskID,
-		Strategy:           normalizeStrategy(result.Strategy),
-		Structure:          structure,
-		Instrument:         primary,
-		Legs:               legs,
-		Direction:          model.TradeDirection(result.Direction),
-		Conviction:         normalizeResearchConviction(result.Conviction.Float64(), opp),
-		Health:             0.85, // Initial health
-		Evidence:           evidence,
-		CounterArgs:        result.CounterArgs,
-		EntryPrice:         result.EntryPrice.Float64(),
-		TargetPrice:        result.TargetPrice.Float64(),
-		StopLoss:           result.StopLoss.Float64(),
-		PositionSize:       normalizePositionSizePct(result.PositionSizePct.Float64()),
-		TimeHorizon:        time.Duration(result.TimeHorizonHours.Int()) * time.Hour,
-		KillRules:          killRules,
-		Status:             model.ThesisEmbryo,
-		EvidenceMeta:       opp.EvidenceMeta.Clone(),
-		MarketContext:      marketCtx,
-		SurpriseAssessment: buildSurpriseAssessment(result),
-		CreatedAt:          time.Now(),
+		ID:                      uuid.New().String(),
+		OpportunityID:           opp.ID,
+		DeskID:                  deskID,
+		Strategy:                normalizeStrategy(result.Strategy),
+		Structure:               structure,
+		Instrument:              primary,
+		Legs:                    legs,
+		Direction:               model.TradeDirection(result.Direction),
+		Conviction:              normalizeResearchConviction(result.Conviction.Float64(), opp),
+		Health:                  0.85, // Initial health
+		Evidence:                evidence,
+		CounterArgs:             result.CounterArgs,
+		EntryPrice:              result.EntryPrice.Float64(),
+		TargetPrice:             result.TargetPrice.Float64(),
+		StopLoss:                result.StopLoss.Float64(),
+		PositionSize:            normalizePositionSizePct(result.PositionSizePct.Float64()),
+		TimeHorizon:             time.Duration(result.TimeHorizonHours.Int()) * time.Hour,
+		KillRules:               killRules,
+		Status:                  model.ThesisEmbryo,
+		EvidenceMeta:            opp.EvidenceMeta.Clone(),
+		ParticipantAvailability: participantAvailabilityFromKalshiSignal(sig),
+		MarketContext:           marketCtx,
+		SurpriseAssessment:      buildSurpriseAssessment(result),
+		CreatedAt:               time.Now(),
 	}
 
 	d.HydrateThesisPricing(ctx, thesis)
@@ -378,16 +379,17 @@ func (d *Desk) deterministicKalshiInvestigation(ctx context.Context, opp *model.
 			Weight:   1.0,
 			SignalID: firstSignalID(opp),
 		}},
-		CounterArgs:   deterministicKalshiCounterArgs(fastPathMode),
-		EntryPrice:    entryPrice,
-		TargetPrice:   0,
-		StopLoss:      0,
-		PositionSize:  normalizePositionSizePct(0),
-		TimeHorizon:   time.Duration(recoverTimeHorizonHours(opp)) * time.Hour,
-		KillRules:     []model.KillRule{},
-		Status:        model.ThesisEmbryo,
-		EvidenceMeta:  opp.EvidenceMeta.Clone(),
-		MarketContext: marketCtx,
+		CounterArgs:             deterministicKalshiCounterArgs(fastPathMode),
+		EntryPrice:              entryPrice,
+		TargetPrice:             0,
+		StopLoss:                0,
+		PositionSize:            normalizePositionSizePct(0),
+		TimeHorizon:             time.Duration(recoverTimeHorizonHours(opp)) * time.Hour,
+		KillRules:               []model.KillRule{},
+		Status:                  model.ThesisEmbryo,
+		EvidenceMeta:            opp.EvidenceMeta.Clone(),
+		ParticipantAvailability: participantAvailabilityFromKalshiSignal(sig),
+		MarketContext:           marketCtx,
 		SurpriseAssessment: &model.SurpriseAssessment{
 			Summary: deterministicKalshiSummary(fastPathMode),
 		},
@@ -1131,6 +1133,7 @@ type researchSportsAvailability struct {
 	Source     string     `json:"source,omitempty"`
 	League     string     `json:"league,omitempty"`
 	EventID    string     `json:"event_id,omitempty"`
+	EventName  string     `json:"event_name,omitempty"`
 	Player     string     `json:"player,omitempty"`
 	Team       string     `json:"team,omitempty"`
 	Active     *bool      `json:"active,omitempty"`
@@ -1257,6 +1260,7 @@ func formatResearchSportsAvailability(availability *researchSportsAvailability) 
 	appendPart("source", availability.Source)
 	appendPart("league", availability.League)
 	appendPart("event", availability.EventID)
+	appendPart("event_name", availability.EventName)
 	appendPart("player", availability.Player)
 	appendPart("team", availability.Team)
 	if availability.Active != nil {
@@ -1271,6 +1275,31 @@ func formatResearchSportsAvailability(availability *researchSportsAvailability) 
 		appendPart("observed_at", availability.ObservedAt.UTC().Format(time.RFC3339))
 	}
 	return strings.Join(parts, " ")
+}
+
+func participantAvailabilityFromKalshiSignal(sig signal.Signal) *model.ParticipantAvailability {
+	var snap researchKalshiSnapshot
+	if len(sig.Raw) == 0 || json.Unmarshal(sig.Raw, &snap) != nil || snap.SportsAvailability == nil {
+		return nil
+	}
+	availability := snap.SportsAvailability
+	if strings.TrimSpace(availability.Status) == "" {
+		return nil
+	}
+	return &model.ParticipantAvailability{
+		Status:     availability.Status,
+		Source:     availability.Source,
+		League:     availability.League,
+		EventID:    availability.EventID,
+		EventName:  availability.EventName,
+		Player:     availability.Player,
+		Team:       availability.Team,
+		Active:     availability.Active,
+		Starter:    availability.Starter,
+		Position:   availability.Position,
+		Reason:     availability.Reason,
+		ObservedAt: availability.ObservedAt,
+	}
 }
 
 func firstSignalID(opp *model.Opportunity) string {

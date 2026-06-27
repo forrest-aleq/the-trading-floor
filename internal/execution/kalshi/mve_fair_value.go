@@ -19,20 +19,22 @@ type MVEFairValueConfig struct {
 }
 
 type MVEFairValueReport struct {
-	Ticker     string            `json:"ticker"`
-	Side       string            `json:"side"`
-	ComboPrice float64           `json:"combo_price"`
-	FairPrice  float64           `json:"fair_price"`
-	Markup     float64           `json:"markup"`
-	MaxMarkup  float64           `json:"max_markup"`
-	Legs       []MVEFairValueLeg `json:"legs"`
-	Allowed    bool              `json:"allowed"`
-	Reason     string            `json:"reason,omitempty"`
+	Ticker         string                      `json:"ticker"`
+	Side           string                      `json:"side"`
+	ComboPrice     float64                     `json:"combo_price"`
+	FairPrice      float64                     `json:"fair_price"`
+	Markup         float64                     `json:"markup"`
+	MaxMarkup      float64                     `json:"max_markup"`
+	Legs           []MVEFairValueLeg           `json:"legs"`
+	Classification *MVEFairValueClassification `json:"classification,omitempty"`
+	Allowed        bool                        `json:"allowed"`
+	Reason         string                      `json:"reason,omitempty"`
 }
 
 type MVEFairValueLeg struct {
 	EventTicker  string  `json:"event_ticker,omitempty"`
 	MarketTicker string  `json:"market_ticker"`
+	EventKey     string  `json:"event_key,omitempty"`
 	Side         string  `json:"side"`
 	AskPrice     float64 `json:"ask_price"`
 }
@@ -115,6 +117,7 @@ func EvaluateMVEFairValue(ctx context.Context, client mveMarketClient, ticker, s
 	}
 	if cfg.MaxLegs > 0 && len(legs) > cfg.MaxLegs {
 		report.Legs = summarizeMVELegs(legs)
+		report.Classification = classifyMVEFairValueLegs(report.Legs)
 		report.Reason = "kalshi_mve_leg_count_exceeded"
 		return report, nil
 	}
@@ -129,6 +132,7 @@ func EvaluateMVEFairValue(ctx context.Context, client mveMarketClient, ticker, s
 		if err != nil {
 			return nil, fmt.Errorf("kalshi_mve_fair_value_unavailable: leg market %s: %w", legTicker, err)
 		}
+		eventKey := canonicalMVEEventKey(leg, legResp.Market)
 		legSide := strings.ToLower(strings.TrimSpace(leg.Side))
 		ask, ok := legSideAskPrice(legResp.Market, legSide)
 		if !ok {
@@ -138,10 +142,12 @@ func EvaluateMVEFairValue(ctx context.Context, client mveMarketClient, ticker, s
 		report.Legs = append(report.Legs, MVEFairValueLeg{
 			EventTicker:  strings.ToUpper(strings.TrimSpace(leg.EventTicker)),
 			MarketTicker: legTicker,
+			EventKey:     eventKey,
 			Side:         legSide,
 			AskPrice:     ask,
 		})
 	}
+	report.Classification = classifyMVEFairValueLegs(report.Legs)
 
 	fair := selectedFair
 	if side == "no" {
@@ -167,6 +173,7 @@ func summarizeMVELegs(legs []MVESelectedLeg) []MVEFairValueLeg {
 		out = append(out, MVEFairValueLeg{
 			EventTicker:  strings.ToUpper(strings.TrimSpace(leg.EventTicker)),
 			MarketTicker: strings.ToUpper(strings.TrimSpace(leg.MarketTicker)),
+			EventKey:     canonicalMVEEventKey(leg, Market{}),
 			Side:         strings.ToLower(strings.TrimSpace(leg.Side)),
 		})
 	}

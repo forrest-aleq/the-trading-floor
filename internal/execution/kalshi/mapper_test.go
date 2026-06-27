@@ -343,12 +343,54 @@ func TestExecutorRejectsOverpricedMVEWrapperByFairValue(t *testing.T) {
 	t.Setenv(mveMaxMarkupEnv, "0.03")
 	executor := newMVEFairValueTestExecutor(t)
 
-	_, err := executor.SubmitThesis(context.Background(), kalshiMVEThesis(0.232))
+	result, err := executor.SubmitThesis(context.Background(), kalshiMVEThesis(0.232))
 	if err == nil {
 		t.Fatal("expected overpriced MVE wrapper to be rejected")
 	}
 	if !strings.Contains(err.Error(), "kalshi_mve_fair_value_rejected") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil || result.MappedOrder.MVEFairValue == nil {
+		t.Fatalf("expected rejected fair-value report to be returned, got %+v", result)
+	}
+	if result.MappedOrder.MVEFairValue.Reason != "kalshi_mve_fair_value_rejected" {
+		t.Fatalf("unexpected fair-value reason: %+v", result.MappedOrder.MVEFairValue)
+	}
+}
+
+func TestExecutorJournalsMVEFairValueRejection(t *testing.T) {
+	t.Setenv(unsafeAllowMVEWrappersEnv, "true")
+	t.Setenv(mveMaxLegsEnv, "10")
+	t.Setenv(mveMaxMarkupEnv, "0.03")
+	executor := newMVEFairValueTestExecutor(t)
+	path := t.TempDir() + "/kalshi-mve-reject.jsonl"
+	executor.journalPath = path
+
+	result, err := executor.SubmitThesis(context.Background(), kalshiMVEThesis(0.232))
+	if err == nil {
+		t.Fatal("expected overpriced MVE wrapper to be rejected")
+	}
+	if result == nil || result.Error == "" {
+		t.Fatalf("expected failed execution result, got %+v", result)
+	}
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var record struct {
+		Error       string `json:"error"`
+		MappedOrder struct {
+			MVEFairValue *MVEFairValueReport `json:"mve_fair_value"`
+		} `json:"mapped_order"`
+	}
+	if err := json.Unmarshal(raw[:len(raw)-1], &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Error == "" || record.MappedOrder.MVEFairValue == nil {
+		t.Fatalf("expected persisted MVE rejection telemetry, got %+v", record)
+	}
+	if record.MappedOrder.MVEFairValue.Reason != "kalshi_mve_fair_value_rejected" {
+		t.Fatalf("unexpected persisted report: %+v", record.MappedOrder.MVEFairValue)
 	}
 }
 
@@ -364,6 +406,9 @@ func TestExecutorAllowsFairlyPricedMVEWrapperWhenExplicitlyEnabled(t *testing.T)
 	}
 	if result.MappedOrder.MVEFairValue == nil || !result.MappedOrder.MVEFairValue.Allowed {
 		t.Fatalf("expected fair-value report to allow order, got %+v", result.MappedOrder.MVEFairValue)
+	}
+	if result.MappedOrder.MVEFairValue.Classification == nil || result.MappedOrder.MVEFairValue.Classification.Class != MVEClassCrossMatch {
+		t.Fatalf("expected cross-match classification, got %+v", result.MappedOrder.MVEFairValue.Classification)
 	}
 	if got := result.MappedOrder.MVEFairValue.FairPrice; got < 0.114 || got > 0.115 {
 		t.Fatalf("fair price = %.6f, want about 0.1145", got)
@@ -399,7 +444,10 @@ func TestMapThesisRejectsPlayerPropWithoutAvailabilityEvidence(t *testing.T) {
 func TestMapThesisRejectsUnavailablePlayerProp(t *testing.T) {
 	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
 
-	_, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+ | participant_availability: blocked source=espn player=Erling Haaland active=false reason=player_inactive"))
+	thesis := kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+")
+	thesis.ParticipantAvailability = kalshiAvailability("blocked", boolPtr(false), nil)
+	thesis.ParticipantAvailability.Reason = "player_inactive"
+	_, err := mapper.MapThesis(thesis)
 	if err == nil {
 		t.Fatal("expected unavailable player prop to be rejected")
 	}
@@ -408,11 +456,25 @@ func TestMapThesisRejectsUnavailablePlayerProp(t *testing.T) {
 	}
 }
 
+func TestMapThesisRejectsTextOnlyPlayerAvailabilityConfirmation(t *testing.T) {
+	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
+
+	_, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+ | participant_availability: confirmed source=espn league=fifa.world player=Erling Haaland active=true starter=true reason=espn_roster_match"))
+	if err == nil {
+		t.Fatal("expected text-only availability confirmation to be rejected")
+	}
+	if !strings.Contains(err.Error(), "kalshi_participant_availability_unverified") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestMapThesisRejectsConfirmedNonStarterPlayerPropByDefault(t *testing.T) {
 	t.Setenv("KALSHI_SPORTS_REQUIRE_STARTER_FOR_SOCCER_PLAYER_PROPS", "true")
 	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
 
-	_, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+ | participant_availability: confirmed source=espn league=fifa.world player=Erling Haaland active=true starter=false reason=espn_roster_match"))
+	thesis := kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+")
+	thesis.ParticipantAvailability = kalshiAvailability("confirmed", boolPtr(true), boolPtr(false))
+	_, err := mapper.MapThesis(thesis)
 	if err == nil {
 		t.Fatal("expected non-starter player prop to be rejected")
 	}
@@ -425,7 +487,9 @@ func TestMapThesisAllowsConfirmedStartingPlayerProp(t *testing.T) {
 	t.Setenv("KALSHI_SPORTS_REQUIRE_STARTER_FOR_SOCCER_PLAYER_PROPS", "true")
 	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
 
-	mapped, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+ | participant_availability: confirmed source=espn league=fifa.world player=Erling Haaland active=true starter=true reason=espn_roster_match"))
+	thesis := kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+")
+	thesis.ParticipantAvailability = kalshiAvailability("confirmed", boolPtr(true), boolPtr(true))
+	mapped, err := mapper.MapThesis(thesis)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,10 +725,10 @@ func newMVEFairValueTestExecutor(t *testing.T) *Executor {
 	}
 	markets := map[string]string{
 		mveWrapperTicker:                  `{"market":{"ticker":"` + mveWrapperTicker + `","mve_collection_ticker":"KXMVESPORTSMULTIGAMEEXTENDED","mve_selected_legs":[{"event_ticker":"KXMLBGAME-26JUN262145LADSD","market_ticker":"KXMLBGAME-26JUN262145LADSD-LAD","side":"yes"},{"event_ticker":"KXMLBGAME-26JUN262215ATLSF","market_ticker":"KXMLBGAME-26JUN262215ATLSF-ATL","side":"yes"},{"event_ticker":"KXMLBGAME-26JUN271310NYYBOS","market_ticker":"KXMLBGAME-26JUN271310NYYBOS-NYY","side":"yes"},{"event_ticker":"KXWCGAME-26JUN26NORFRA","market_ticker":"KXWCGAME-26JUN26NORFRA-FRA","side":"yes"}]}}`,
-		"KXMLBGAME-26JUN262145LADSD-LAD":  `{"market":{"ticker":"KXMLBGAME-26JUN262145LADSD-LAD","yes_ask_dollars":"0.5700"}}`,
-		"KXMLBGAME-26JUN262215ATLSF-ATL":  `{"market":{"ticker":"KXMLBGAME-26JUN262215ATLSF-ATL","yes_ask_dollars":"0.6000"}}`,
-		"KXMLBGAME-26JUN271310NYYBOS-NYY": `{"market":{"ticker":"KXMLBGAME-26JUN271310NYYBOS-NYY","yes_ask_dollars":"0.5400"}}`,
-		"KXWCGAME-26JUN26NORFRA-FRA":      `{"market":{"ticker":"KXWCGAME-26JUN26NORFRA-FRA","yes_ask_dollars":"0.6200"}}`,
+		"KXMLBGAME-26JUN262145LADSD-LAD":  `{"market":{"ticker":"KXMLBGAME-26JUN262145LADSD-LAD","title":"LA Dodgers vs San Diego: Winner","yes_ask_dollars":"0.5700"}}`,
+		"KXMLBGAME-26JUN262215ATLSF-ATL":  `{"market":{"ticker":"KXMLBGAME-26JUN262215ATLSF-ATL","title":"Atlanta vs San Francisco: Winner","yes_ask_dollars":"0.6000"}}`,
+		"KXMLBGAME-26JUN271310NYYBOS-NYY": `{"market":{"ticker":"KXMLBGAME-26JUN271310NYYBOS-NYY","title":"NY Yankees vs Boston: Winner","yes_ask_dollars":"0.5400"}}`,
+		"KXWCGAME-26JUN26NORFRA-FRA":      `{"market":{"ticker":"KXWCGAME-26JUN26NORFRA-FRA","title":"Norway vs France: Winner","yes_ask_dollars":"0.6200"}}`,
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -706,6 +770,24 @@ func kalshiPlayerPropThesis(evidence string) *model.Thesis {
 			Weight:  1,
 		}},
 	}
+}
+
+func kalshiAvailability(status string, active, starter *bool) *model.ParticipantAvailability {
+	return &model.ParticipantAvailability{
+		Status:  status,
+		Source:  "espn",
+		League:  "fifa.world",
+		EventID: "760475",
+		Player:  "Erling Haaland",
+		Team:    "Norway",
+		Active:  active,
+		Starter: starter,
+		Reason:  "espn_roster_match",
+	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func newLiveOrderTestClient(t *testing.T, orderCalls *int) *Client {

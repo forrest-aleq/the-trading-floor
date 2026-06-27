@@ -16,17 +16,24 @@ func validateParticipantAvailability(thesis *model.Thesis) error {
 	if !looksParticipantDependent(dependenceText) {
 		return nil
 	}
-	normalized := normalizeAvailabilityText(explicitParticipantAvailabilityText(thesis))
-	if hasParticipantAvailabilityBlock(normalized) {
+	availability := thesis.ParticipantAvailability
+	if availability == nil {
+		return fmt.Errorf("kalshi_participant_availability_unverified: player-dependent Kalshi market requires structured ESPN participant availability evidence")
+	}
+	if !strings.EqualFold(strings.TrimSpace(availability.Source), "espn") {
+		return fmt.Errorf("kalshi_participant_availability_unverified: player-dependent Kalshi market requires structured ESPN participant availability evidence")
+	}
+	if participantAvailabilityBlocked(availability) {
 		return fmt.Errorf("kalshi_participant_availability_blocked: player-dependent market has unavailable or unresolved participant evidence")
 	}
-	if requiresParticipantStarter(dependenceText, normalized) && strings.Contains(normalized, "starter=false") {
+	availabilityText := structuredParticipantAvailabilityText(availability)
+	if requiresParticipantStarter(dependenceText, availabilityText) && (availability.Starter == nil || !*availability.Starter) {
 		return fmt.Errorf("kalshi_participant_availability_blocked: player-dependent market requires confirmed starter")
 	}
-	if hasParticipantAvailabilityConfirmation(normalized) {
+	if participantAvailabilityConfirmed(availability) {
 		return nil
 	}
-	return fmt.Errorf("kalshi_participant_availability_unverified: player-dependent Kalshi market requires live participant availability evidence")
+	return fmt.Errorf("kalshi_participant_availability_unverified: player-dependent Kalshi market requires structured ESPN participant availability evidence")
 }
 
 func participantDependenceText(thesis *model.Thesis) string {
@@ -51,51 +58,6 @@ func participantDependenceText(thesis *model.Thesis) string {
 		parts = append(parts, thesis.SurpriseAssessment.Summary)
 	}
 	return strings.Join(parts, " | ")
-}
-
-func explicitParticipantAvailabilityText(thesis *model.Thesis) string {
-	if thesis == nil {
-		return ""
-	}
-	parts := []string{}
-	for _, item := range thesis.Evidence {
-		if isExplicitParticipantAvailability(item.Source, item.Content) {
-			parts = append(parts, item.Source, item.Content)
-		}
-	}
-	if thesis.MarketContext != nil {
-		for _, note := range thesis.MarketContext.Notes {
-			if isExplicitParticipantAvailability("", note) {
-				parts = append(parts, note)
-			}
-		}
-	}
-	return strings.Join(parts, " | ")
-}
-
-func isExplicitParticipantAvailability(source, content string) bool {
-	text := normalizeAvailabilityText(source + " " + content)
-	for _, marker := range []string{
-		"participant_availability:",
-		"participant availability:",
-		"official lineup",
-		"confirmed lineup",
-		"starting xi",
-		"named in squad",
-		"roster match",
-		"espn_roster_match",
-		"source=espn",
-	} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	for _, marker := range []string{"availability", "lineup", "roster"} {
-		if strings.Contains(normalizeAvailabilityText(source), marker) {
-			return true
-		}
-	}
-	return false
 }
 
 func looksParticipantDependent(text string) bool {
@@ -134,55 +96,59 @@ func looksParticipantDependent(text string) bool {
 	return false
 }
 
-func hasParticipantAvailabilityBlock(text string) bool {
-	blocks := []string{
-		"participant_availability: blocked",
-		"participant availability: blocked",
-		"participant_availability: unresolved",
-		"participant availability: unresolved",
-		"active=false",
-		"available=false",
-		"status=out",
-		"status=inactive",
-		"status=suspended",
-		"status=injured",
-		"status=unresolved",
-		"player_not_found",
-		"event_not_found",
-		"not in squad",
-		"not named in squad",
-		"not playing",
-		"ruled out",
-		"scratched",
+func participantAvailabilityBlocked(availability *model.ParticipantAvailability) bool {
+	if availability == nil {
+		return false
+	}
+	status := normalizeAvailabilityText(availability.Status)
+	reason := normalizeAvailabilityText(availability.Reason)
+	for _, blocked := range []string{
+		"blocked",
+		"unresolved",
+		"out",
 		"inactive",
 		"suspended",
-	}
-	for _, block := range blocks {
-		if strings.Contains(text, block) {
+		"injured",
+	} {
+		if status == blocked || strings.Contains(reason, blocked) {
 			return true
 		}
+	}
+	if availability.Active != nil && !*availability.Active {
+		return true
 	}
 	return false
 }
 
-func hasParticipantAvailabilityConfirmation(text string) bool {
-	confirmations := []string{
-		"participant_availability: confirmed",
-		"participant availability: confirmed",
-		"official lineup confirms",
-		"confirmed lineup",
-		"starting xi confirms",
-		"named in starting xi",
-		"named in squad",
-		"active=true",
-		"available=true",
+func participantAvailabilityConfirmed(availability *model.ParticipantAvailability) bool {
+	if availability == nil {
+		return false
 	}
-	for _, confirmation := range confirmations {
-		if strings.Contains(text, confirmation) {
-			return true
-		}
+	if !strings.EqualFold(strings.TrimSpace(availability.Source), "espn") {
+		return false
 	}
-	return false
+	if !strings.EqualFold(strings.TrimSpace(availability.Status), "confirmed") {
+		return false
+	}
+	return availability.Active != nil && *availability.Active
+}
+
+func structuredParticipantAvailabilityText(availability *model.ParticipantAvailability) string {
+	if availability == nil {
+		return ""
+	}
+	parts := []string{
+		"participant_availability: " + strings.ToLower(strings.TrimSpace(availability.Status)),
+		"source=" + strings.ToLower(strings.TrimSpace(availability.Source)),
+		"league=" + strings.ToLower(strings.TrimSpace(availability.League)),
+	}
+	if availability.Active != nil {
+		parts = append(parts, fmt.Sprintf("active=%t", *availability.Active))
+	}
+	if availability.Starter != nil {
+		parts = append(parts, fmt.Sprintf("starter=%t", *availability.Starter))
+	}
+	return strings.Join(parts, " ")
 }
 
 func requiresParticipantStarter(dependenceText, availabilityText string) bool {

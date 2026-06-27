@@ -185,7 +185,18 @@ func (e *Executor) SubmitThesis(ctx context.Context, thesis *model.Thesis) (*Exe
 		return nil, err
 	}
 	if report, err := e.validateMVEFairValue(ctx, mapped); err != nil {
-		return nil, err
+		if report != nil {
+			mapped.MVEFairValue = report
+		}
+		result := &ExecutionResult{
+			Mode:        e.mode,
+			DryRun:      e.mode != ExecutionLive,
+			MappedOrder: mapped,
+			Error:       err.Error(),
+			RecordedAt:  time.Now().UTC(),
+		}
+		_ = e.record(result, err)
+		return result, err
 	} else if report != nil {
 		mapped.MVEFairValue = report
 	}

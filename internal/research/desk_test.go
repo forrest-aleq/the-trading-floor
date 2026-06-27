@@ -997,6 +997,16 @@ func TestDeterministicKalshiEvidenceIncludesSubtitleAndAvailability(t *testing.T
 			t.Fatalf("expected %q in evidence: %s", want, evidence)
 		}
 	}
+	availability := participantAvailabilityFromKalshiSignal(signal.Signal{Raw: raw})
+	if availability == nil {
+		t.Fatal("expected structured participant availability")
+	}
+	if availability.Source != "espn" || availability.League != "fifa.world" || availability.Player != "Erling Haaland" {
+		t.Fatalf("unexpected structured participant availability: %+v", availability)
+	}
+	if availability.Active == nil || !*availability.Active {
+		t.Fatalf("expected active=true in structured participant availability: %+v", availability)
+	}
 }
 
 func TestDeterministicKalshiLiveOverrideInvestigationBypassesLLM(t *testing.T) {

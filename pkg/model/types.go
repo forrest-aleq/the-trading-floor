@@ -341,20 +341,21 @@ type Thesis struct {
 	KillRules []KillRule   `json:"kill_rules"`
 	Status    ThesisStatus `json:"status"`
 
-	AutonomyMode         AutonomyMode        `json:"autonomy_mode,omitempty"`
-	ScanTerritory        string              `json:"scan_territory,omitempty"`
-	ExecutionTerritory   string              `json:"execution_territory,omitempty"`
-	CompetenceKey        string              `json:"competence_key,omitempty"`
-	CompetenceTrust      float64             `json:"competence_trust,omitempty"`
-	CompetenceConfidence float64             `json:"competence_confidence,omitempty"`
-	CollaborationInput   *CollaborationInput `json:"collaboration_input,omitempty"`
-	EvidenceMeta         *evidence.Metadata  `json:"evidence_meta,omitempty"`
-	MarketContext        *MarketContext      `json:"market_context,omitempty"`
-	QuantMetrics         *QuantMetrics       `json:"quant_metrics,omitempty"`
-	SurpriseAssessment   *SurpriseAssessment `json:"surprise_assessment,omitempty"`
-	Prosecution          *Prosecution        `json:"prosecution,omitempty"`
-	CouncilVerdict       *CouncilVerdict     `json:"council_verdict,omitempty"`
-	Outcome              *ThesisOutcome      `json:"outcome,omitempty"`
+	AutonomyMode            AutonomyMode             `json:"autonomy_mode,omitempty"`
+	ScanTerritory           string                   `json:"scan_territory,omitempty"`
+	ExecutionTerritory      string                   `json:"execution_territory,omitempty"`
+	CompetenceKey           string                   `json:"competence_key,omitempty"`
+	CompetenceTrust         float64                  `json:"competence_trust,omitempty"`
+	CompetenceConfidence    float64                  `json:"competence_confidence,omitempty"`
+	CollaborationInput      *CollaborationInput      `json:"collaboration_input,omitempty"`
+	EvidenceMeta            *evidence.Metadata       `json:"evidence_meta,omitempty"`
+	ParticipantAvailability *ParticipantAvailability `json:"participant_availability,omitempty"`
+	MarketContext           *MarketContext           `json:"market_context,omitempty"`
+	QuantMetrics            *QuantMetrics            `json:"quant_metrics,omitempty"`
+	SurpriseAssessment      *SurpriseAssessment      `json:"surprise_assessment,omitempty"`
+	Prosecution             *Prosecution             `json:"prosecution,omitempty"`
+	CouncilVerdict          *CouncilVerdict          `json:"council_verdict,omitempty"`
+	Outcome                 *ThesisOutcome           `json:"outcome,omitempty"`
 
 	CreatedAt  time.Time  `json:"created_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
@@ -365,6 +366,21 @@ type Evidence struct {
 	Content  string  `json:"content"`
 	Weight   float64 `json:"weight"`
 	SignalID string  `json:"signal_id,omitempty"`
+}
+
+type ParticipantAvailability struct {
+	Status     string     `json:"status,omitempty"`
+	Source     string     `json:"source,omitempty"`
+	League     string     `json:"league,omitempty"`
+	EventID    string     `json:"event_id,omitempty"`
+	EventName  string     `json:"event_name,omitempty"`
+	Player     string     `json:"player,omitempty"`
+	Team       string     `json:"team,omitempty"`
+	Active     *bool      `json:"active,omitempty"`
+	Starter    *bool      `json:"starter,omitempty"`
+	Position   string     `json:"position,omitempty"`
+	Reason     string     `json:"reason,omitempty"`
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
 }
 
 type KillRule struct {

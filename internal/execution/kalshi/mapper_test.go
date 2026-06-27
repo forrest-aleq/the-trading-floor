@@ -340,10 +340,24 @@ func TestMapThesisRejectsUnavailablePlayerProp(t *testing.T) {
 	}
 }
 
-func TestMapThesisAllowsConfirmedPlayerProp(t *testing.T) {
+func TestMapThesisRejectsConfirmedNonStarterPlayerPropByDefault(t *testing.T) {
+	t.Setenv("KALSHI_SPORTS_REQUIRE_STARTER_FOR_SOCCER_PLAYER_PROPS", "true")
 	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
 
-	mapped, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+ | participant_availability: confirmed source=espn player=Erling Haaland active=true starter=false reason=espn_roster_match"))
+	_, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+ | participant_availability: confirmed source=espn league=fifa.world player=Erling Haaland active=true starter=false reason=espn_roster_match"))
+	if err == nil {
+		t.Fatal("expected non-starter player prop to be rejected")
+	}
+	if !strings.Contains(err.Error(), "requires confirmed starter") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMapThesisAllowsConfirmedStartingPlayerProp(t *testing.T) {
+	t.Setenv("KALSHI_SPORTS_REQUIRE_STARTER_FOR_SOCCER_PLAYER_PROPS", "true")
+	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
+
+	mapped, err := mapper.MapThesis(kalshiPlayerPropThesis("Norway vs France: Goalscorer | Erling Haaland: 1+ | participant_availability: confirmed source=espn league=fifa.world player=Erling Haaland active=true starter=true reason=espn_roster_match"))
 	if err != nil {
 		t.Fatal(err)
 	}

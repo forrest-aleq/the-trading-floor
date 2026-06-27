@@ -20,6 +20,9 @@ func validateParticipantAvailability(thesis *model.Thesis) error {
 	if hasParticipantAvailabilityBlock(normalized) {
 		return fmt.Errorf("kalshi_participant_availability_blocked: player-dependent market has unavailable or unresolved participant evidence")
 	}
+	if requiresParticipantStarter(dependenceText, normalized) && strings.Contains(normalized, "starter=false") {
+		return fmt.Errorf("kalshi_participant_availability_blocked: player-dependent market requires confirmed starter")
+	}
 	if hasParticipantAvailabilityConfirmation(normalized) {
 		return nil
 	}
@@ -176,6 +179,47 @@ func hasParticipantAvailabilityConfirmation(text string) bool {
 	}
 	for _, confirmation := range confirmations {
 		if strings.Contains(text, confirmation) {
+			return true
+		}
+	}
+	return false
+}
+
+func requiresParticipantStarter(dependenceText, availabilityText string) bool {
+	if !readBoolEnv("KALSHI_SPORTS_REQUIRE_STARTER_FOR_SOCCER_PLAYER_PROPS", true) {
+		return false
+	}
+	if !hasSoccerAvailabilityEvidence(availabilityText) {
+		return false
+	}
+	text := normalizeAvailabilityText(dependenceText)
+	for _, term := range []string{
+		"goalscorer",
+		"goal scorer",
+		"shots on target",
+		"player assists",
+	} {
+		if strings.Contains(text, term) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSoccerAvailabilityEvidence(text string) bool {
+	text = normalizeAvailabilityText(text)
+	for _, marker := range []string{
+		"league=fifa.",
+		"league=uefa.",
+		"league=eng.1",
+		"league=esp.1",
+		"league=ita.1",
+		"league=ger.1",
+		"league=fra.1",
+		"league=usa.1",
+		"sport=soccer",
+	} {
+		if strings.Contains(text, marker) {
 			return true
 		}
 	}

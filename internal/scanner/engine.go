@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hnic/trading-floor/internal/execution/kalshi"
 	"github.com/hnic/trading-floor/internal/institutional"
 	"github.com/hnic/trading-floor/internal/llm"
 	"github.com/hnic/trading-floor/pkg/model"
@@ -538,6 +539,9 @@ func (e *Engine) evaluateKalshiMarketDiscovery(sig signal.Signal, domain string)
 	ticker := strings.ToUpper(strings.TrimSpace(market.Ticker))
 	if !model.IsKalshiTicker(ticker) {
 		return Evaluation{Reason: "no_instruments", Tradeable: true}, true
+	}
+	if kalshi.ShouldBlockMultivariateTicker(ticker) {
+		return Evaluation{Reason: "kalshi_mve_wrapper_blocked", Tradeable: true}, true
 	}
 	if !kalshiMarketDiscoveryStatusTradable(market.Status) {
 		return Evaluation{Reason: "kalshi_market_not_open", Tradeable: true}, true

@@ -947,6 +947,47 @@ func TestEvaluateDetailedDiscoversKalshiMarketSnapshotWhenEnabled(t *testing.T) 
 	}
 }
 
+func TestEvaluateDetailedRejectsMVEWrapperKalshiMarketDiscovery(t *testing.T) {
+	restoreScannerRuntimeConfig(t)
+	t.Setenv("KALSHI_MARKET_DISCOVERY_ENABLED", "true")
+	t.Setenv("KALSHI_UNSAFE_ALLOW_MVE_WRAPPERS", "false")
+	ReloadRuntimeConfig()
+
+	client := &scannerErrorClient{err: fmt.Errorf("LLM should not be called")}
+	engine := NewEngine(llm.NewRouter(client, client, client), 50)
+
+	result := engine.EvaluateDetailed(context.Background(), signal.Signal{
+		ID:        "sig-kalshi-mve",
+		Source:    "kalshi-market",
+		Type:      signal.TypeAlternative,
+		Category:  "prediction_market",
+		Timestamp: time.Now(),
+		Urgency:   0.65,
+		Raw: []byte(`{
+			"ticker":"KXMVESPORTSMULTIGAMEEXTENDED-S202601A7277A770-22D4C50549A",
+			"title":"LA Dodgers, Atlanta, NY Yankees, France all win",
+			"status":"active",
+			"yes_bid_dollars":"0.2200",
+			"yes_ask_dollars":"0.2400",
+			"mve_selected_legs":[
+				{"event_ticker":"KXMLBGAME-26JUN262145LADSD","market_ticker":"KXMLBGAME-26JUN262145LADSD-LAD","side":"yes"}
+			]
+		}`),
+	}, "prediction_market")
+	if result.Accepted {
+		t.Fatalf("expected MVE wrapper reject, got %+v", result)
+	}
+	if result.Reason != "kalshi_mve_wrapper_blocked" {
+		t.Fatalf("reason = %q", result.Reason)
+	}
+	if !result.Tradeable {
+		t.Fatal("expected tradeable=true to distinguish a wrapper-policy reject from scanner noise")
+	}
+	if client.requests != 0 {
+		t.Fatalf("expected no LLM call for blocked MVE wrapper, got %d", client.requests)
+	}
+}
+
 func TestEvaluateDetailedRejectsWideKalshiMarketDiscoverySpread(t *testing.T) {
 	restoreScannerRuntimeConfig(t)
 	t.Setenv("KALSHI_MARKET_DISCOVERY_ENABLED", "true")

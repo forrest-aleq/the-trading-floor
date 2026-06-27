@@ -116,6 +116,10 @@ func (f *KalshiFeed) fetchAndSend(ctx context.Context, out chan<- signal.Signal)
 		if strings.TrimSpace(market.Ticker) == "" {
 			continue
 		}
+		if kalshi.ShouldBlockMultivariateTicker(market.Ticker) {
+			f.log.Debug("kalshi MVE wrapper skipped", "ticker", market.Ticker)
+			continue
+		}
 		if !kalshiMarketHasActionablePrice(market) {
 			continue
 		}

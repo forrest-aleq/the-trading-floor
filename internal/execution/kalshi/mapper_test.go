@@ -316,6 +316,27 @@ func TestMapThesisRejectsNonKalshiTicker(t *testing.T) {
 	}
 }
 
+func TestMapThesisRejectsMultivariateWrapperTicker(t *testing.T) {
+	t.Setenv(unsafeAllowMVEWrappersEnv, "false")
+	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
+
+	_, err := mapper.MapThesis(&model.Thesis{
+		ID:         "thesis-mve",
+		DeskID:     "kalshi-macro-a",
+		Domain:     "prediction_market",
+		Instrument: model.Instrument{Symbol: "KXMVESPORTSMULTIGAMEEXTENDED-S202601A7277A770-22D4C50549A", SecType: model.SecTypeKalshi, Currency: "USD"},
+		Direction:  model.Long,
+		Conviction: 0.82,
+		EntryPrice: 0.24,
+	})
+	if err == nil {
+		t.Fatal("expected MVE wrapper ticker to be rejected")
+	}
+	if !strings.Contains(err.Error(), "kalshi_mve_wrapper_blocked") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestMapThesisRejectsPlayerPropWithoutAvailabilityEvidence(t *testing.T) {
 	mapper := NewMapper(MapperConfig{MaxOrderCents: 200, MinConviction: 0.65})
 

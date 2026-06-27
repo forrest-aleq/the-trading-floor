@@ -116,19 +116,27 @@ type ExchangeStatus struct {
 }
 
 type Market struct {
-	Ticker           string `json:"ticker"`
-	EventTicker      string `json:"event_ticker"`
-	MarketType       string `json:"market_type"`
-	Title            string `json:"title"`
-	Subtitle         string `json:"subtitle"`
-	Status           string `json:"status"`
-	YesBidDollars    string `json:"yes_bid_dollars"`
-	YesAskDollars    string `json:"yes_ask_dollars"`
-	NoBidDollars     string `json:"no_bid_dollars"`
-	NoAskDollars     string `json:"no_ask_dollars"`
-	LastPriceDollars string `json:"last_price_dollars"`
-	CloseTime        string `json:"close_time"`
-	ExpirationTime   string `json:"expiration_time"`
+	Ticker              string           `json:"ticker"`
+	EventTicker         string           `json:"event_ticker"`
+	MarketType          string           `json:"market_type"`
+	Title               string           `json:"title"`
+	Subtitle            string           `json:"subtitle"`
+	Status              string           `json:"status"`
+	YesBidDollars       string           `json:"yes_bid_dollars"`
+	YesAskDollars       string           `json:"yes_ask_dollars"`
+	NoBidDollars        string           `json:"no_bid_dollars"`
+	NoAskDollars        string           `json:"no_ask_dollars"`
+	LastPriceDollars    string           `json:"last_price_dollars"`
+	CloseTime           string           `json:"close_time"`
+	ExpirationTime      string           `json:"expiration_time"`
+	MVECollectionTicker string           `json:"mve_collection_ticker,omitempty"`
+	MVESelectedLegs     []MVESelectedLeg `json:"mve_selected_legs,omitempty"`
+}
+
+type MVESelectedLeg struct {
+	EventTicker  string `json:"event_ticker,omitempty"`
+	MarketTicker string `json:"market_ticker,omitempty"`
+	Side         string `json:"side,omitempty"`
 }
 
 type MarketsResponse struct {

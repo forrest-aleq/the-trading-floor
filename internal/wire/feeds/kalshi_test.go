@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hnic/trading-floor/internal/execution/kalshi"
+	"github.com/hnic/trading-floor/pkg/signal"
 )
 
 type stubKalshiMarketClient struct {
@@ -99,5 +100,58 @@ func TestMarshalKalshiMarketSignalRawIncludesSportsAvailability(t *testing.T) {
 	}
 	if payload.SportsAvailability.Active == nil || !*payload.SportsAvailability.Active {
 		t.Fatalf("expected active availability payload: %+v", payload.SportsAvailability)
+	}
+}
+
+func TestMarshalKalshiMarketSignalRawPreservesMVELegs(t *testing.T) {
+	raw, err := marshalKalshiMarketSignalRaw(kalshi.Market{
+		Ticker:              "KXMVESPORTSMULTIGAMEEXTENDED-S202601A7277A770-22D4C50549A",
+		MVECollectionTicker: "KXMVESPORTSMULTIGAMEEXTENDED",
+		MVESelectedLegs: []kalshi.MVESelectedLeg{{
+			EventTicker:  "KXMLBGAME-26JUN262145LADSD",
+			MarketTicker: "KXMLBGAME-26JUN262145LADSD-LAD",
+			Side:         "yes",
+		}},
+	}, SportsAvailabilityEvidence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Ticker              string                  `json:"ticker"`
+		MVECollectionTicker string                  `json:"mve_collection_ticker"`
+		MVESelectedLegs     []kalshi.MVESelectedLeg `json:"mve_selected_legs"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.MVECollectionTicker != "KXMVESPORTSMULTIGAMEEXTENDED" || len(payload.MVESelectedLegs) != 1 {
+		t.Fatalf("expected MVE leg metadata to survive raw marshal, got %+v", payload)
+	}
+	if payload.MVESelectedLegs[0].MarketTicker != "KXMLBGAME-26JUN262145LADSD-LAD" || payload.MVESelectedLegs[0].Side != "yes" {
+		t.Fatalf("unexpected MVE leg payload: %+v", payload.MVESelectedLegs[0])
+	}
+}
+
+func TestKalshiFeedSkipsMVEWrappersByDefault(t *testing.T) {
+	t.Setenv("KALSHI_UNSAFE_ALLOW_MVE_WRAPPERS", "false")
+	client := &stubKalshiMarketClient{responses: map[string]*kalshi.MarketsResponse{
+		"": {
+			Markets: []kalshi.Market{
+				{Ticker: "KXMVESPORTSMULTIGAMEEXTENDED-S202601A7277A770-22D4C50549A", YesAskDollars: "0.2400"},
+				{Ticker: "KXFEDCUT-26", YesAskDollars: "0.4200"},
+			},
+		},
+	}}
+	feed := NewKalshiFeed(client)
+	out := make(chan signal.Signal, 2)
+
+	feed.fetchAndSend(context.Background(), out)
+
+	if got := len(out); got != 1 {
+		t.Fatalf("expected one non-MVE signal, got %d", got)
+	}
+	got := <-out
+	if got.Entities[0].ID != "KXFEDCUT-26" {
+		t.Fatalf("unexpected signal emitted: %+v", got)
 	}
 }

@@ -298,6 +298,9 @@ func (m *Mapper) MapThesisWithMaxOrderCents(thesis *model.Thesis, maxOrderCents 
 	if !strings.HasPrefix(ticker, "KX") {
 		return MappedOrder{}, fmt.Errorf("refusing non-Kalshi ticker %q", ticker)
 	}
+	if ShouldBlockMultivariateTicker(ticker) {
+		return MappedOrder{}, fmt.Errorf("kalshi_mve_wrapper_blocked: refusing multivariate wrapper %q without fair-value validation", ticker)
+	}
 
 	entryPrice := kalshiEntryPrice(thesis)
 	if entryPrice <= 0 || entryPrice >= 1 {

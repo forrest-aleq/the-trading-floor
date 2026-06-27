@@ -121,6 +121,46 @@ func TestGetMarketUsesTickerEndpoint(t *testing.T) {
 	}
 }
 
+func TestGetMarketsWithMVEFilterUsesQuery(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/trade-api/v2/markets" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("mve_filter"); got != "exclude" {
+			t.Fatalf("mve_filter = %q, want exclude", got)
+		}
+		if got := r.URL.Query().Get("status"); got != "open" {
+			t.Fatalf("status = %q, want open", got)
+		}
+		_, _ = w.Write([]byte(`{"markets":[{"ticker":"KXFEDCUT-26"}],"cursor":""}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:       server.URL + "/trade-api/v2",
+		KeyID:         "key-id",
+		PrivateKeyPEM: privateKeyPEM(privateKey),
+		MaxOrderCents: 200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.GetMarketsWithMVEFilter(context.Background(), "open", 250, "", "exclude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Markets) != 1 || resp.Markets[0].Ticker != "KXFEDCUT-26" {
+		t.Fatalf("unexpected markets response: %+v", resp)
+	}
+}
+
 func TestCreateOrderUsesCurrentKalshiOrderEndpointAndSchema(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

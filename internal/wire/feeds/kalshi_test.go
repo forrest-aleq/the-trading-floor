@@ -14,6 +14,7 @@ type stubKalshiMarketClient struct {
 	responses map[string]*kalshi.MarketsResponse
 	cursors   []string
 	limits    []int
+	filters   []string
 }
 
 func (s *stubKalshiMarketClient) GetMarkets(_ context.Context, _ string, limit int, cursor string) (*kalshi.MarketsResponse, error) {
@@ -22,7 +23,13 @@ func (s *stubKalshiMarketClient) GetMarkets(_ context.Context, _ string, limit i
 	return s.responses[cursor], nil
 }
 
+func (s *stubKalshiMarketClient) GetMarketsWithMVEFilter(_ context.Context, _ string, limit int, cursor string, mveFilter string) (*kalshi.MarketsResponse, error) {
+	s.filters = append(s.filters, mveFilter)
+	return s.GetMarkets(context.Background(), "open", limit, cursor)
+}
+
 func TestKalshiFeedPaginatesOpenMarkets(t *testing.T) {
+	t.Setenv("KALSHI_UNSAFE_ALLOW_MVE_WRAPPERS", "false")
 	client := &stubKalshiMarketClient{responses: map[string]*kalshi.MarketsResponse{
 		"": {
 			Markets: []kalshi.Market{{Ticker: "KXONE"}},
@@ -49,9 +56,13 @@ func TestKalshiFeedPaginatesOpenMarkets(t *testing.T) {
 	if client.limits[0] != 2 || client.limits[1] != 2 {
 		t.Fatalf("unexpected limits: %+v", client.limits)
 	}
+	if len(client.filters) != 2 || client.filters[0] != "exclude" || client.filters[1] != "exclude" {
+		t.Fatalf("expected MVE exclusion filter on every page, got %+v", client.filters)
+	}
 }
 
 func TestKalshiFeedRespectsMaxPages(t *testing.T) {
+	t.Setenv("KALSHI_UNSAFE_ALLOW_MVE_WRAPPERS", "false")
 	client := &stubKalshiMarketClient{responses: map[string]*kalshi.MarketsResponse{
 		"": {
 			Markets: []kalshi.Market{{Ticker: "KXONE"}},
@@ -67,6 +78,9 @@ func TestKalshiFeedRespectsMaxPages(t *testing.T) {
 	}
 	if pages != 1 || cursor != "next" || len(markets) != 1 {
 		t.Fatalf("unexpected capped result: pages=%d cursor=%q markets=%+v", pages, cursor, markets)
+	}
+	if len(client.filters) != 1 || client.filters[0] != "exclude" {
+		t.Fatalf("expected MVE exclusion filter, got %+v", client.filters)
 	}
 }
 

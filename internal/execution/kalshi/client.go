@@ -352,6 +352,10 @@ func (c *Client) GetExchangeStatus(ctx context.Context) (*ExchangeStatus, error)
 }
 
 func (c *Client) GetMarkets(ctx context.Context, status string, limit int, cursor string) (*MarketsResponse, error) {
+	return c.GetMarketsWithMVEFilter(ctx, status, limit, cursor, "")
+}
+
+func (c *Client) GetMarketsWithMVEFilter(ctx context.Context, status string, limit int, cursor string, mveFilter string) (*MarketsResponse, error) {
 	q := url.Values{}
 	if strings.TrimSpace(status) != "" {
 		q.Set("status", strings.TrimSpace(status))
@@ -361,6 +365,9 @@ func (c *Client) GetMarkets(ctx context.Context, status string, limit int, curso
 	}
 	if strings.TrimSpace(cursor) != "" {
 		q.Set("cursor", strings.TrimSpace(cursor))
+	}
+	if strings.TrimSpace(mveFilter) != "" {
+		q.Set("mve_filter", strings.TrimSpace(mveFilter))
 	}
 	var out MarketsResponse
 	if err := c.do(ctx, http.MethodGet, "/markets", q, nil, &out, false); err != nil {

@@ -28,6 +28,10 @@ type kalshiMarketClient interface {
 	GetMarkets(ctx context.Context, status string, limit int, cursor string) (*kalshi.MarketsResponse, error)
 }
 
+type kalshiMVEFilteredMarketClient interface {
+	GetMarketsWithMVEFilter(ctx context.Context, status string, limit int, cursor string, mveFilter string) (*kalshi.MarketsResponse, error)
+}
+
 type SportsAvailabilityProvider interface {
 	CheckMarket(ctx context.Context, market kalshi.Market, now time.Time) SportsAvailabilityEvidence
 }
@@ -182,7 +186,7 @@ func (f *KalshiFeed) fetchOpenMarkets(ctx context.Context) ([]kalshi.Market, int
 	cursor := ""
 	pages := 0
 	for pages < maxPages {
-		resp, err := f.client.GetMarkets(ctx, "open", limit, cursor)
+		resp, err := f.fetchOpenMarketsPage(ctx, limit, cursor)
 		if err != nil {
 			return nil, pages, cursor, err
 		}
@@ -198,6 +202,20 @@ func (f *KalshiFeed) fetchOpenMarkets(ctx context.Context) ([]kalshi.Market, int
 		}
 	}
 	return markets, pages, cursor, nil
+}
+
+func (f *KalshiFeed) fetchOpenMarketsPage(ctx context.Context, limit int, cursor string) (*kalshi.MarketsResponse, error) {
+	if filtered, ok := f.client.(kalshiMVEFilteredMarketClient); ok {
+		return filtered.GetMarketsWithMVEFilter(ctx, "open", limit, cursor, kalshiFeedMVEFilter())
+	}
+	return f.client.GetMarkets(ctx, "open", limit, cursor)
+}
+
+func kalshiFeedMVEFilter() string {
+	if kalshi.UnsafeAllowMVEWrappers() {
+		return ""
+	}
+	return "exclude"
 }
 
 func kalshiMarketHasActionablePrice(market kalshi.Market) bool {

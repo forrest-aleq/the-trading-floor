@@ -40,6 +40,7 @@ const (
 	DefaultCloudSpeedModel    = "z-ai/glm-5.2"
 	DefaultCloudAnalysisModel = "z-ai/glm-5.2"
 	DefaultCloudCriticalModel = "moonshotai/kimi-k2.7-code"
+	DefaultCloudQwenModel     = "qwen/qwen3.7-max"
 )
 
 type ProviderRouting struct {
@@ -573,6 +574,7 @@ func defaultOpenRouterFallbackModels(baseURL, primaryModel string) []string {
 		"minimax/minimax-m3",
 		"deepseek/deepseek-v4-pro",
 		"z-ai/glm-5.1",
+		DefaultCloudQwenModel,
 	}, primaryModel)
 }
 
